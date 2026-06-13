@@ -154,6 +154,12 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 | src/abstract_hardware_model.h | GPU 추상 하드웨어 모델 헤더 전체 (inst_t, warp_inst_t, core_t, register_set, 메모리 상수/구조체) | 2026-06-13 |
 | src/abstract_hardware_model.cc | GPU 추상 하드웨어 모델 구현 (generate_mem_accesses, coalescing, simt_stack::update, kernel_info_t, core_t) | 2026-06-13 |
+| src/gpgpu-sim/dram_sched.h | FR-FCFS DRAM 스케줄러 헤더 (frfcfs_scheduler 클래스, memory_mode enum, 모든 private 필드) | 2026-06-13 |
+| src/gpgpu-sim/dram_sched.cc | FR-FCFS DRAM 스케줄러 구현 (생성자, add_req, data_collection, schedule, dram_t::scheduler_frfcfs) | 2026-06-13 |
+| src/gpgpu-sim/icnt_wrapper.h | ICNT 래퍼 헤더 (함수 포인터 타입, 전역 포인터 extern, network_mode enum, icnt_wrapper_init/icnt_reg_options 선언) | 2026-06-13 |
+| src/gpgpu-sim/icnt_wrapper.cc | ICNT 래퍼 구현 (intersim2_*, LocalInterconnect_* 래퍼 static 함수, icnt_reg_options, icnt_wrapper_init) | 2026-06-13 |
+| src/gpgpu-sim/local_interconnect.h | 로컬 인터커넥트 헤더 (inct_config, xbar_router, LocalInterconnect 전체 선언 및 필드) | 2026-06-13 |
+| src/gpgpu-sim/local_interconnect.cc | 로컬 인터커넥트 구현 (xbar_router 생성자, Push/Pop/Advance, RR_Advance, iSLIP_Advance, LocalInterconnect 전체) | 2026-06-13 |
 
 ### 미완료 (우선순위 순)
 
@@ -162,7 +168,6 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/shader.* | SM 파이프라인 (핵심) | P0 |
 | src/gpgpu-sim/gpu-sim.* | cycle-by-cycle 시뮬레이션 루프 | P0 |
 | src/gpgpu-sim/gpu-cache.* | 캐시 계층 | P0 |
-| src/gpgpu-sim/dram_sched.* | FR-FCFS DRAM 스케줄러 | P0 |
 | src/cuda-sim/ptx_ir.*, instructions.cc | PTX IR 및 명령어 시맨틱 | P1 |
 | src/cuda-sim/cuda-math.h | CUDA 수학 에뮬레이션 | P1 |
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
