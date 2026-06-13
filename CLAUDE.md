@@ -129,7 +129,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 ## 주석 작업 진행 현황
 
-### 완료 (20 파일)
+### 완료 (24 파일)
 
 | 파일 | 설명 | 완료일 |
 |------|------|--------|
@@ -160,6 +160,10 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/icnt_wrapper.cc | ICNT 래퍼 구현 (intersim2_*, LocalInterconnect_* 래퍼 static 함수, icnt_reg_options, icnt_wrapper_init) | 2026-06-13 |
 | src/gpgpu-sim/local_interconnect.h | 로컬 인터커넥트 헤더 (inct_config, xbar_router, LocalInterconnect 전체 선언 및 필드) | 2026-06-13 |
 | src/gpgpu-sim/local_interconnect.cc | 로컬 인터커넥트 구현 (xbar_router 생성자, Push/Pop/Advance, RR_Advance, iSLIP_Advance, LocalInterconnect 전체) | 2026-06-13 |
+| src/gpgpusim_entrypoint.h | 시뮬레이터 진입점 헤더 (GPGPUsim_ctx 클래스, 전체 필드 주석) | 2026-06-13 |
+| src/gpgpusim_entrypoint.cc | 시뮬레이터 진입점 구현 (init/thread/sync/SST 전체 함수 주석) | 2026-06-13 |
+| src/stream_manager.h | CUDA 스트림 관리 헤더 (CUevent_st, stream_operation, CUstream_st, stream_manager) | 2026-06-13 |
+| src/stream_manager.cc | CUDA 스트림 관리 구현 (push/front/operation/register_finished_kernel 등 전체 주석) | 2026-06-13 |
 
 ### 미완료 (우선순위 순)
 
@@ -173,7 +177,6 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
 | src/accelwattch/ | 전력 모델 | P2 |
 | libcuda/, libopencl/ | 런타임 인터셉트 | P2 |
-| src/gpgpusim_entrypoint.*, stream_manager.* | 진입점/스트림 관리 | P1 |
 
 ## 빌드 방법
 

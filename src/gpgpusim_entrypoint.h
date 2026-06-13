@@ -1,56 +1,67 @@
 /*
- * ============================================================================
- * 파일 이름: gpgpusim_entrypoint.h
- * ============================================================================
- * 이 파일은 GPGPU-Sim 시뮬레이터의 "진입점(entrypoint)" 헤더 파일입니다.
+ * [한국어 설명] GPGPU-Sim 시뮬레이터 진입점 헤더 (gpgpusim_entrypoint.h)
  *
- * "진입점"이란?
- *   프로그램이 시작되는 곳을 말합니다. 이 파일은 GPU 시뮬레이션을
- *   시작하고 관리하는 데 필요한 핵심 데이터(변수)들을 모아놓은 클래스를
- *   정의합니다.
+ * === 파일의 역할 ===
+ * 이 파일은 GPGPUsim_ctx 클래스를 정의하며, GPGPU-Sim 시뮬레이터의
+ * 전체 생명주기(초기화 → 실행 → 동기화 → 종료)에 필요한 상태 변수들을
+ * 하나의 구조로 묶는다. 이 클래스는 "시뮬레이터 제어 블록"으로, 시뮬레이션
+ * 쓰레드와 호스트 쓰레드 사이의 동기화 객체(세마포어, 뮤텍스), 시뮬레이터의
+ * 실행 상태 플래그(g_sim_active, g_sim_done, break_limit), 그리고 핵심 서브시스템
+ * (GPU 시뮬레이터, 스트림 관리자, CUDA 디바이스/컨텍스트)의 포인터를 보관한다.
  *
- * "헤더 파일(.h)"이란?
- *   C++에서 클래스나 함수의 "설계도"를 담는 파일입니다.
- *   실제 동작하는 코드는 .cc 파일에 있고, 여기서는 "이런 것들이 있다"고
- *   선언(declaration)만 합니다.
+ * === 전체 아키텍처에서의 위치 ===
+ * 이 클래스는 CUDA 애플리케이션과 GPGPU-Sim 내부 시뮬레이션 엔진 사이의
+ * "중간 관제탑" 역할을 한다:
+ *   CUDA Application
+ *     → libcuda (libcuda/cuda_runtime_api.cc) — CUDA API 인터셉트
+ *         → gpgpu_context (libcuda/gpgpu_context.h) — 전역 컨텍스트 싱글톤
+ *             ├── GPGPUsim_ctx (이 파일) — 시뮬레이터 상태/세마포어/핵심 객체 포인터
+ *             │     ├── gpgpu_sim_config* — GPU 마이크로아키텍처 설정
+ *             │     ├── gpgpu_sim* (exec/sst) — 사이클-레벨 타이밍 시뮬레이터
+ *             │     └── stream_manager* — CUDA 스트림 큐 관리
+ *             └── gpgpusim_entrypoint.cc — 시뮬레이터 생명주기 구현
+ * 실행 컨텍스트: 호스트 사용자 공간(user-space). GPGPUsim_ctx 인스턴스는
+ * gpgpu_context 싱글톤이 소유하며, 프로세스 종료까지 유지된다.
  *
- * GPGPU-Sim이란?
- *   실제 GPU(그래픽 카드) 하드웨어 없이도 GPU가 어떻게 동작하는지
- *   컴퓨터 소프트웨어로 흉내 내는(시뮬레이션하는) 프로그램입니다.
- *   연구자들이 GPU 설계를 테스트할 때 사용합니다.
- * ============================================================================
+ * === 타 모듈과의 연결 ===
+ * 의존(include)하는 헤더:
+ *   - pthread.h           : pthread_t(쓰레드 ID), pthread_mutex_t(뮤텍스) 타입
+ *   - semaphore.h         : sem_t(POSIX 세마포어) 타입
+ *   - time.h              : time_t(Unix timestamp) 타입
+ *   - abstract_hardware_model.h : GPGPU-Sim 전반의 하드웨어 추상 모델
+ * 이 파일을 include하는 모듈:
+ *   - gpgpusim_entrypoint.cc : GPGPUsim_ctx 멤버 초기화 및 생명주기 구현
+ *   - libcuda/gpgpu_context.h : gpgpu_context가 GPGPUsim_ctx* the_gpgpusim 포인터 보유
+ * 공유 자료구조:
+ *   - gpgpu_context (libcuda/gpgpu_context.h): 이 파일의 gpgpu_ctx 필드가 가리킴
+ *   - gpgpu_sim (gpgpu-sim/gpu-sim.h): g_the_gpu 포인터로 접근
+ *   - stream_manager (stream_manager.h): g_stream_manager 포인터로 접근
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - GPGPUsim_ctx 생성자 : 모든 상태 플래그와 포인터를 초기 안전 값(false/NULL)으로 초기화
+ * - g_sim_signal_start  : 호스트→시뮬레이션 쓰레드 "커널 시작" 신호 세마포어
+ * - g_sim_signal_finish : 시뮬레이션 쓰레드→호스트 "커널 완료" 신호 세마포어
+ * - g_sim_signal_exit   : 시뮬레이션 쓰레드→호스트 "쓰레드 종료" 신호 세마포어
+ * - g_sim_active        : 현재 사이클이 진행 중인지 여부 (g_sim_lock으로 보호)
+ * - g_sim_done          : 시뮬레이션 전체 종료 조건 플래그
+ * - break_limit         : 최대 사이클/명령 한도 도달로 인한 강제 종료 플래그
  */
 
 // Copyright (c) 2009-2011, Tor M. Aamodt
-// 저작권: 2009~2011년, Tor M. Aamodt라는 사람이 만들었습니다.
-
 // The University of British Columbia
-// 캐나다 브리티시 컬럼비아 대학교에서 개발되었습니다.
-
 // All rights reserved.
-// 모든 권리가 보호됩니다. (허락 없이 마음대로 쓸 수 없다는 뜻)
-
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
-// 소스 코드나 실행 파일 형태로 다시 배포하거나 사용할 수 있지만,
-// 아래의 조건들을 반드시 지켜야 합니다:
-
 //
 // Redistributions of source code must retain the above copyright notice, this
 // list of conditions and the following disclaimer.
-// 소스 코드를 배포할 때는 위의 저작권 표시와 이 조건 목록,
-// 그리고 아래의 면책 조항을 반드시 포함해야 합니다.
-
 // Redistributions in binary form must reproduce the above copyright notice,
 // this list of conditions and the following disclaimer in the documentation
 // and/or other materials provided with the distribution. Neither the name of
 // The University of British Columbia nor the names of its contributors may be
 // used to endorse or promote products derived from this software without
 // specific prior written permission.
-// 실행 파일(바이너리) 형태로 배포할 때도 문서에 저작권 표시를 넣어야 하고,
-// 대학 이름이나 개발자 이름을 허락 없이 광고에 사용할 수 없습니다.
-
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -63,384 +74,326 @@
 // CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
-/*
- * 위 내용은 "면책 조항(disclaimer)"입니다.
- * 쉽게 말하면: "이 소프트웨어를 있는 그대로 제공하며,
- * 이걸 사용해서 문제가 생겨도 개발자에게 책임을 물을 수 없습니다."
- * 라는 뜻입니다. 대부분의 오픈소스 소프트웨어에 이런 문구가 있습니다.
- * 이것을 "BSD 라이선스"라고 부릅니다.
- */
 
-/*
- * ============================================================================
- * 여기서부터 실제 코드가 시작됩니다!
- * ============================================================================
- */
+#ifndef GPGPUSIM_ENTRYPOINT_H_INCLUDED  /* [한국어] 인클루드 가드 시작: 이 헤더가 여러 번 포함되는 것을 방지 */
+#define GPGPUSIM_ENTRYPOINT_H_INCLUDED  /* [한국어] 이 매크로를 정의하여 두 번째 include 시 내용을 건너뜀 */
 
-#ifndef GPGPUSIM_ENTRYPOINT_H_INCLUDED  // "만약 GPGPUSIM_ENTRYPOINT_H_INCLUDED가 아직 정의되지 않았다면"
-#define GPGPUSIM_ENTRYPOINT_H_INCLUDED  // "GPGPUSIM_ENTRYPOINT_H_INCLUDED를 정의해라"
-/*
- * 위 두 줄은 "인클루드 가드(include guard)"라고 부릅니다.
- *
- * 왜 필요한가요?
- *   여러 파일에서 이 헤더 파일을 #include(포함)할 수 있는데,
- *   같은 내용이 두 번 이상 포함되면 "이미 정의했는데 또 정의했다!"라는
- *   컴파일 에러가 발생합니다.
- *   인클루드 가드를 사용하면 처음 한 번만 포함되고,
- *   두 번째부터는 건너뛰게 됩니다.
- *
- * 작동 원리:
- *   1) 처음 이 파일을 만나면 GPGPUSIM_ENTRYPOINT_H_INCLUDED가 없으므로
- *      #ifndef(if not defined) 조건이 참(true)이 되어 안의 코드가 실행됩니다.
- *   2) #define으로 GPGPUSIM_ENTRYPOINT_H_INCLUDED를 정의합니다.
- *   3) 두 번째로 이 파일을 만나면 이미 정의되어 있으므로
- *      #ifndef 조건이 거짓(false)이 되어 코드를 건너뜁니다.
- */
+#include <pthread.h>
+/* [한국어] POSIX 쓰레드 라이브러리.
+ * 사용 이유: GPGPU-Sim은 시뮬레이션을 별도 쓰레드(gpgpu_sim_thread_concurrent 등)에서
+ * 실행한다. 이 헤더에서 필요한 타입:
+ *   - pthread_t          : 시뮬레이션 쓰레드 식별자 (g_simulation_thread 필드 타입)
+ *   - pthread_mutex_t    : 시뮬레이션 상태 보호 뮤텍스 (g_sim_lock 필드 타입)
+ *   - PTHREAD_MUTEX_INITIALIZER : 정적 뮤텍스 초기화 매크로 */
 
-#include <pthread.h>  // POSIX 쓰레드(pthread) 라이브러리를 포함합니다.
-/*
- * pthread란?
- *   "쓰레드(thread)"는 프로그램 안에서 동시에 여러 작업을 하는 것을 말합니다.
- *   예를 들어, 음악을 들으면서 게임을 하는 것처럼요.
- *   pthread는 리눅스/유닉스에서 쓰레드를 만들고 관리하는 도구입니다.
- *   여기서는 GPU 시뮬레이션을 별도의 쓰레드에서 실행하기 위해 사용합니다.
- *   (즉, 시뮬레이션이 돌아가는 동안 다른 작업도 할 수 있게 합니다.)
- */
+#include <semaphore.h>
+/* [한국어] POSIX 세마포어(counting semaphore) 라이브러리.
+ * 사용 이유: 호스트 쓰레드와 시뮬레이션 쓰레드 사이의 단방향 신호 전달에 사용된다.
+ * 세마포어는 뮤텍스와 달리 "소유권(ownership)" 개념이 없어, 한 쓰레드가 post하고
+ * 다른 쓰레드가 wait하는 교차 쓰레드 신호 전달에 적합하다.
+ * 이 헤더에서 필요한 타입:
+ *   - sem_t : 세마포어 객체 타입 (g_sim_signal_start/finish/exit 필드 타입) */
 
-#include <semaphore.h>  // 세마포어(semaphore) 라이브러리를 포함합니다.
-/*
- * 세마포어(semaphore)란?
- *   여러 쓰레드가 동시에 실행될 때, 서로 "신호"를 보내는 도구입니다.
- *   마치 교통 신호등처럼, 한 쓰레드가 "이제 시작해도 돼!"라고
- *   다른 쓰레드에게 알려주는 역할을 합니다.
- *   예: 시뮬레이션 쓰레드가 준비되면 메인 쓰레드에게 "준비 완료!" 신호를 보냅니다.
- */
+#include <time.h>
+/* [한국어] C 표준 시간 라이브러리.
+ * 사용 이유: 시뮬레이션 경과 시간(wall-clock time)을 측정하기 위해 필요하다.
+ * 이 헤더에서 필요한 타입:
+ *   - time_t : Unix timestamp 타입 (g_simulation_starttime 필드 타입)
+ * 사용 방법: time(NULL)로 현재 시간을 얻고 시작 시간과 빼면 경과 초 수를 구한다. */
 
-#include <time.h>  // 시간 관련 라이브러리를 포함합니다.
-/*
- * time.h는 현재 시간을 알아내거나, 시간을 측정하는 기능을 제공합니다.
- * 여기서는 시뮬레이션이 시작된 시간을 기록하는 데 사용합니다.
- * (시뮬레이션이 얼마나 오래 걸렸는지 계산할 수 있습니다.)
- */
-
-#include "abstract_hardware_model.h"  // 추상 하드웨어 모델 헤더 파일을 포함합니다.
-/*
- * "abstract_hardware_model.h"란?
- *   GPU 하드웨어를 소프트웨어로 표현한 "추상 모델"이 정의된 파일입니다.
- *   "추상(abstract)"이란 세부사항은 숨기고 중요한 것만 보여준다는 뜻입니다.
- *   예: 실제 GPU에는 수십억 개의 트랜지스터가 있지만,
- *       시뮬레이터에서는 "명령어를 받아서 실행하는 장치"로만 표현합니다.
- *
- * #include "파일이름" (큰따옴표):
- *   같은 프로젝트 안에 있는 우리가 만든 파일을 포함할 때 사용합니다.
- * #include <파일이름> (꺾쇠괄호):
- *   시스템에 이미 설치된 라이브러리를 포함할 때 사용합니다.
- */
+#include "abstract_hardware_model.h"
+/* [한국어] GPGPU-Sim의 하드웨어 추상 계층 헤더.
+ * 사용 이유: GPGPUsim_ctx의 생성자 매개변수인 gpgpu_context 전방 선언과
+ * 시뮬레이터 전반에서 공유하는 기본 타입/상수를 제공하기 때문이다.
+ * 이 헤더를 통해 warp_inst_t, kernel_info_t 등 핵심 자료구조도 간접적으로 가져온다. */
 
 // extern time_t g_simulation_starttime;
-/*
- * 위 줄은 주석 처리(비활성화)되어 있습니다.
- * 원래는 "시뮬레이션 시작 시간"을 전역 변수로 선언하려 했지만,
- * 나중에 클래스 안으로 옮겨졌기 때문에 더 이상 필요 없어서 주석 처리한 것입니다.
- *
- * "extern"이란?
- *   "이 변수는 다른 파일에 이미 만들어져 있으니, 여기서는 그걸 쓰겠다"는 의미입니다.
- * "time_t"란?
- *   시간을 저장하는 데이터 타입(자료형)입니다.
- */
+/* [한국어] 이전에는 g_simulation_starttime을 전역 변수로 선언하려 했으나,
+ * 현재는 GPGPUsim_ctx 클래스의 멤버 변수로 이동하여 필요 없게 되었다.
+ * 전역 변수 대신 클래스 멤버로 두면 여러 시뮬레이터 인스턴스를 독립적으로
+ * 관리할 수 있다는 장점이 있다. (현재는 단일 인스턴스이지만 구조상 더 깔끔하다.) */
 
-class gpgpu_context;  // gpgpu_context 클래스가 있다고 미리 알려줍니다. (전방 선언)
-/*
- * "전방 선언(forward declaration)"이란?
- *   클래스의 자세한 내용은 아직 모르지만, "이런 이름의 클래스가 있다"고
- *   컴파일러에게 미리 알려주는 것입니다.
- *   왜 필요한가요? 아래 GPGPUsim_ctx 클래스 안에서 gpgpu_context의
- *   포인터(*)를 사용하는데, 포인터만 사용할 때는 클래스의 자세한
- *   내용(크기, 멤버 변수 등)을 몰라도 되기 때문입니다.
- *   (포인터는 그냥 "주소"만 저장하니까 크기가 항상 같습니다.)
- */
+class gpgpu_context;
+/* [한국어] gpgpu_context 클래스의 전방 선언(forward declaration).
+ * 이 헤더에서 gpgpu_context의 완전한 정의는 필요 없고 포인터만 사용한다.
+ * 포인터 타입은 크기가 고정(8바이트, 64비트 아키텍처)이므로 완전한 정의 없이
+ * 컴파일할 수 있다. 실제 정의는 libcuda/gpgpu_context.h에 있으며,
+ * gpgpusim_entrypoint.cc에서 그 헤더를 include한다.
+ * 이렇게 전방 선언을 사용하면 헤더 파일 간의 순환 의존성을 피할 수 있다. */
 
 /*
- * ============================================================================
- * GPGPUsim_ctx 클래스 정의
- * ============================================================================
- * 이 클래스는 GPU 시뮬레이션의 "상태(context)"를 저장합니다.
- * "ctx"는 "context(문맥, 상태)"의 줄임말입니다.
+ * [한국어]
+ * GPGPUsim_ctx - GPGPU-Sim 시뮬레이터 제어 블록 (Simulator Control Block)
  *
- * 시뮬레이션이 실행 중인지, 완료되었는지, GPU 설정은 무엇인지 등
- * 시뮬레이션에 필요한 모든 정보를 이 클래스 하나에 담고 있습니다.
+ * 이 클래스는 GPGPU-Sim 시뮬레이터의 전체 생명주기 상태를 하나의 구조체로 묶는다.
+ * gpgpu_context 싱글톤이 GPGPUsim_ctx* the_gpgpusim 포인터로 이 객체를 소유한다.
+ * 모든 멤버가 public이므로 gpgpusim_entrypoint.cc와 libcuda 어디서든 직접 접근 가능하다.
  *
- * 왜 이런 클래스가 필요한가요?
- *   시뮬레이션에 필요한 변수들이 매우 많은데, 이것들을 하나의 클래스로
- *   묶어두면 관리하기 편하고, 여러 곳에서 쉽게 접근할 수 있기 때문입니다.
- * ============================================================================
+ * 설계 의도: CUDA 런타임 인터셉트 레이어(libcuda)와 내부 시뮬레이션 엔진(gpu-sim, stream_manager)
+ * 사이의 중간 제어 객체로, 동기화 메커니즘과 핵심 서브시스템 포인터를 한곳에 집약한다.
  */
-class GPGPUsim_ctx {  // GPGPUsim_ctx라는 이름의 클래스를 정의합니다.
- public:  // "public"은 "공개"라는 뜻입니다. 아래 내용은 클래스 바깥에서도 접근할 수 있습니다.
+class GPGPUsim_ctx {
+ public:
   /*
-   * public vs private:
-   *   public: 누구나 접근할 수 있음 (교실의 게시판처럼)
-   *   private: 클래스 내부에서만 접근할 수 있음 (개인 사물함처럼)
-   *   이 클래스는 모든 멤버가 public이므로 어디서든 자유롭게 사용할 수 있습니다.
-   */
-
-  GPGPUsim_ctx(gpgpu_context *ctx) {  // 생성자(constructor) - 객체가 만들어질 때 자동으로 실행되는 함수
-  /*
-   * "생성자(constructor)"란?
-   *   클래스로부터 객체(실체)를 만들 때 자동으로 호출되는 특별한 함수입니다.
-   *   클래스 이름과 같은 이름을 가집니다.
-   *   예: GPGPUsim_ctx myObj(some_ctx); 라고 쓰면 이 생성자가 자동 실행됩니다.
+   * [한국어]
+   * GPGPUsim_ctx 생성자 - 시뮬레이터 제어 블록 초기화
    *
-   * 매개변수(parameter):
-   *   gpgpu_context *ctx : gpgpu_context 객체의 "포인터(주소)"를 받습니다.
-   *   포인터(*)란? 어떤 데이터가 메모리 어디에 있는지 "주소"를 저장하는 변수입니다.
-   *   마치 친구 집 주소를 적어둔 메모지 같은 것입니다.
+   * @ctx: GPGPU-Sim 전체 컨텍스트 싱글톤 포인터. gpgpu_context::the_gpgpusim을
+   *       설정하는 시점에 (void*)this로 전달된다.
+   *
+   * 모든 상태 플래그를 "아직 시뮬레이션 없음" 초기 상태로 설정하고,
+   * 모든 서브시스템 포인터를 NULL로 초기화한다.
+   * gpgpu_ptx_sim_init_perf()가 호출되기 전까지 NULL 포인터는 역참조해서는 안 된다.
+   * 실행 컨텍스트: 호스트 쓰레드, gpgpu_context 생성 시점에 단 한 번 호출된다.
+   *
+   * 호출 체인:
+   *   libcuda 초기화 → gpgpu_context 생성 → [GPGPUsim_ctx(ctx)]
    */
+  GPGPUsim_ctx(gpgpu_context *ctx) {
+    g_sim_active = false;
+    /* [한국어] 현재 사이클이 진행 중이지 않음 (초기 상태).
+     * 설정자: gpgpu_sim_thread_concurrent()가 내부 루프 전/후로 true/false 전환.
+     * 읽는 자: synchronize(), synchronize_check()가 GPU idle 여부 판단에 사용.
+     * 값 범위: true(사이클 진행 중) / false(idle 또는 미시작).
+     * 동기화: g_sim_lock 뮤텍스로 보호 — 호스트/시뮬레이션 쓰레드가 동시 접근 가능. */
 
-    g_sim_active = false;  // 시뮬레이션이 현재 "활성(실행 중)" 상태인지 표시. 처음에는 false(아니오).
-    /*
-     * bool 타입은 true(참/예) 또는 false(거짓/아니오) 두 가지 값만 가집니다.
-     * 시뮬레이션이 아직 시작하지 않았으므로 false로 초기화합니다.
-     */
+    g_sim_done = true;
+    /* [한국어] 시뮬레이션이 "완료/미시작" 상태임을 나타냄 (초기값 true).
+     * 초기값이 true인 이유: start_sim_thread()는 g_sim_done == true일 때만 새 쓰레드를
+     * 생성하므로, 첫 번째 커널 launch 전 상태에서 쓰레드 생성이 가능해야 한다.
+     * 설정자: start_sim_thread()가 false로, exit_simulation()/한도 초과 시 true로 설정.
+     * 읽는 자: 시뮬레이션 쓰레드의 외부 루프 종료 조건으로 사용.
+     * 값 범위: true(종료/미시작) / false(진행 중).
+     * 동기화: bool 단일 워드 읽기는 아키텍처적으로 원자적이나, g_sim_active와 함께
+     *         검사할 때는 g_sim_lock을 잡는다 (synchronize() 참조). */
 
-    g_sim_done = true;  // 시뮬레이션이 "완료"되었는지 표시. 처음에는 true(예).
-    /*
-     * 왜 처음에 true(완료)인가요?
-     *   아직 시뮬레이션을 시작하지 않았으므로, "할 일이 없는 상태" = "완료"로 봅니다.
-     *   나중에 시뮬레이션이 시작되면 false로 바뀌고, 끝나면 다시 true가 됩니다.
-     */
+    break_limit = false;
+    /* [한국어] 최대 사이클/명령/CTA 한도 미도달 (초기 상태).
+     * 설정자: gpgpu_sim_thread_concurrent() 또는 SST_Cycle()에서
+     *         cycle_insn_cta_max_hit() == true일 때 true로 설정.
+     * 읽는 자: 시뮬레이션 쓰레드 종료 직전에 true이면 exit(1)로 프로세스 강제 종료.
+     * 값 범위: false(정상) / true(한도 도달 → 강제 종료 예정).
+     * 동기화: 단일 시뮬레이션 쓰레드에서만 설정되므로 별도 잠금 불필요. */
 
-    break_limit = false;  // 시뮬레이션 실행 한도(제한)를 넘었는지 표시. 처음에는 false(아니오).
-    /*
-     * 시뮬레이션은 무한히 실행될 수 있으므로, 특정 한도를 정해두고
-     * 그 한도를 넘으면 시뮬레이션을 멈추는 기능이 있습니다.
-     * break_limit가 true가 되면 "한도를 넘었으니 멈춰라"는 신호입니다.
-     */
+    g_sim_lock = PTHREAD_MUTEX_INITIALIZER;
+    /* [한국어] g_sim_active 읽기/쓰기를 보호하는 뮤텍스 정적 초기화.
+     * PTHREAD_MUTEX_INITIALIZER는 pthread_mutex_init() 없이 선언 시 초기화하는 매크로이다.
+     * 설정자: 이 생성자에서 한 번만 초기화되고 이후 pthread_mutex_lock/unlock으로 사용.
+     * 읽는 자/쓰는 자: synchronize(), synchronize_check(), gpgpu_sim_thread_concurrent()
+     * 값 범위: 잠금(locked) / 해제(unlocked) 내부 상태 — 직접 읽지 않음.
+     * 동기화: 뮤텍스 자체가 동기화 수단이므로 별도 보호 불필요. */
 
-    g_sim_lock = PTHREAD_MUTEX_INITIALIZER;  // 뮤텍스 잠금장치를 초기화합니다.
-    /*
-     * "뮤텍스(mutex)"란?
-     *   "mutual exclusion(상호 배제)"의 줄임말입니다.
-     *   여러 쓰레드가 동시에 같은 데이터를 수정하면 문제가 생길 수 있습니다.
-     *   예: 두 사람이 동시에 같은 문서를 편집하면 내용이 엉망이 되는 것처럼요.
-     *   뮤텍스는 "열쇠가 하나뿐인 화장실 자물쇠" 같은 것입니다.
-     *   한 쓰레드가 잠금(lock)을 걸면, 다른 쓰레드는 그 쓰레드가
-     *   잠금을 풀(unlock)때까지 기다려야 합니다.
-     *   PTHREAD_MUTEX_INITIALIZER는 이 잠금장치를 기본 설정으로 만들어줍니다.
-     */
+    g_the_gpu_config = NULL;
+    /* [한국어] GPU 마이크로아키텍처 설정 객체 미생성 상태.
+     * 설정자: gpgpu_ptx_sim_init_perf()에서 new gpgpu_sim_config(ctx)로 생성 후 저장.
+     * 읽는 자: start_sim_thread()가 is_SST_mode() 확인에 사용.
+     *          gpgpu_sim 생성자에서 설정값 전달에 사용.
+     * 값 범위: NULL(미초기화) / 유효한 gpgpu_sim_config 객체 포인터.
+     * 동기화: 초기화 이후에는 읽기 전용이므로 별도 잠금 불필요. */
 
-    g_the_gpu_config = NULL;  // GPU 설정 정보 포인터를 NULL(비어있음)으로 초기화
-    /*
-     * NULL이란?
-     *   "아직 아무것도 가리키지 않는다"는 뜻입니다.
-     *   마치 주소록에 주소를 아직 적지 않은 상태입니다.
-     *   나중에 실제 GPU 설정 객체가 만들어지면 그 주소가 여기에 저장됩니다.
-     */
+    g_the_gpu = NULL;
+    /* [한국어] GPU 타이밍 시뮬레이터 핵심 객체 미생성 상태.
+     * 설정자: gpgpu_ptx_sim_init_perf()에서 new exec_gpgpu_sim / sst_gpgpu_sim으로 생성.
+     * 읽는 자: gpgpu_sim_thread_concurrent/sequential()이 매 사이클마다 cycle() 호출.
+     *          synchronize(), exit_simulation() 등 모든 시뮬레이션 제어 경로.
+     * 값 범위: NULL(미초기화) / exec_gpgpu_sim* 또는 sst_gpgpu_sim* (gpgpu_sim*로 다형성 사용).
+     * 동기화: 포인터 자체는 불변. 내부 상태는 시뮬레이션 쓰레드만 변경하며
+     *         launch()는 원자적으로 처리된다. */
 
-    g_the_gpu = NULL;  // GPU 시뮬레이터 객체 포인터를 NULL로 초기화
-    // 실제 GPU를 소프트웨어로 흉내 내는 gpgpu_sim 객체를 나중에 여기에 연결합니다.
+    g_stream_manager = NULL;
+    /* [한국어] CUDA 스트림 큐 관리자 미생성 상태.
+     * 설정자: gpgpu_ptx_sim_init_perf()에서 new stream_manager(g_the_gpu, ...)로 생성.
+     * 읽는 자:
+     *   - 호스트 쓰레드(libcuda): push()로 커널/memcpy 작업을 큐에 등록.
+     *   - 시뮬레이션 쓰레드: operation()으로 큐 front에서 작업을 꺼내어 실행.
+     *   - synchronize(): empty()로 큐가 비었는지 확인.
+     * 값 범위: NULL(미초기화) / 유효한 stream_manager 포인터.
+     * 동기화: stream_manager 내부의 m_lock 뮤텍스가 큐 접근을 보호한다. */
 
-    g_stream_manager = NULL;  // 스트림 관리자 포인터를 NULL로 초기화
-    /*
-     * "스트림(stream)"이란?
-     *   GPU에서 작업들을 순서대로 처리하는 "작업 줄(대기열)"입니다.
-     *   마치 놀이공원의 줄서기처럼, 작업들이 줄을 서서 차례를 기다립니다.
-     *   스트림 관리자는 이 줄들을 관리하는 역할을 합니다.
-     */
+    the_cude_device = NULL;
+    /* [한국어] 시뮬레이션 대상 CUDA 디바이스 정보 미초기화 상태.
+     * 설정자: libcuda에서 첫 cuDeviceGet() 또는 cudaGetDevice() 호출 시 초기화.
+     * 읽는 자: libcuda가 장치 속성(디바이스 ID, 컴퓨트 캐파빌리티 등) 조회 시 사용.
+     * 값 범위: NULL(미초기화) / _cuda_device_id 구조체 포인터.
+     * 동기화: 초기화 이후 읽기 전용 — 별도 잠금 불필요.
+     * 참고: "cude"는 "cuda"의 오타이나 원본 코드를 유지한다. */
 
-    the_cude_device = NULL;  // CUDA 디바이스(장치) 포인터를 NULL로 초기화
-    /*
-     * "CUDA 디바이스"란?
-     *   NVIDIA GPU 장치를 의미합니다. CUDA는 NVIDIA가 만든
-     *   GPU 프로그래밍 기술 이름입니다.
-     *   참고: "cude"는 "cuda"의 오타(typo)로 보이지만, 원래 코드에 이렇게 되어 있습니다.
-     */
+    the_context = NULL;
+    /* [한국어] CUDA 컨텍스트(CUctx_st) 미초기화 상태.
+     * CUDA 컨텍스트는 GPU 메모리 할당 맵, 로드된 모듈(PTX 바이너리), 스트림 등을 담는다.
+     * 설정자: libcuda에서 cuCtxCreate() 호출 시 초기화.
+     * 읽는 자: libcuda의 메모리 할당, 커널 로드, 스트림 생성 등 모든 CUDA API 경로.
+     * 값 범위: NULL(미초기화) / CUctx_st 구조체 포인터.
+     * 동기화: 단일 CUDA 컨텍스트는 단일 호스트 쓰레드에서 사용 가정 — 별도 잠금 불필요. */
 
-    the_context = NULL;  // CUDA 컨텍스트 포인터를 NULL로 초기화
-    /*
-     * "CUDA 컨텍스트(context)"란?
-     *   GPU를 사용하기 위한 "작업 환경"입니다.
-     *   마치 그림을 그리려면 도화지, 물감, 붓 등 환경이 필요하듯이,
-     *   GPU 프로그래밍에도 메모리, 설정 등의 환경이 필요합니다.
-     *   CUctx_st 구조체가 이 환경 정보를 담고 있습니다.
-     */
-
-    gpgpu_ctx = ctx;  // 매개변수로 받은 gpgpu_context 포인터를 멤버 변수에 저장합니다.
-    /*
-     * 생성자의 매개변수 ctx를 클래스 멤버 변수 gpgpu_ctx에 저장합니다.
-     * 이렇게 하면 나중에 클래스 안의 다른 곳에서도 gpgpu_context에 접근할 수 있습니다.
-     * 이것은 "의존성 주입(dependency injection)"이라는 설계 패턴입니다.
-     * 쉽게 말하면 "밖에서 만든 것을 안으로 전달해주는 것"입니다.
-     */
-  }  // 생성자 끝
+    gpgpu_ctx = ctx;
+    /* [한국어] GPGPU-Sim 전역 컨텍스트 포인터 저장.
+     * 생성자 매개변수로 받은 gpgpu_context*를 멤버에 보관한다.
+     * 설정자: 이 생성자에서 단 한 번 설정 후 불변(immutable).
+     * 읽는 자: gpgpusim_entrypoint.cc의 gpgpu_ptx_sim_init_perf() 등에서
+     *          func_sim, ptx_parser 등 gpgpu_context의 다른 서브시스템에 접근하는 데 사용.
+     * 값 범위: 항상 유효한 gpgpu_context 포인터 (NULL 불가 — 생성자 호출 시점에 존재).
+     * 동기화: 불변값이므로 별도 잠금 불필요. */
+  }
 
   // struct gpgpu_ptx_sim_arg *grid_params;
-  /*
-   * 위 줄은 주석 처리되어 있습니다. (사용하지 않는 코드)
-   * 원래는 GPU 커널(프로그램) 실행에 필요한 매개변수들을 저장하려 했던 것 같습니다.
-   * PTX: NVIDIA GPU의 중간 기계어(어셈블리 언어 비슷한 것)
-   * grid_params: GPU에서 작업을 나누는 단위인 "그리드"의 매개변수
-   */
+  /* [한국어] PTX 커널 그리드 매개변수 포인터 (사용 안 함, 비활성화된 코드).
+   * 원래 커널 launch 인수를 여기서 관리하려 했으나 현재는 kernel_info_t를 통해
+   * gpgpu_sim::launch()에 직접 전달하는 방식으로 변경되어 불필요해졌다. */
 
-  /*
-   * ========================================================================
-   * 세마포어(semaphore) 변수들
-   * ========================================================================
-   * 아래 3개의 세마포어는 시뮬레이션 쓰레드와 메인 쓰레드 사이에서
-   * "신호"를 주고받는 데 사용됩니다.
-   * sem_t는 세마포어의 데이터 타입(자료형)입니다.
-   */
-  sem_t g_sim_signal_start;  // 시뮬레이션 "시작" 신호를 보내는 세마포어
-  // 메인 쓰레드가 "시뮬레이션을 시작해라!"라고 시뮬레이션 쓰레드에게 알려줄 때 사용합니다.
+  sem_t g_sim_signal_start;
+  /* [한국어] 호스트 쓰레드 → 시뮬레이션 쓰레드 방향의 "커널 시작" 신호 세마포어.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 sem_init(..., 0, 0)으로 초기화(값 0).
+   *         gpgpu_opencl_ptx_sim_main_perf()에서 sem_post()로 신호 전송.
+   * 읽는 자: gpgpu_sim_thread_sequential()의 루프 상단에서 sem_wait()으로 블록.
+   * 값 범위: 0 (대기 중) / 1 이상 (신호 수신됨).
+   * 동기화: POSIX 세마포어는 스레드 안전(thread-safe) — 별도 잠금 불필요.
+   * 참고: concurrent 모드에서는 이 세마포어를 사용하지 않고 스트림 큐로 대신한다. */
 
-  sem_t g_sim_signal_finish;  // 시뮬레이션 "완료" 신호를 보내는 세마포어
-  // 시뮬레이션 쓰레드가 "한 단계가 끝났어!"라고 메인 쓰레드에게 알려줄 때 사용합니다.
+  sem_t g_sim_signal_finish;
+  /* [한국어] 시뮬레이션 쓰레드 → 호스트 쓰레드 방향의 "커널 완료" 신호 세마포어.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 sem_init(..., 0, 0)으로 초기화.
+   *         gpgpu_sim_thread_sequential()이 커널 완료 후 sem_post()로 통보.
+   * 읽는 자: gpgpu_opencl_ptx_sim_main_perf()에서 sem_wait()으로 커널 완료를 기다림.
+   * 값 범위: 0 (진행 중) / 1 이상 (완료 신호 수신됨).
+   * 동기화: POSIX 세마포어 내부적으로 원자적 처리.
+   * 참고: concurrent 모드에서는 사용하지 않음 (스트림 큐로 대체됨). */
 
-  sem_t g_sim_signal_exit;  // 시뮬레이션 "종료" 신호를 보내는 세마포어
-  // 시뮬레이션이 완전히 끝나서 "이제 프로그램을 종료해도 돼!"라고 알려줄 때 사용합니다.
+  sem_t g_sim_signal_exit;
+  /* [한국어] 시뮬레이션 쓰레드 → 호스트 쓰레드 방향의 "쓰레드 종료 완료" 신호 세마포어.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 sem_init(..., 0, 0)으로 초기화.
+   *         gpgpu_sim_thread_sequential()과 gpgpu_sim_thread_concurrent()가
+   *         루프 탈출 후 sem_post()로 종료를 통보한다.
+   * 읽는 자: exit_simulation()에서 sem_wait()으로 쓰레드 종료를 기다림.
+   * 값 범위: 0 (쓰레드 실행 중) / 1 (종료됨).
+   * 동기화: POSIX 세마포어. break_limit이면 exit(1)로 프로세스 자체가 종료되므로
+   *         이 세마포어가 post되지 않을 수도 있다. */
 
-  time_t g_simulation_starttime;  // 시뮬레이션이 시작된 시간을 저장하는 변수
-  /*
-   * time_t 타입은 1970년 1월 1일 0시 0분 0초부터 지금까지 흐른 "초(seconds)"를
-   * 숫자로 저장합니다. 이것을 "유닉스 타임스탬프(Unix timestamp)"라고 부릅니다.
-   * 시뮬레이션이 얼마나 오래 걸렸는지 계산하는 데 사용합니다.
-   * 예: 끝난 시간 - 시작 시간 = 소요 시간
-   */
+  time_t g_simulation_starttime;
+  /* [한국어] 시뮬레이션 시작 시점의 Unix timestamp (wall-clock 기준).
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 time(NULL)로 기록.
+   * 읽는 자: print_simulation_time()에서 현재 시간과의 차이로 경과 시간 계산.
+   * 값 범위: 양수 Unix timestamp (1970-01-01 00:00:00 UTC 이후 경과 초 수).
+   * 동기화: 단 한 번 쓰고 이후 읽기 전용 — 별도 잠금 불필요. */
 
-  pthread_t g_simulation_thread;  // 시뮬레이션을 실행하는 쓰레드(thread)의 식별자(ID)
-  /*
-   * pthread_t는 쓰레드를 구별하는 "이름표" 같은 것입니다.
-   * GPU 시뮬레이션은 별도의 쓰레드에서 실행되는데,
-   * 이 변수가 그 쓰레드를 가리킵니다.
-   * 나중에 이 쓰레드에게 명령을 내리거나 상태를 확인할 때 이 식별자를 사용합니다.
-   */
+  pthread_t g_simulation_thread;
+  /* [한국어] 시뮬레이션 전용 쓰레드의 POSIX 쓰레드 식별자(handle).
+   * 설정자: start_sim_thread()에서 pthread_create() 호출 시 OS가 할당하는 값이 저장됨.
+   * 읽는 자: 현재 코드에서는 pthread_join() 등으로 직접 사용하지 않음.
+   *          (시뮬레이션 쓰레드 종료는 세마포어로 감지함)
+   * 값 범위: OS가 할당한 불투명(opaque) 쓰레드 ID.
+   * 동기화: start_sim_thread()만 이 값을 쓰므로 별도 잠금 불필요.
+   * 참고: SST 모드에서는 별도 쓰레드를 생성하지 않으므로 이 값이 사용되지 않는다. */
 
-  /*
-   * ========================================================================
-   * 시뮬레이션의 핵심 객체 포인터들
-   * ========================================================================
-   * 아래 3개의 포인터는 시뮬레이션의 가장 중요한 구성 요소들입니다.
-   * 각각 GPU 설정, GPU 자체, 그리고 작업 스트림을 관리합니다.
-   */
+  class gpgpu_sim_config *g_the_gpu_config;
+  /* [한국어] GPU 마이크로아키텍처 설정 객체 포인터 (gpgpu_sim_config 전방 선언).
+   * gpgpusim.config 파일에서 파싱된 모든 하드웨어 파라미터를 보관한다:
+   *   예) -gpgpu_n_clusters 20, -gpgpu_n_cores_per_cluster 1,
+   *       -gpgpu_cache:dl1 16:128:4,L:L:m:N:H,A:32:8,8,0,
+   *       -gpgpu_dram_timing_opt 등.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 new gpgpu_sim_config(ctx)로 생성.
+   * 읽는 자: GPU 시뮬레이터 생성 시 참조. start_sim_thread()에서 is_SST_mode() 확인.
+   * 값 범위: NULL(미초기화) / 유효한 gpgpu_sim_config 포인터.
+   * 동기화: 생성 후 읽기 전용 — 별도 잠금 불필요. */
 
-  class gpgpu_sim_config *g_the_gpu_config;  // GPU 설정(configuration) 객체를 가리키는 포인터
-  /*
-   * gpgpu_sim_config 클래스는 시뮬레이션할 GPU의 설정 정보를 담고 있습니다.
-   * 예: GPU 코어(SM)가 몇 개인지, 메모리 크기는 얼마인지,
-   *     클럭 속도는 얼마인지 등의 설정값들입니다.
-   * "class" 키워드는 이것이 클래스 타입이라고 알려줍니다. (전방 선언의 한 형태)
-   * "*"는 이것이 포인터(주소를 저장하는 변수)라는 뜻입니다.
-   */
+  class gpgpu_sim *g_the_gpu;
+  /* [한국어] GPU 타이밍 시뮬레이터 최상위 객체 포인터 (gpgpu_sim 전방 선언).
+   * 실제 타입은 exec_gpgpu_sim(일반 모드) 또는 sst_gpgpu_sim(SST 모드)이며,
+   * 다형성(polymorphism)으로 gpgpu_sim* 포인터를 통해 접근한다.
+   * 이 객체 안에 SM(shader core), 캐시 계층, DRAM 컨트롤러, NoC 인터페이스가 있다.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 new exec_gpgpu_sim / sst_gpgpu_sim으로 생성.
+   * 읽는 자: 시뮬레이션 쓰레드의 cycle(), active(), deadlock_check() 등 매 사이클 호출.
+   *          libcuda의 launch() (커널 등록), synchronize() (idle 대기) 등.
+   * 값 범위: NULL(미초기화) / exec_gpgpu_sim* 또는 sst_gpgpu_sim* (gpgpu_sim*로 다형성 사용).
+   * 동기화: 포인터 자체는 불변. 내부 상태(SM 파이프라인, 캐시 등)는 시뮬레이션 쓰레드만 변경.
+   *         stream_manager::operation()이 launch()를 호출하는 것은 g_sim_lock 없이 이루어지며
+   *         launch()가 원자적으로 처리한다. */
 
-  class gpgpu_sim *g_the_gpu;  // GPU 시뮬레이터 핵심 객체를 가리키는 포인터
-  /*
-   * gpgpu_sim은 GPU 전체를 소프트웨어로 표현한 클래스입니다.
-   * 이것이 바로 시뮬레이션의 "심장"입니다!
-   * GPU의 코어, 메모리, 캐시 등 모든 하드웨어 부품이 이 안에 들어있습니다.
-   * "g_the_gpu"라는 이름은 "전역(global)의, 그(the), GPU"라는 뜻입니다.
-   */
+  class stream_manager *g_stream_manager;
+  /* [한국어] CUDA 스트림 큐 관리자 포인터 (stream_manager 전방 선언).
+   * 모든 활성 CUstream_st 객체와 그 안의 보류 중인 stream_operation을 관리한다.
+   * 설정자: gpgpu_ptx_sim_init_perf()에서 new stream_manager(g_the_gpu, ...)로 생성.
+   * 읽는 자:
+   *   - 호스트 쓰레드(libcuda): push()로 커널/memcpy 작업을 큐에 등록.
+   *   - 시뮬레이션 쓰레드: operation()으로 큐 front에서 작업을 꺼내어 실행.
+   *   - synchronize(): empty()로 큐가 비었는지 확인.
+   * 값 범위: NULL(미초기화) / 유효한 stream_manager 포인터.
+   * 동기화: stream_manager 내부의 m_lock 뮤텍스가 큐 접근을 보호한다. */
 
-  class stream_manager *g_stream_manager;  // 스트림 관리자 객체를 가리키는 포인터
-  /*
-   * stream_manager는 GPU로 보내는 작업(커널 실행, 메모리 복사 등)의
-   * 순서를 관리하는 클래스입니다.
-   * 실제 CUDA 프로그래밍에서도 "스트림"을 사용하여 작업 순서를 제어합니다.
-   */
+  struct _cuda_device_id *the_cude_device;
+  /* [한국어] 시뮬레이션 대상 CUDA 디바이스 정보 구조체 포인터.
+   * _cuda_device_id는 장치 ID, 컴퓨트 캐파빌리티 버전 등 장치 식별 정보를 담는다.
+   * 설정자: libcuda에서 첫 GPU 장치 열거(cuDeviceGet) 또는 선택 시 초기화.
+   * 읽는 자: libcuda의 cudaGetDeviceProperties(), cuDeviceGetAttribute() 등 장치 속성 쿼리.
+   * 값 범위: NULL(미초기화) / 유효한 _cuda_device_id 포인터.
+   * 동기화: 초기화 후 읽기 전용 — 별도 잠금 불필요.
+   * 참고: 필드명 "cude"는 "cuda"의 오타이나 원본 코드를 유지한다. */
 
-  /*
-   * ========================================================================
-   * CUDA 런타임 관련 포인터들
-   * ========================================================================
-   * 아래 2개는 CUDA 런타임(실행 환경)을 시뮬레이션하기 위한 구조체 포인터입니다.
-   */
+  struct CUctx_st *the_context;
+  /* [한국어] CUDA 실행 컨텍스트(CUctx_st, CUcontext) 포인터.
+   * CUctx_st는 단일 GPU 사용 세션의 상태를 나타내며, CUDA 드라이버 API의 CUcontext에 해당한다.
+   * 내용: GPU 가상 메모리 할당 맵, 로드된 cubin/PTX 모듈, 이벤트, 스트림 목록 등.
+   * 설정자: libcuda에서 cuCtxCreate() 또는 암묵적 컨텍스트 생성 시 초기화.
+   * 읽는 자: libcuda 전반의 메모리 관리, 커널 로드, 스트림 작업 등 모든 API 경로.
+   * 값 범위: NULL(미초기화) / 유효한 CUctx_st 포인터.
+   * 동기화: 단일 호스트 쓰레드에서 사용 가정(CUDA 컨텍스트는 기본적으로 단일 쓰레드 소유). */
 
-  struct _cuda_device_id *the_cude_device;  // CUDA 디바이스(GPU 장치) 정보를 가리키는 포인터
-  /*
-   * _cuda_device_id 구조체는 시뮬레이션하는 GPU 장치의 정보를 담고 있습니다.
-   * "struct"는 여러 변수를 하나로 묶은 데이터 구조입니다.
-   * (클래스와 비슷하지만, C 언어에서 온 더 간단한 형태입니다.)
-   * 참고: "cude"는 "cuda"의 오타입니다. 원본 코드가 이렇게 작성되어 있습니다.
-   */
+  gpgpu_context *gpgpu_ctx;
+  /* [한국어] GPGPU-Sim 전역 컨텍스트 싱글톤 역참조 포인터.
+   * GPGPUsim_ctx는 gpgpu_context의 the_gpgpusim 포인터로 소유되는데,
+   * 반대 방향으로도 gpgpu_context에 접근해야 하므로 이 역참조 포인터를 저장한다.
+   * 설정자: 생성자에서 단 한 번 설정 후 불변.
+   * 읽는 자: gpgpu_ptx_sim_init_perf()에서 ctx->func_sim, ctx->ptx_parser 등 접근.
+   *          gpgpu_sim_thread_concurrent()에서 gpgpu_ctx->func_sim->gpgpu_cuda_ptx_sim_main_func() 호출.
+   * 값 범위: 항상 유효한 gpgpu_context 포인터 (NULL 불가).
+   * 동기화: 불변값 — 별도 잠금 불필요. */
 
-  struct CUctx_st *the_context;  // CUDA 컨텍스트(실행 환경) 구조체를 가리키는 포인터
-  /*
-   * CUctx_st는 "CUDA Context State(CUDA 컨텍스트 상태)"의 줄임말입니다.
-   * GPU를 사용하려면 먼저 "컨텍스트"를 만들어야 합니다.
-   * 이 컨텍스트에는 GPU 메모리 할당 정보, 로드된 프로그램 정보 등이 들어있습니다.
-   */
+  pthread_mutex_t g_sim_lock;
+  /* [한국어] g_sim_active 필드의 읽기/쓰기를 보호하는 뮤텍스.
+   * 호스트 쓰레드(synchronize, synchronize_check)와 시뮬레이션 쓰레드
+   * (gpgpu_sim_thread_concurrent)가 g_sim_active를 동시에 읽고 쓸 수 있으므로
+   * 데이터 레이스(data race)를 방지하기 위해 이 뮤텍스로 보호한다.
+   * 설정자: 생성자에서 PTHREAD_MUTEX_INITIALIZER로 정적 초기화.
+   * 읽는 자/쓰는 자: synchronize(), synchronize_check(), gpgpu_sim_thread_concurrent().
+   * 값 범위: LOCKED / UNLOCKED 내부 상태 (pthread 내부 관리).
+   * 동기화: 뮤텍스 자체가 동기화 수단 — 중첩 잠금(deadlock) 주의:
+   *         이 뮤텍스를 잡은 상태에서 stream_manager의 m_lock을 잡으면 안 된다. */
 
-  gpgpu_context *gpgpu_ctx;  // GPGPU-Sim의 전체 컨텍스트를 가리키는 포인터
-  /*
-   * gpgpu_context는 GPGPU-Sim 시뮬레이터 전체의 "큰 그림" 컨텍스트입니다.
-   * 시뮬레이터의 모든 구성 요소들을 하나로 연결하는 "중심부" 역할을 합니다.
-   * 생성자에서 매개변수로 받아서 저장한 바로 그 포인터입니다.
-   */
+  bool g_sim_active;
+  /* [한국어] 현재 시뮬레이션 쓰레드가 사이클을 진행 중인지 나타내는 플래그.
+   * 설정자:
+   *   - true : gpgpu_sim_thread_concurrent()가 내부 루프 진입 전 (g_sim_lock 보호)
+   *   - false: gpgpu_sim_thread_concurrent()가 내부 루프 탈출 후 (g_sim_lock 보호)
+   *            SST_Cycle()에서도 일부 경로에서 직접 설정.
+   * 읽는 자: synchronize(), synchronize_check()가 GPU idle 조건 판단에 사용.
+   * 값 범위: true(사이클 진행 중) / false(idle 또는 대기 중).
+   * 동기화: 반드시 g_sim_lock 뮤텍스 잠금 하에 읽고 써야 한다.
+   * g_sim_done과의 관계: g_sim_done == true이면 g_sim_active는 의미 없다. */
 
-  /*
-   * ========================================================================
-   * 쓰레드 동기화 및 상태 관리 변수들
-   * ========================================================================
-   */
+  bool g_sim_done;
+  /* [한국어] 시뮬레이션 전체 종료 여부를 나타내는 플래그.
+   * 설정자:
+   *   - true(초기값): 생성자에서 "아직 시작 안 함" 상태로.
+   *   - false        : start_sim_thread()에서 새 시뮬레이션 시작 시.
+   *   - true(종료)   : exit_simulation()에서 외부 종료 요청 시,
+   *                    또는 최대 한도 도달(cycle_insn_cta_max_hit) 시.
+   * 읽는 자: 시뮬레이션 쓰레드의 외부 do-while 루프 탈출 조건.
+   *          start_sim_thread()에서 새 쓰레드 생성 가능 여부 판단.
+   * 값 범위: true(종료/미시작) / false(진행 중).
+   * 동기화: bool 단일 워드 읽기는 원자적이나, g_sim_active와 함께 검사할 때는
+   *         g_sim_lock을 잡는다 (synchronize() 참조). */
 
-  pthread_mutex_t g_sim_lock;  // 시뮬레이션 데이터를 보호하는 뮤텍스(잠금장치)
-  /*
-   * 이 뮤텍스는 여러 쓰레드가 동시에 시뮬레이션 데이터를 수정하는 것을 방지합니다.
-   * 예를 들어, 시뮬레이션 쓰레드가 g_sim_active를 바꾸는 동안
-   * 메인 쓰레드가 동시에 읽으면 잘못된 값을 읽을 수 있습니다.
-   * 뮤텍스로 잠그면 한 번에 하나의 쓰레드만 접근할 수 있습니다.
-   *
-   * pthread_mutex_t는 뮤텍스의 데이터 타입입니다.
-   */
-
-  bool g_sim_active;  // 시뮬레이션이 현재 실행 중(활성 상태)인지 나타내는 변수
-  /*
-   * true = 시뮬레이션이 지금 돌아가고 있습니다.
-   * false = 시뮬레이션이 멈춰있거나 아직 시작하지 않았습니다.
-   * "g_"는 "global(전역)"을 의미하는 접두사입니다. (프로그래밍 관례)
-   */
-
-  bool g_sim_done;  // 시뮬레이션이 완전히 끝났는지 나타내는 변수
-  /*
-   * true = 시뮬레이션이 완료되었습니다. 더 이상 할 일이 없습니다.
-   * false = 시뮬레이션이 아직 진행 중이거나, 해야 할 일이 남아있습니다.
-   *
-   * g_sim_active와 g_sim_done의 차이:
-   *   g_sim_active: "지금 이 순간" 실행 중인지 (일시 정지일 수도 있음)
-   *   g_sim_done: 모든 작업이 "완전히" 끝났는지
-   */
-
-  bool break_limit;  // 시뮬레이션 실행 제한에 도달했는지 나타내는 변수
-  /*
-   * true = 설정된 실행 한도(예: 최대 사이클 수)에 도달하여 시뮬레이션을 멈춰야 합니다.
-   * false = 아직 한도에 도달하지 않았으므로 계속 실행해도 됩니다.
-   *
-   * 왜 실행 한도가 필요한가요?
-   *   시뮬레이션은 실제 GPU보다 수백~수천 배 느리므로,
-   *   너무 오래 걸리는 것을 방지하기 위해 한도를 설정합니다.
-   *   예: "1억 사이클까지만 시뮬레이션하겠다"
-   */
-};  // GPGPUsim_ctx 클래스 정의 끝
-/*
- * C++에서 클래스 정의의 닫는 중괄호(}) 뒤에는 반드시 세미콜론(;)을 붙여야 합니다.
- * 이것은 C++ 문법 규칙입니다. 빼먹으면 컴파일 에러가 발생합니다!
- */
+  bool break_limit;
+  /* [한국어] 최대 사이클/명령/CTA 한도 도달로 인한 강제 종료 플래그.
+   * gpgpusim.config의 -gpgpu_max_cycle, -gpgpu_max_insn, -gpgpu_max_cta 옵션 중
+   * 하나라도 초과하면 true로 설정된다.
+   * 설정자: gpgpu_sim_thread_concurrent() 또는 SST_Cycle()에서 cycle_insn_cta_max_hit() 시.
+   * 읽는 자: 시뮬레이션 쓰레드 루프 탈출 후 true이면 exit(1)로 프로세스 강제 종료.
+   *          SST_Cycle()은 true이면 return true하여 SST에 종료를 통보.
+   * 값 범위: false(정상 실행 중) / true(한도 도달, 강제 종료 예정).
+   * 동기화: 단일 시뮬레이션 쓰레드에서만 설정 — 별도 잠금 불필요.
+   * 주의: break_limit = true이면 g_sim_done = true도 함께 설정된다. */
+};
 
 #endif  // GPGPUSIM_ENTRYPOINT_H_INCLUDED
-/*
- * 인클루드 가드의 끝입니다.
- * 맨 위의 #ifndef와 짝을 이루는 #endif입니다.
- * 주석으로 어떤 #ifndef에 대응하는지 적어두는 것이 좋은 습관입니다.
- *
- * ============================================================================
- * 파일 요약 (Summary)
- * ============================================================================
- * 이 헤더 파일은 GPGPUsim_ctx 클래스를 정의합니다.
- * 이 클래스가 하는 일:
- *   1. GPU 시뮬레이션의 상태(시작/실행중/완료)를 추적합니다.
- *   2. 쓰레드 간 동기화(세마포어, 뮤텍스)를 관리합니다.
- *   3. GPU 설정, GPU 시뮬레이터, 스트림 관리자 등 핵심 객체들의 포인터를 보관합니다.
- *   4. CUDA 런타임 환경(디바이스, 컨텍스트)의 포인터를 보관합니다.
- *
- * 이 클래스는 시뮬레이션의 "관제탑" 같은 역할을 합니다!
- * ============================================================================
- */
+/* [한국어] 인클루드 가드 종료. 파일 최상단의 #ifndef GPGPUSIM_ENTRYPOINT_H_INCLUDED와 짝을 이룬다. */
