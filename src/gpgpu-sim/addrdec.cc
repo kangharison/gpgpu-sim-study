@@ -498,7 +498,8 @@ void linear_to_raw_address_translation::addrdec_tlx(new_addr_type addr,
       /* [한국어] 서브파티션 인덱스가 전체 서브파티션 수 이내인지 확인. */
       return;
       /* [한국어] 함수 하단의 공통 sub_partition 계산 코드를 건너뛰고 즉시 반환. */
-      break;
+      break;  /* [한국어] 도달 불가 코드(dead code) — return으로 이미 함수가 종료되므로 실행되지 않는다.
+               *          C++ switch-case 문법상 case 블록의 종결을 명시적으로 표현하기 위해 유지. */
     }
 
     case RANDOM: {
@@ -544,7 +545,8 @@ void linear_to_raw_address_translation::addrdec_tlx(new_addr_type addr,
       /* [한국어] 서브파티션 인덱스가 전체 서브파티션 수 이내인지 확인. */
       return;
       /* [한국어] sub_partition과 chip이 이미 설정되었으므로 함수 하단의 공통 계산을 건너뛰고 즉시 반환. */
-      break;
+      break;  /* [한국어] 도달 불가 코드(dead code) — return으로 이미 함수가 종료되므로 실행되지 않는다.
+               *          IPOLY case와 동일하게 C++ switch-case 문법상 블록 종결 표현을 위해 유지. */
     }
 
     case CUSTOM:
@@ -922,9 +924,9 @@ void linear_to_raw_address_translation::init(
       addrdec_mask[COL] = 0x0000000000001CFF;   /* [한국어] case 0 스타일 비연속 열 마스크 */
 
     default:
-      break;
       /* [한국어] default: 알 수 없는 gpgpu_mem_address_mask 값이거나 case 160 fall-through.
        * 별도 처리 없이 이전에 설정된 값(또는 생성자 기본값)을 유지. */
+      break;
   }
 
   if (addrdec_option != NULL) addrdec_parseoption(addrdec_option);

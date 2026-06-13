@@ -171,9 +171,22 @@ enum partition_index_function {
  * 멀티스레드 접근 없이 단일 memory_partition_unit 스레드가 단독으로 읽고 쓴다.
  */
 struct addrdec_t {
+  /*
+   * [한국어]
+   * print - addrdec_t 의 모든 필드를 파일 스트림에 출력 (디버깅/검증용)
+   *
+   * @fp:     출력 대상 파일 포인터 (stdout / stderr / 임의 파일).
+   * @return: 없음 (void).
+   *
+   * chip, bk, row, col, burst, sub_partition 필드를 16진수/10진수 형식으로 출력한다.
+   * gpgpusim.config의 -gpgpu_mem_addr_mapping 설정 결과를 검증하거나
+   * sweep_test() 실행 시 모든 주소 조합의 디코딩 결과를 확인할 때 주로 호출된다.
+   *
+   * 호출 체인:
+   *   sweep_test() → [addrdec_t::print(fp)] → fprintf(fp, ...)
+   *   또는 디버깅 목적으로 직접 호출
+   */
   void print(FILE *fp) const;
-  // [한국어] 디버깅용 출력 함수. 분해된 모든 필드(chip, bk, row, col, burst, sub_partition)를
-  // fp 스트림에 16진수/10진수로 출력한다. 주소 매핑 검증 및 sweep_test() 결과 확인에 사용.
 
   unsigned chip;
   /* [한국어] DRAM 채널(메모리 파티션) 인덱스.
