@@ -152,11 +152,12 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/dram.h | DRAM 타이밍 헤더 (dram_req_t, bankgrp_t, bank_t, dram_t 클래스 전체 필드 주석) | 2026-06-13 |
 | src/gpgpu-sim/dram.cc | DRAM 타이밍 구현 (생성자/push/cycle/issue_col_command/issue_row_command 등) | 2026-06-13 |
 
+| src/abstract_hardware_model.h | GPU 추상 하드웨어 모델 헤더 전체 (inst_t, warp_inst_t, core_t, register_set, 메모리 상수/구조체) | 2026-06-13 |
+
 ### 미완료 (우선순위 순)
 
 | 디렉토리 | 설명 | 우선순위 |
 |---------|------|---------|
-| src/abstract_hardware_model.* | 상위 추상 (warp, SIMT stack, thread block) | P0 |
 | src/gpgpu-sim/shader.* | SM 파이프라인 (핵심) | P0 |
 | src/gpgpu-sim/gpu-sim.* | cycle-by-cycle 시뮬레이션 루프 | P0 |
 | src/gpgpu-sim/gpu-cache.* | 캐시 계층 | P0 |
