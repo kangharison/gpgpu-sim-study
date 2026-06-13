@@ -129,7 +129,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 ## 주석 작업 진행 현황
 
-### 완료 (32 파일)
+### 완료 (34 파일)
 
 | 파일 | 설명 | 완료일 |
 |------|------|--------|
@@ -175,6 +175,8 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/shader_trace.h | 셰이더 코어 전용 디버그 트레이스 매크로 (SHADER_DTRACE/DPRINTF/SCHED_DPRINTF, TRACING_ON 분기, no-op 정의) | 2026-06-13 |
 | src/gpgpu-sim/l2cache_trace.h | L2 캐시/메모리 파티션 전용 디버그 트레이스 매크로 (MEMPART_DTRACE/DPRINTF, MEM_SUBPART_DTRACE/DPRINTF) | 2026-06-13 |
 | src/gpgpu-sim/stats.h | 메모리 파이프라인 통계 열거형 (mem_stage_access_type 7종, tlb_request_status 3종, mem_stage_stall_type 9종 전체 필드 주석) | 2026-06-13 |
+| src/cuda-sim/cuda-sim.h | PTX 기능 시뮬레이션 공개 인터페이스 (functionalCoreSim 클래스, cuda_sim 클래스 전체 필드/멤버함수, ptx_sim_init_thread/ptx_sim_kernel_info/get_converge_point 선언, 상수 매크로 주석) | 2026-06-14 |
+| src/cuda-sim/cuda-sim.cc | PTX 기능 시뮬레이션 구현 (ptx_exec_inst 핵심 실행 루프, ptx_assemble PC할당, pre_decode 타이밍준비, ptx_sim_init_thread CTA초기화, gpgpu_cuda_ptx_sim_main_func 최상위 루프, 텍스처/메모리 API 전체 주석) | 2026-06-14 |
 
 ### 미완료 (우선순위 순)
 
