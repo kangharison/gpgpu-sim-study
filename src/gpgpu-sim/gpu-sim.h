@@ -1,25 +1,62 @@
 /*
- * ============================================================================
- * gpu-sim.h - GPGPU-Sim GPU 시뮬레이터의 핵심 헤더 파일
- * ============================================================================
+ * [한국어 설명] GPGPU-Sim GPU 타이밍 시뮬레이터 핵심 헤더 (gpu-sim.h)
  *
- * 이 파일은 GPU(그래픽 처리 장치)를 소프트웨어로 흉내 내는 "시뮬레이터"의
- * 핵심 설계도(헤더 파일)입니다.
+ * === 파일의 역할 ===
+ * 이 파일은 GPGPU-Sim의 최상위 GPU 타이밍 시뮬레이터를 정의하는 핵심 헤더이다.
+ * GPU 전체(모든 SM 클러스터, L2 캐시, DRAM 파티션, ICNT)를 사이클-레벨로
+ * 시뮬레이션하는 gpgpu_sim 클래스와 그에 필요한 설정 구조체들을 선언한다.
+ * 여기서 선언된 gpgpu_sim::cycle()이 매 클럭 사이클마다 호출되며, 전체 GPU
+ * 마이크로아키텍처의 상태 전이를 구동하는 시뮬레이션의 심장부 역할을 한다.
+ * 또한 전력 설정(power_config), 메모리 설정(memory_config), 시뮬레이션 전체
+ * 설정(gpgpu_sim_config) 클래스를 정의하여 gpgpusim.config 파일로부터 읽은
+ * 파라미터를 구조화된 객체로 관리한다.
  *
- * GPU란? 원래 그래픽(화면 그리기)을 위해 만들어졌지만,
- * 요즘은 인공지능, 과학 계산 등 대량의 데이터를 동시에 처리하는 데 사용됩니다.
- * GPU 안에는 수천 개의 작은 계산 장치가 들어 있어서 많은 일을 동시에 할 수 있습니다.
+ * === 전체 아키텍처에서의 위치 ===
+ * 타이밍 시뮬레이션 계층(gpgpu-sim/)의 최상위 진입점이다.
+ * 호출 체인:
+ *   gpgpusim_entrypoint.cc (cuLaunchKernel 인터셉트)
+ *     → stream_manager.cc (CUDA 스트림 관리)
+ *       → gpgpu_sim::cycle() [이 파일]  ← 매 코어 클럭 사이클마다 반복
+ *           → shader_core_cluster::core_cycle()  (SM 파이프라인: shader.cc)
+ *           → memory_partition_unit::dram_cycle() (DRAM 타이밍: dram.cc)
+ *           → memory_sub_partition::cache_cycle() (L2 캐시: l2cache.cc)
+ *           → icnt_transfer() (NoC 라우팅: intersim2/)
+ * 실행 컨텍스트: 호스트 유저스페이스 단일 스레드 (시뮬레이션 루프).
+ * 다중 SM/클러스터는 루프로 순차 처리하며, 실제 병렬성 없음.
  *
- * 시뮬레이터란? 실제 GPU 하드웨어 없이도 GPU가 어떻게 동작하는지
- * 컴퓨터 프로그램으로 똑같이 흉내 내는 도구입니다.
- * 연구자들이 새로운 GPU 설계를 테스트할 때 사용합니다.
+ * === 타 모듈과의 연결 ===
+ * 의존하는 모듈:
+ *   - shader.h: shader_core_config, simt_core_cluster (SM 설정 및 클러스터)
+ *   - gpu-cache.h: l2_cache_config, cache_stats (L2 캐시 설정)
+ *   - addrdec.h: linear_to_raw_address_translation (주소→DRAM 매핑)
+ *   - abstract_hardware_model.h: gpgpu_t 기반 클래스, kernel_info_t, mem_fetch
+ *   - option_parser.h: gpgpusim.config 파라미터 등록/파싱
+ *   - dram.h (gpu-sim.cc에서): memory_partition_unit DRAM 타이밍 모델
+ *   - intersim2/ (icnt_wrapper.h): ICNT NoC 시뮬레이터 인터페이스
+ * 이 파일에 의존하는 모듈:
+ *   - gpgpusim_entrypoint.cc: exec_gpgpu_sim 생성 및 cycle() 구동
+ *   - stream_manager.cc: gpgpu_sim::launch(), active(), cycle() 호출
+ *   - libcuda/: CUDA 런타임 인터셉트에서 GPU 속성 조회
+ *   - accelwattch/ (power_interface.h): AccelWattch 전력 모델 연동
+ * 공유 자료구조:
+ *   - kernel_info_t: 실행 중인 커널 메타데이터 (m_running_kernels[])
+ *   - mem_fetch: 메모리 요청 패킷 (mem_fetch.h)
+ *   - shader_core_stats, memory_stats_t, power_stat_t: 통계 집계 객체
  *
- * 이 파일에서 정의하는 것들:
- * 1. GPU 메모리(DRAM) 설정 - 데이터를 저장하는 메모리의 동작 방식
- * 2. GPU 전력(파워) 설정 - GPU가 얼마나 전기를 쓰는지 측정
- * 3. GPU 시뮬레이션 설정 - 시뮬레이터의 전체 동작 제어
- * 4. GPU 시뮬레이터 클래스 - 실제 시뮬레이션을 수행하는 핵심 클래스
- * ============================================================================
+ * === 주요 함수/구조체 요약 ===
+ * gpgpu_sim::cycle()     - 매 사이클 전체 GPU 상태 전이; CORE/ICNT/DRAM/L2
+ *                          클럭 도메인을 next_clock_domain()으로 선택해 진행
+ * gpgpu_sim::init()      - 커널 실행 전 사이클 카운터·비주얼라이저·ICNT 초기화
+ * gpgpu_sim::launch()    - 커널을 m_running_kernels[] 슬롯에 등록
+ * gpgpu_sim::active()    - 미완료 warp·DRAM busy·ICNT traffic 여부로 종료 판정
+ * gpgpu_sim::select_kernel() - 라운드로빈으로 실행할 커널 선택
+ * gpgpu_sim_config       - power/shader/memory/clock 설정 통합; reg_options()로
+ *                          gpgpusim.config 파라미터를 OptionParser에 등록
+ * memory_config          - DRAM 타이밍(tRCD/tRAS/CL 등), L2 큐, 파티션 수 등
+ *                          메모리 서브시스템 전체 설정을 담는 클래스
+ * power_config           - AccelWattch XML, 전력 시뮬레이션 모드,
+ *                          hybrid 카운터 설정을 담는 구조체
+ * occupancy_stats        - warp 슬롯 채움률(점유율) 누적 집계 구조체
  */
 
 // Copyright (c) 2009-2021, Tor M. Aamodt, Wilson W.L. Fung, Vijay Kandiah,
