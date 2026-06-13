@@ -129,9 +129,12 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 ## 주석 작업 진행 현황
 
-### 완료 (0 파일)
+### 완료 (2 파일)
 
-(아직 시작하지 않음)
+| 파일 | 설명 | 완료일 |
+|------|------|--------|
+| src/gpgpu-sim/addrdec.h | 주소 디코딩 헤더 (enum, struct, class 선언) | 2026-06-13 |
+| src/gpgpu-sim/addrdec.cc | 주소 디코딩 구현 (전체 함수 + 인라인 주석) | 2026-06-13 |
 
 ### 미완료 (우선순위 순)
 
@@ -145,7 +148,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/mem_fetch.* | 메모리 요청 객체 | P0 |
 | src/cuda-sim/ptx_ir.*, instructions.cc | PTX IR 및 명령어 시맨틱 | P1 |
 | src/cuda-sim/cuda-math.h | CUDA 수학 에뮬레이션 | P1 |
-| src/gpgpu-sim/scoreboard.*, addrdec.* | 스코어보드/주소 디코딩 | P1 |
+| src/gpgpu-sim/scoreboard.* | 스코어보드 | P1 |
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
 | src/accelwattch/ | 전력 모델 | P2 |
 | libcuda/, libopencl/ | 런타임 인터셉트 | P2 |
