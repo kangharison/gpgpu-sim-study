@@ -177,12 +177,13 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/stats.h | 메모리 파이프라인 통계 열거형 (mem_stage_access_type 7종, tlb_request_status 3종, mem_stage_stall_type 9종 전체 필드 주석) | 2026-06-13 |
 | src/cuda-sim/cuda-sim.h | PTX 기능 시뮬레이션 공개 인터페이스 (functionalCoreSim 클래스, cuda_sim 클래스 전체 필드/멤버함수, ptx_sim_init_thread/ptx_sim_kernel_info/get_converge_point 선언, 상수 매크로 주석) | 2026-06-14 |
 | src/cuda-sim/cuda-sim.cc | PTX 기능 시뮬레이션 구현 (ptx_exec_inst 핵심 실행 루프, ptx_assemble PC할당, pre_decode 타이밍준비, ptx_sim_init_thread CTA초기화, gpgpu_cuda_ptx_sim_main_func 최상위 루프, 텍스처/메모리 API 전체 주석) | 2026-06-14 |
+| src/gpgpu-sim/shader.h | SM 파이프라인 헤더 전체 (scheduler_unit 계층, opndcoll_rfu_t, ldst_unit, barrier_set_t, shader_core_config, shader_core_stats, shader_core_ctx, exec_shader_core_ctx, simt_core_cluster, exec_simt_core_cluster, sst_simt_core_cluster, shader_memory_interface 등 모든 클래스 전체 주석) | 2026-06-14 |
 
 ### 미완료 (우선순위 순)
 
 | 디렉토리 | 설명 | 우선순위 |
 |---------|------|---------|
-| src/gpgpu-sim/shader.* | SM 파이프라인 (핵심) | P0 |
+| src/gpgpu-sim/shader.cc | SM 파이프라인 구현 (핵심) | P0 |
 | src/gpgpu-sim/gpu-cache.* | 캐시 계층 | P0 |
 | src/cuda-sim/instructions.cc | PTX 명령어 시맨틱 | P1 |
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
