@@ -129,7 +129,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 ## 주석 작업 진행 현황
 
-### 완료 (34 파일)
+### 완료 (35 파일)
 
 | 파일 | 설명 | 완료일 |
 |------|------|--------|
@@ -178,12 +178,12 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/cuda-sim/cuda-sim.h | PTX 기능 시뮬레이션 공개 인터페이스 (functionalCoreSim 클래스, cuda_sim 클래스 전체 필드/멤버함수, ptx_sim_init_thread/ptx_sim_kernel_info/get_converge_point 선언, 상수 매크로 주석) | 2026-06-14 |
 | src/cuda-sim/cuda-sim.cc | PTX 기능 시뮬레이션 구현 (ptx_exec_inst 핵심 실행 루프, ptx_assemble PC할당, pre_decode 타이밍준비, ptx_sim_init_thread CTA초기화, gpgpu_cuda_ptx_sim_main_func 최상위 루프, 텍스처/메모리 API 전체 주석) | 2026-06-14 |
 | src/gpgpu-sim/shader.h | SM 파이프라인 헤더 전체 (scheduler_unit 계층, opndcoll_rfu_t, ldst_unit, barrier_set_t, shader_core_config, shader_core_stats, shader_core_ctx, exec_shader_core_ctx, simt_core_cluster, exec_simt_core_cluster, sst_simt_core_cluster, shader_memory_interface 등 모든 클래스 전체 주석) | 2026-06-14 |
+| src/gpgpu-sim/shader.cc | SM 파이프라인 구현 전체 (shader_core_ctx::cycle 핵심 루프, warp 스케줄러 6종 GTO/LRR/RRR/TwoLevel/OldestFirst/SWL, operand collector wavefront 알고리즘, ldst_unit writeback/cycle, barrier_set __syncthreads 구현, simt_core_cluster icnt_cycle/issue_block2core, exec_shader_core_ctx::checkExecutionStatusAndUpdate 등 모든 함수 + 인라인 주석) | 2026-06-14 |
 
 ### 미완료 (우선순위 순)
 
 | 디렉토리 | 설명 | 우선순위 |
 |---------|------|---------|
-| src/gpgpu-sim/shader.cc | SM 파이프라인 구현 (핵심) | P0 |
 | src/gpgpu-sim/gpu-cache.* | 캐시 계층 | P0 |
 | src/cuda-sim/instructions.cc | PTX 명령어 시맨틱 | P1 |
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
