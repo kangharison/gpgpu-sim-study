@@ -423,40 +423,202 @@ struct power_config {
 
   // === 멤버 변수(member variables) - 전력 설정 값들을 저장 ===
 
-  char *g_power_config_name;  // 전력 설정 파일의 이름
+  char *g_power_config_name;
+  /* [한국어] AccelWattch 전력 모델 XML 설정 파일의 경로 문자열.
+   * 설정자: reg_options()에서 --power_config_name 옵션으로 OptionParser에 등록되며,
+   *         gpgpusim.config 파싱 시 strdup으로 복사됨.
+   * 읽는 자: gpu-sim.cc의 power 초기화 코드가 AccelWattch XML 로드 시 이 경로를 사용.
+   * 값 범위: 유효한 파일 경로 문자열; NULL이면 전력 시뮬레이션 비활성화와 동일 효과.
+   * 동기화: 시뮬레이션 시작 전 단일 스레드에서만 읽히므로 별도 락 불필요. */
 
-  bool m_valid;                          // 이 설정이 유효한지 여부 (true = 유효, false = 무효)
-  bool g_power_simulation_enabled;       // 전력 시뮬레이션 활성화 여부
-  bool g_power_trace_enabled;            // 전력 트레이스(추적) 기록 활성화 여부
-  bool g_steady_power_levels_enabled;    // 정상 상태 전력 레벨 추적 활성화 여부
-  bool g_power_per_cycle_dump;           // 매 사이클마다 전력 정보를 출력할지 여부
-  bool g_power_simulator_debug;          // 전력 시뮬레이터 디버그 모드 활성화 여부
-  char *g_power_filename;                // 전력 보고서 파일 이름
-  char *g_power_trace_filename;          // 전력 트레이스 파일 이름
-  char *g_metric_trace_filename;         // 메트릭 트레이스 파일 이름
-  char *g_steady_state_tracking_filename;// 정상 상태 추적 파일 이름
-  int g_power_trace_zlevel;              // 트레이스 파일 압축 수준 (0 = 압축 안함, 9 = 최대 압축)
-  char *gpu_steady_state_definition;     // 정상 상태 정의 문자열 (편차:최소기간 형식)
-  double gpu_steady_power_deviation;     // 정상 상태로 간주하는 전력 편차 허용 범위
-  double gpu_steady_min_period;          // 정상 상태로 간주하는 최소 유지 기간
+  bool m_valid;
+  /* [한국어] 이 power_config 객체가 정상적으로 초기화되었는지 나타내는 유효성 플래그.
+   * 설정자: 생성자에서 true로 초기화됨; init()이 완료 후에도 true 유지.
+   * 읽는 자: gpgpu_sim_config::init() 등 상위 초기화 코드가 설정 유효성 확인에 사용.
+   * 값 범위: true(유효) 또는 false(아직 초기화 안 됨 / 오류).
+   * 동기화: 시뮬레이션 시작 전 단일 스레드 접근이므로 락 불필요. */
 
-  char *g_hw_perf_file_name;             // 하드웨어 성능 파일 이름 (실제 GPU 측정 데이터)
-  char *g_hw_perf_bench_name;            // 하드웨어 성능 벤치마크 이름
-  int g_power_simulation_mode;           // 전력 시뮬레이션 모드 (어떤 방법으로 전력을 계산할지)
-  bool g_dvfs_enabled;                   // DVFS(Dynamic Voltage and Frequency Scaling) 활성화 여부
-                                         // DVFS란? 필요에 따라 전압과 주파수를 조절하여 전력을 절약하는 기술
-  bool g_aggregate_power_stats;          // 전력 통계를 누적할지 여부
+  bool g_power_simulation_enabled;
+  /* [한국어] AccelWattch 전력 소비 시뮬레이션 전체를 켜거나 끄는 마스터 스위치.
+   * 설정자: reg_options()에서 --enable_power_simulation 옵션으로 등록되며,
+   *         gpgpusim.config에서 0(꺼짐) 또는 1(켜짐)로 지정.
+   * 읽는 자: gpu-sim.cc::cycle()이 매 사이클마다 전력 카운터를 갱신할지 여부를 결정.
+   * 값 범위: true(켜짐) 또는 false(꺼짐); false이면 전력 관련 연산 일체 생략.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용이므로 락 불필요. */
 
-  // AccelWattch 하이브리드 설정 배열
-  // 각 성능 카운터에 대해 시뮬레이션 값을 사용할지, 실제 하드웨어 값을 사용할지 결정
+  bool g_power_trace_enabled;
+  /* [한국어] 매 샘플 주기마다 전력 수치를 g_power_trace_filename에 기록할지 여부.
+   * 설정자: reg_options()에서 --power_trace_enabled 옵션으로 등록.
+   * 읽는 자: AccelWattch 래퍼(gpgpusim_wrapper)가 전력 샘플 수집 후 파일 출력 여부 판단.
+   * 값 범위: true(기록) 또는 false(생략); 파일 크기와 성능에 영향.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_steady_power_levels_enabled;
+  /* [한국어] 정상 상태(steady state) 전력 레벨 추적 기능을 활성화하는 플래그.
+   * 설정자: reg_options()에서 --steady_power_levels_enabled 옵션으로 등록.
+   *         true이면 init()에서 gpu_steady_state_definition을 파싱해
+   *         gpu_steady_power_deviation, gpu_steady_min_period를 설정함.
+   * 읽는 자: AccelWattch 전력 분석 코드가 전력이 안정구간에 진입했는지 판단.
+   * 값 범위: true 또는 false.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_power_per_cycle_dump;
+  /* [한국어] 매 사이클마다 전력 정보를 덤프(파일 기록)할지 여부.
+   * 설정자: reg_options()에서 --power_per_cycle_dump 옵션으로 등록.
+   * 읽는 자: AccelWattch 래퍼가 각 사이클 후 파일 쓰기 여부를 결정.
+   * 값 범위: true(사이클마다 덤프 — 출력 파일 매우 커짐) 또는 false(샘플 주기만).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_power_simulator_debug;
+  /* [한국어] AccelWattch 전력 시뮬레이터의 디버그 메시지 출력을 활성화하는 플래그.
+   * 설정자: reg_options()에서 --power_simulator_debug 옵션으로 등록.
+   * 읽는 자: AccelWattch 내부 코드가 디버그 출력을 출력할지 여부를 확인.
+   * 값 범위: true(디버그 메시지 출력) 또는 false(출력 없음).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *g_power_filename;
+  /* [한국어] 전력 집계 보고서를 저장할 파일 경로.
+   * 설정자: init()에서 snprintf+strdup으로 "accelwattch_power_report.log"로 생성됨.
+   * 읽는 자: AccelWattch 래퍼가 최종 전력 보고서를 이 파일에 기록.
+   * 값 범위: 유효한 파일 경로 문자열; strdup으로 힙 할당됨.
+   * 동기화: init() 이후 읽기 전용. */
+
+  char *g_power_trace_filename;
+  /* [한국어] 전력 트레이스(시계열 기록)를 저장할 gzip 압축 파일 경로.
+   * 설정자: init()에서 날짜 포함 파일명으로 strdup 생성
+   *         ("gpgpusim_power_trace_report__<날짜>.log.gz").
+   * 읽는 자: g_power_trace_enabled가 true일 때 AccelWattch 래퍼가 사용.
+   * 값 범위: 유효한 파일 경로 문자열; .gz 확장자로 gzip 압축 저장.
+   * 동기화: init() 이후 읽기 전용. */
+
+  char *g_metric_trace_filename;
+  /* [한국어] AccelWattch 메트릭(성능 카운터 원본 데이터) 트레이스 파일 경로.
+   * 설정자: init()에서 날짜 포함 파일명으로 strdup 생성
+   *         ("gpgpusim_metric_trace_report__<날짜>.log.gz").
+   * 읽는 자: AccelWattch 래퍼가 카운터 원본값 기록 시 사용.
+   * 값 범위: 유효한 .gz 파일 경로 문자열.
+   * 동기화: init() 이후 읽기 전용. */
+
+  char *g_steady_state_tracking_filename;
+  /* [한국어] 정상 상태 추적 결과를 저장할 gzip 압축 파일 경로.
+   * 설정자: init()에서 날짜 포함 파일명으로 strdup 생성
+   *         ("gpgpusim_steady_state_tracking_report__<날짜>.log.gz").
+   * 읽는 자: g_steady_power_levels_enabled가 true일 때 AccelWattch 래퍼가 사용.
+   * 값 범위: 유효한 .gz 파일 경로 문자열.
+   * 동기화: init() 이후 읽기 전용. */
+
+  int g_power_trace_zlevel;
+  /* [한국어] 전력/메트릭 트레이스 파일의 gzip 압축 수준.
+   * 설정자: reg_options()에서 --power_trace_zlevel 옵션으로 등록.
+   * 읽는 자: AccelWattch 래퍼가 gzip 파일 개시 시 zlib에 전달.
+   * 값 범위: 0(무압축, 가장 빠름) ~ 9(최대 압축, 가장 느림).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *gpu_steady_state_definition;
+  /* [한국어] 정상 상태를 정의하는 파라미터 문자열 (형식: "편차:최소기간").
+   * 설정자: reg_options()에서 --gpu_steady_state_definition 옵션으로 등록;
+   *         init()에서 sscanf로 파싱되어 gpu_steady_power_deviation과
+   *         gpu_steady_min_period에 수치값으로 저장됨.
+   * 읽는 자: init()의 파싱 단계에서만 직접 읽힘; 이후는 파싱된 값들이 사용됨.
+   * 값 범위: "0.05:0.5" 형식 등 두 double 값을 콜론으로 구분한 문자열.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double gpu_steady_power_deviation;
+  /* [한국어] 정상 상태로 간주하기 위한 전력 편차 허용 범위 (비율 또는 절댓값).
+   * 설정자: init()에서 gpu_steady_state_definition을 sscanf로 파싱해 저장.
+   * 읽는 자: AccelWattch 래퍼가 전력 변동률이 이 범위 내인지 확인.
+   * 값 범위: 0.0 초과의 실수; 예: 0.05 = ±5% 이내이면 정상 상태로 판정.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double gpu_steady_min_period;
+  /* [한국어] 정상 상태가 지속되어야 하는 최소 기간 (단위: 샘플 횟수 또는 ms).
+   * 설정자: init()에서 gpu_steady_state_definition을 sscanf로 파싱해 저장.
+   * 읽는 자: AccelWattch 래퍼가 전력이 이 기간 이상 안정적이면 정상 상태로 선언.
+   * 값 범위: 0.0 초과의 실수; 단위는 사용처에 따라 사이클 또는 ms.
+   * 동기화: init() 이후 읽기 전용. */
+
+  char *g_hw_perf_file_name;
+  /* [한국어] 실제 하드웨어 GPU에서 측정한 성능 카운터 데이터 파일 경로.
+   * 설정자: reg_options()에서 --hw_perf_file_name 옵션으로 등록.
+   * 읽는 자: AccelWattch 하이브리드 모드(g_power_simulation_mode==hybrid)에서
+   *         실측 카운터값을 로드할 때 사용.
+   * 값 범위: 유효한 파일 경로 문자열 또는 NULL(하이브리드 모드 미사용 시).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *g_hw_perf_bench_name;
+  /* [한국어] 하드웨어 성능 데이터 파일 내에서 찾을 벤치마크 이름 키.
+   * 설정자: reg_options()에서 --hw_perf_bench_name 옵션으로 등록.
+   * 읽는 자: AccelWattch 하이브리드 모드에서 CSV 파일의 행을 필터링할 때 사용.
+   * 값 범위: 유효한 문자열 또는 NULL.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  int g_power_simulation_mode;
+  /* [한국어] AccelWattch 전력 계산 방식을 선택하는 모드 값.
+   * 설정자: reg_options()에서 --power_simulation_mode 옵션으로 등록.
+   * 읽는 자: AccelWattch 래퍼(gpgpusim_wrapper)가 초기화 시 모드에 맞는
+   *         계산 경로를 선택함.
+   * 값 범위: 0=시뮬레이션 카운터만 사용, 1=하드웨어 카운터만 사용,
+   *          2=하이브리드(accelwattch_hybrid_configuration 배열로 항목별 선택).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_dvfs_enabled;
+  /* [한국어] DVFS(Dynamic Voltage and Frequency Scaling) 기능 활성화 플래그.
+   * DVFS란 전력 절감을 위해 부하에 따라 전압과 클럭 주파수를 동적으로 조절하는 기술.
+   * 설정자: reg_options()에서 --dvfs_enabled 옵션으로 등록.
+   * 읽는 자: AccelWattch 전력 스케일링 코드가 주파수 변경 시 전력을 재계산.
+   * 값 범위: true(DVFS 활성) 또는 false(고정 전압/주파수).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_aggregate_power_stats;
+  /* [한국어] 커널 경계를 넘어 전력 통계를 누적할지 여부를 결정하는 플래그.
+   * 설정자: reg_options()에서 --aggregate_power_stats 옵션으로 등록.
+   * 읽는 자: AccelWattch 래퍼가 커널 완료 시 통계 리셋 여부를 결정.
+   * 값 범위: true(전체 누적) 또는 false(커널별 독립 통계).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
   bool accelwattch_hybrid_configuration[hw_perf_t::HW_TOTAL_STATS];
+  /* [한국어] AccelWattch 하이브리드 모드에서 각 성능 카운터를 시뮬레이션값으로
+   * 사용할지(true) 실제 하드웨어 측정값으로 사용할지(false)를 항목별로 지정하는 배열.
+   * 인덱스는 hw_perf_t 열거형 값(HW_L1_RH, HW_L2_RM 등)과 대응됨.
+   * 설정자: reg_options()에서 --accelwattch_hybrid_configuration 옵션 등록;
+   *         init() 주석 처리된 코드 원래 여기서 0 초기화 예정.
+   * 읽는 자: AccelWattch 하이브리드 계산 경로가 항목별로 소스를 전환할 때 참조.
+   * 값 범위: 각 원소 true(시뮬값) 또는 false(실측값); 배열 크기 = HW_TOTAL_STATS.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  // === 비선형 전력 모델 관련 변수들 ===
-  // 비선형 모델은 GPU 코어가 많아질수록 전력이 단순히 비례하지 않는 현상을 모델링
-  bool g_use_nonlinear_model;            // 비선형 전력 모델 사용 여부
-  char *gpu_nonlinear_model_config;      // 비선형 모델 설정 문자열
-  double gpu_idle_core_power;            // 유휴(idle) 코어의 전력 소비량 (아무 일도 안 할 때 쓰는 전기)
-  double gpu_min_inc_per_active_sm;      // 활성 SM 하나당 최소 전력 증가량
+  bool g_use_nonlinear_model;
+  /* [한국어] AccelWattch 비선형(nonlinear) 전력 모델 사용 여부.
+   * 비선형 모델이란 활성 SM 수에 전력이 선형 비례하지 않는 현상을 반영한 모델.
+   * 설정자: reg_options()에서 --use_nonlinear_model 옵션으로 등록.
+   * 읽는 자: AccelWattch 전력 계산 코드가 선형/비선형 분기를 선택할 때 확인.
+   * 값 범위: true(비선형 모델) 또는 false(선형 모델).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *gpu_nonlinear_model_config;
+  /* [한국어] 비선형 전력 모델의 파라미터 문자열 (형식: "유휴전력:SM당최소증분").
+   * 설정자: reg_options()에서 --gpu_nonlinear_model_config 옵션으로 등록;
+   *         원래 init()에서 sscanf로 파싱 예정이었으나 현재 주석 처리됨.
+   * 읽는 자: 비선형 모델 초기화 코드(현재 비활성)가 참조.
+   * 값 범위: "0.5:0.02" 형식 등 두 double 값을 콜론으로 구분한 문자열.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  double gpu_idle_core_power;
+  /* [한국어] 유휴(idle) 상태 GPU 코어의 정적(static) 전력 소비량 (단위: Watt).
+   * 아무 연산도 수행하지 않는 코어가 소비하는 기본 전력을 나타냄.
+   * 설정자: 비선형 모델 파라미터 파싱 코드에서 gpu_nonlinear_model_config 문자열을
+   *         sscanf로 분해하여 저장 (현재 해당 파싱 코드는 주석 처리됨).
+   * 읽는 자: AccelWattch 비선형 모델 계산 코드가 유휴 코어 전력 기여분 계산 시 사용.
+   * 값 범위: 0.0 이상의 double; 예: 0.5W.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  double gpu_min_inc_per_active_sm;
+  /* [한국어] SM(Streaming Multiprocessor)이 활성화될 때마다 추가되는 최소 전력 증분 (단위: Watt).
+   * 비선형 모델에서 "SM을 하나 더 켤 때 최소 이 만큼은 전력이 늘어난다"는 하한값.
+   * 설정자: 비선형 모델 파라미터 파싱 코드(현재 주석 처리됨)에서 저장.
+   * 읽는 자: AccelWattch 비선형 모델이 활성 SM 기여 전력 계산 시 사용.
+   *   NOTE: 비선형 모델 개정 후 이 값은 더 이상 사용되지 않는다고 주석에 명시됨.
+   * 값 범위: 0.0 이상의 double; 예: 0.02W.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 };
 
 /*
@@ -667,88 +829,448 @@ class memory_config {
 
   // === 멤버 변수들 - 메모리 시스템 설정값 저장 ===
 
-  bool m_valid;                         // 이 설정이 유효한지 여부
-  mutable l2_cache_config m_L2_config;  // L2 캐시 설정 (mutable = const 함수에서도 수정 가능)
-  bool m_L2_texure_only;                // L2 캐시를 텍스처 전용으로 사용할지 여부
+  bool m_valid;
+  /* [한국어] memory_config 객체의 유효성 플래그. init()이 정상 완료되면 true로 설정됨.
+   * 설정자: 생성자에서 false로, init() 마지막 단계에서 true로 변경됨.
+   * 읽는 자: gpgpu_sim_config::init()이 메모리 설정 유효 여부 확인에 사용.
+   * 값 범위: false(미초기화/오류) 또는 true(정상 초기화 완료).
+   * 동기화: 시뮬레이션 시작 전 단일 스레드 접근이므로 락 불필요. */
 
-  char *gpgpu_dram_timing_opt;          // DRAM 타이밍 옵션 문자열 (사용자 입력)
-  char *gpgpu_L2_queue_config;          // L2 캐시 큐 설정 문자열
-  bool l2_ideal;                        // L2 캐시를 이상적(항상 히트)으로 시뮬레이션할지 여부
-  unsigned gpgpu_frfcfs_dram_sched_queue_size;  // FR-FCFS 스케줄러의 큐 크기
-  unsigned gpgpu_dram_return_queue_size;        // DRAM 반환 큐 크기 (처리된 요청이 돌아오는 대기열)
-  enum dram_ctrl_t scheduler_type;              // DRAM 스케줄러 타입 (FIFO 또는 FR-FCFS)
-  bool gpgpu_memlatency_stat;                   // 메모리 지연시간 통계 수집 여부
-  unsigned m_n_mem;                             // 메모리 채널(파티션) 수
-  unsigned m_n_sub_partition_per_memory_channel; // 채널당 서브 파티션 수
-  unsigned m_n_mem_sub_partition;                // 전체 서브 파티션 수 (= 채널 수 × 채널당 서브 파티션)
-  unsigned gpu_n_mem_per_ctrlr;                 // 컨트롤러당 메모리 칩 수
+  mutable l2_cache_config m_L2_config;
+  /* [한국어] L2 캐시의 크기·associativity·교체 정책 등을 담는 설정 객체.
+   * mutable 한정자가 있어 const memory_config 문맥에서도 init()이 내부 상태를 갱신 가능.
+   * 설정자: init()에서 m_L2_config.init(&m_address_mapping)으로 주소 매핑과 연계 초기화.
+   * 읽는 자: gpu-sim.cc가 memory_sub_partition 생성 시 각 서브파티션의 L2 캐시 초기화에 사용.
+   * 값 범위: gpu-cache.h의 l2_cache_config 구조체; gpgpusim.config -gpgpu_l2_rop_latency 등 옵션으로 설정.
+   * 동기화: 초기화 이후 읽기 전용; 런타임 수정 없음. */
 
-  unsigned rop_latency;   // ROP(Raster Operation Processor) 지연시간 - 그래픽 처리의 마지막 단계
-  unsigned dram_latency;  // DRAM 접근 지연시간 (DRAM에서 데이터를 가져오는 데 걸리는 시간)
+  bool m_L2_texure_only;
+  /* [한국어] L2 캐시를 텍스처(texture) 메모리 전용으로만 사용할지 여부.
+   * true이면 글로벌 메모리 요청이 L2를 우회하여 DRAM으로 직접 접근.
+   * 설정자: reg_options()에서 -gpgpu_l2_texure_only 옵션으로 등록.
+   * 읽는 자: memory_sub_partition::push()가 메모리 타입에 따라 캐시 경유 여부를 결정할 때 확인.
+   * 값 범위: true(텍스처만) 또는 false(전체 메모리 캐싱).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *gpgpu_dram_timing_opt;
+  /* [한국어] DRAM 타이밍 파라미터 전체를 담은 설정 문자열.
+   * 두 가지 형식 지원: (1) 레거시 - "nbk:CCD:RRD:RCD:RAS:RP:RC:CL:WL:CDLR:WR:nbkgrp:CCDL:RTPL"
+   *                   (2) 이름=값 형식 - "nbk=8:CCD=4:RCD=12:..."(순서 무관).
+   * 설정자: reg_options()에서 -gpgpu_dram_timing_opt 옵션으로 등록; init()에서 파싱.
+   * 읽는 자: init()에서 strchr로 '=' 유무를 확인해 레거시/이름형식 파싱 분기.
+   * 값 범위: 유효한 형식의 문자열; NULL이면 assert 실패로 시뮬레이션 중단.
+   * 동기화: init() 이후 더 이상 참조되지 않음 (파싱 결과가 개별 필드에 저장됨). */
+
+  char *gpgpu_L2_queue_config;
+  /* [한국어] L2 캐시와 DRAM 사이의 큐(in/out/return) 크기를 지정하는 설정 문자열.
+   * 설정자: reg_options()에서 -gpgpu_l2_queue 옵션으로 등록.
+   * 읽는 자: l2_cache_config::init()이 이 문자열을 파싱하여 큐 크기를 설정.
+   * 값 범위: "8:8:8" 형식 등 세 정수를 콜론으로 구분.
+   * 동기화: init() 이후 l2_cache_config가 내부적으로 파싱 완료함. */
+
+  bool l2_ideal;
+  /* [한국어] L2 캐시를 이상적(perfect) 캐시로 시뮬레이션할지 여부.
+   * true이면 모든 L2 접근이 즉시 히트하여 DRAM 접근이 발생하지 않음.
+   * 설정자: reg_options()에서 -gpgpu_l2_rop_latency 관련 옵션 또는 별도 옵션으로 등록.
+   * 읽는 자: memory_sub_partition::service_mem_req()가 캐시 룩업 생략 여부를 결정.
+   * 값 범위: true(이상적, 성능 상한 측정용) 또는 false(실제 캐시 타이밍 시뮬레이션).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned gpgpu_frfcfs_dram_sched_queue_size;
+  /* [한국어] FR-FCFS DRAM 스케줄러의 요청 보류 큐(pending queue) 최대 크기.
+   * FR-FCFS(First Ready, First Come First Served)는 같은 행(row) 요청을 우선 처리하는 정책.
+   * 설정자: reg_options()에서 -gpgpu_frfcfs_dram_sched_queue_size 옵션으로 등록.
+   * 읽는 자: frfcfs_scheduler 생성자가 이 값으로 내부 큐를 초기화.
+   * 값 범위: 양의 정수; 0이면 FR-FCFS 스케줄러 비활성.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned gpgpu_dram_return_queue_size;
+  /* [한국어] DRAM 처리 완료 후 응답 패킷이 대기하는 반환 큐의 최대 크기.
+   * 설정자: reg_options()에서 -gpgpu_dram_return_queue_size 옵션으로 등록.
+   * 읽는 자: memory_partition_unit이 DRAM 완료 패킷을 L2로 돌려보낼 때 큐 크기 제한에 사용.
+   * 값 범위: 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  enum dram_ctrl_t scheduler_type;
+  /* [한국어] DRAM 컨트롤러의 요청 스케줄링 알고리즘 선택.
+   * 설정자: reg_options()에서 -gpgpu_dram_scheduler 옵션으로 등록; 0=FIFO, 1=FRFCFS.
+   * 읽는 자: dram_t 생성자가 scheduler_type에 따라 frfcfs_scheduler 또는 FIFO 큐를 생성.
+   * 값 범위: DRAM_FIFO(0) 또는 DRAM_FRFCFS(1).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool gpgpu_memlatency_stat;
+  /* [한국어] 메모리 요청 지연시간(latency) 분포 통계를 수집할지 여부.
+   * 설정자: reg_options()에서 -gpgpu_memlatency_stat 옵션(비트 플래그)으로 등록.
+   * 읽는 자: memory_partition_unit이 요청 완료 시 지연시간 히스토그램에 기록 여부 결정.
+   * 값 범위: 비트 플래그; GPU_MEMLATSTAT_MC(0x2)가 설정되면 MC 지연시간 수집.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned m_n_mem;
+  /* [한국어] GPU의 메모리 채널(파티션, memory_partition_unit) 총 개수.
+   * GDDR5 GPU는 보통 8~16개의 독립 메모리 채널을 가짐.
+   * 설정자: reg_options()에서 -gpgpu_n_mem 옵션으로 등록.
+   * 읽는 자: gpu-sim.cc의 생성자가 m_memory_partition_unit 배열 크기로 사용;
+   *         addrdec.h의 주소 디코딩이 채널 수로 뱅크 인터리빙 계산.
+   * 값 범위: 1 이상의 양의 정수; 일반적으로 2의 거듭제곱.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned m_n_sub_partition_per_memory_channel;
+  /* [한국어] 하나의 메모리 채널 내 서브파티션(L2 캐시 슬라이스) 개수.
+   * 서브파티션마다 독립적인 L2 캐시 뱅크와 ROP 큐를 가짐.
+   * 설정자: reg_options()에서 -gpgpu_n_sub_partition_per_mchannel 옵션으로 등록.
+   * 읽는 자: init()에서 m_n_mem_sub_partition 계산에 사용;
+   *         gpu-sim.cc가 memory_sub_partition 배열 생성에 사용.
+   * 값 범위: 1 이상의 양의 정수; nbk의 약수여야 함(assert로 검증).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned m_n_mem_sub_partition;
+  /* [한국어] GPU 전체의 메모리 서브파티션 총 개수 (= m_n_mem × m_n_sub_partition_per_memory_channel).
+   * 설정자: init()에서 곱셈으로 계산되어 저장됨.
+   * 읽는 자: gpu-sim.cc 생성자가 m_memory_sub_partition 배열 크기로 사용;
+   *         icnt 라우팅이 서브파티션 개수로 목적지 노드 인덱싱.
+   * 값 범위: m_n_mem * m_n_sub_partition_per_memory_channel; 런타임에 변경 없음.
+   * 동기화: init() 이후 읽기 전용. */
+
+  unsigned gpu_n_mem_per_ctrlr;
+  /* [한국어] 하나의 DRAM 컨트롤러(채널)에 연결된 물리 메모리 칩(DRAM die) 개수.
+   * 버스 폭과 함께 한 번의 버스트 전송 데이터 크기(dram_atom_size) 계산에 사용됨.
+   * 설정자: reg_options()에서 -gpgpu_n_mem_per_ctrlr 옵션으로 등록.
+   * 읽는 자: init()에서 dram_atom_size = BL * busW * gpu_n_mem_per_ctrlr 계산에 사용.
+   * 값 범위: 1 이상의 양의 정수; 보통 1~8.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned rop_latency;
+  /* [한국어] ROP(Raster Operation Processor) 단계의 고정 지연시간 (단위: 코어 클럭 사이클).
+   * GPU에서 L2 캐시 접근 전 거치는 ROP 파이프라인의 대기 시간을 모델링.
+   * 설정자: reg_options()에서 -gpgpu_l2_rop_latency 옵션으로 등록.
+   * 읽는 자: memory_sub_partition이 셰이더→L2 경로의 요청에 이 지연을 추가.
+   * 값 범위: 0 이상의 정수; 실제 GPU 기준 120~140 사이클 정도.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned dram_latency;
+  /* [한국어] DRAM 접근 시 추가되는 고정 기본 지연시간 (단위: 메모리 클럭 사이클).
+   * tRCD/tRAS/CL 등 구체적 타이밍 파라미터 외에 전체 지연에 더해지는 오버헤드.
+   * 설정자: reg_options()에서 -gpgpu_dram_latency 옵션으로 등록.
+   * 읽는 자: simple_dram_model이 활성일 때 dram.cc가 이 값으로 간이 지연 시뮬레이션.
+   * 값 범위: 0 이상의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
   // === DRAM 타이밍 파라미터들 ===
   // 이 값들은 실제 DRAM 칩의 사양서(datasheet)에서 가져온 것입니다.
   // 각 값의 단위는 DRAM 클럭 사이클입니다.
 
-  unsigned tCCDL;  // 뱅크 그룹이 활성화되었을 때 열-열 지연
-                   // (같은 뱅크 그룹 내 다른 뱅크에 연속 접근 시 필요한 대기 시간)
-  unsigned tRTPL;  // 뱅크 그룹이 활성화되었을 때 읽기-프리차지 지연
-                   // GDDR5에서는 RTPS와 동일하지만, 다른 DRAM에서는 다를 수 있음
+  unsigned tCCDL;
+  /* [한국어] 뱅크 그룹 간 열(column) 접근 명령의 최소 간격 (CCD for different bank group).
+   * 같은 뱅크 그룹 내의 CCD(tCCD)와 구별되며, 뱅크 그룹 간 버스 충돌 방지에 필요.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱 결과로 저장; 미지정 시 0.
+   * 읽는 자: dram_t::issue_col_command()가 버스 충돌 회피 시간 계산에 사용.
+   * 값 범위: 0 이상의 DRAM 클럭 사이클 수; GDDR5 예시: 4.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned tCCD;    // 열-열 지연 (같은 뱅크 내 연속 열 접근 간 최소 시간)
-  unsigned tRRD;    // 다른 뱅크의 행 활성화 사이 최소 시간
-  unsigned tRCD;    // 행-열 지연 - 행을 활성화한 후 읽기를 시작하기까지 필요한 시간
-  unsigned tRCDWR;  // 쓰기 명령을 위한 행-열 지연
-  unsigned tRAS;    // 행 활성화에 필요한 시간
-  unsigned tRP;     // 행 프리차지(비활성화)에 필요한 시간
-  unsigned
-      tRC;  // 행 사이클 시간 (현재 행 프리차지 후 다른 행 활성화까지의 전체 시간)
-  unsigned tCDLR;  // 쓰기에서 읽기로 전환할 때 필요한 지연 시간
-  unsigned tWR;    // 마지막 데이터 입력부터 행 프리차지까지의 시간
+  unsigned tRTPL;
+  /* [한국어] 뱅크 그룹 간 읽기(Read)에서 프리차지(Precharge)까지의 최소 시간.
+   * 같은 뱅크 그룹 내 tRTP와 달리 그룹 간 전환 시 필요한 추가 대기.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱 결과로 저장; 미지정 시 0.
+   * 읽는 자: dram_t::issue_col_command()가 프리차지 타이밍 계산에 사용.
+   * 값 범위: 0 이상의 DRAM 클럭 사이클; GDDR5에서는 tRTP와 동일할 수 있음.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned CL;    // CAS 지연시간 (읽기 명령 후 데이터가 나올 때까지 걸리는 클럭 수)
-  unsigned WL;    // 쓰기 지연시간 (쓰기 명령 후 데이터를 보낼 수 있을 때까지 걸리는 클럭 수)
-  unsigned BL;    // 버스트 길이(Burst Length) - 한 번에 전송하는 데이터 바이트 수
-                  // GDDR3은 4, GDDR5는 8
-  unsigned tRTW;  // 읽기→쓰기 전환에 필요한 시간
-  unsigned tWTR;  // 쓰기→읽기 전환에 필요한 시간
-  unsigned tWTP;  // 같은 뱅크에서 쓰기→프리차지 전환에 필요한 시간
-  unsigned busW;  // 버스 폭(bus width) - 데이터 버스의 너비 (바이트 단위)
+  unsigned tCCD;
+  /* [한국어] 같은 뱅크 내에서 연속된 두 열(column) 접근 명령 사이의 최소 간격 (CAS to CAS Delay).
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t::issue_col_command()가 동일 뱅크 연속 열 접근 스케줄링에 사용.
+   * 값 범위: 양의 DRAM 클럭 사이클 수; 보통 4.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned nbkgrp;  // 뱅크 그룹 수 (2의 거듭제곱이어야 함: 1, 2, 4, 8...)
-  unsigned
-      bk_tag_length;  // 뱅크 그룹 내에서 뱅크를 식별하는 데 필요한 비트 수
+  unsigned tRRD;
+  /* [한국어] 서로 다른 뱅크의 행(row) 활성화(ACT) 명령 사이 최소 간격 (Row to Row Delay).
+   * DRAM 내부 전력 및 내부 버스 충돌 방지를 위해 필요한 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t::issue_row_command()가 연속 ACT 스케줄링 가능 여부 판단에 사용.
+   * 값 범위: 양의 DRAM 클럭 사이클; 보통 4~8.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned nbk;  // 전체 뱅크(bank) 수
+  unsigned tRCD;
+  /* [한국어] 행 활성화(ACT)에서 첫 읽기 명령(CAS)까지의 최소 지연 (Row to Column Delay).
+   * DRAM 셀의 행을 열어 감지 증폭기(sense amplifier)가 안정화될 때까지 걸리는 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t::issue_col_command()가 해당 행의 tRCD 경과 여부를 확인.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 12.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  bool elimnate_rw_turnaround;  // 읽기/쓰기 전환 지연을 제거할지 여부 (이상적 시뮬레이션용)
+  unsigned tRCDWR;
+  /* [한국어] 행 활성화(ACT)에서 쓰기 명령(WR)까지의 최소 지연 (파생 파라미터).
+   * init()에서 tRCDWR = tRCD - (WL + 1)로 계산됨 — 쓰기 지연(WL)을 고려한 보정값.
+   * 설정자: init()에서 파생 계산으로 저장; gpgpusim.config에 직접 설정하는 옵션 없음.
+   * 읽는 자: dram_t::issue_col_command()가 쓰기 요청의 ACT→WR 간격 검사에 사용.
+   * 값 범위: tRCD - WL - 1; 음수가 되면 문제이므로 tRCD > WL 조건이 전제됨.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned
-      data_command_freq_ratio;  // DRAM 데이터 버스와 명령 버스의 주파수 비율
-                                // GDDR3은 2, GDDR5는 4
-  unsigned
-      dram_atom_size;  // 한 번의 읽기/쓰기 명령으로 전송되는 바이트 수
+  unsigned tRAS;
+  /* [한국어] 행 활성화(ACT)에서 프리차지(PRE) 명령까지의 최소 시간 (Row Active Strobe).
+   * 셀의 데이터를 감지 증폭기에 완전히 기록하는 데 필요한 최소 열린 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t::issue_row_command()가 PRE 전에 tRAS 경과 여부 확인.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 28.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  // 주소 변환 객체 - 선형 주소를 DRAM의 채널/뱅크/행/열 주소로 변환
+  unsigned tRP;
+  /* [한국어] 프리차지(PRE) 명령에서 다음 행 활성화(ACT)까지의 최소 시간 (Row Precharge).
+   * 현재 행을 닫고 워드라인 전압이 안정화되는 데 필요한 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t::issue_row_command()가 PRE 후 다음 ACT 가능 시각 계산.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 10.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tRC;
+  /* [한국어] 같은 뱅크에서 한 행 사이클(ACT→PRE→ACT) 전체에 걸리는 최소 시간 (Row Cycle).
+   * tRC = tRAS + tRP 관계를 가지며 연속 행 활성화 시 이 시간 이상 간격이 필요.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: dram_t가 다음 ACT 가능 시각을 max(tRAS+tRP, tRC)로 계산할 때 사용.
+   * 값 범위: tRAS + tRP 이상의 DRAM 클럭 사이클.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tCDLR;
+  /* [한국어] 쓰기(Write) 명령에서 읽기(Read) 명령으로 전환 시 필요한 추가 지연
+   * (Switching from Write to Read, changes tWTR).
+   * 쓰기 데이터가 버스에서 사라지기까지 기다려야 하는 전환 대기 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: init()에서 tWTR = WL + BL/ratio + tCDLR 계산에 사용;
+   *          dram_t::issue_col_command()가 쓰기→읽기 전환 가능 시각 계산에 사용.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 5.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tWR;
+  /* [한국어] 마지막 쓰기 데이터 입력(DQ)에서 프리차지(PRE)까지 필요한 최소 시간 (Write Recovery).
+   * 쓰기 후 감지 증폭기 복원을 위해 필요한 대기 시간.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: init()에서 tWTP = WL + BL/ratio + tWR 계산에 사용;
+   *          dram_t가 쓰기 후 PRE 가능 시각 계산에 사용.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 12.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned CL;
+  /* [한국어] CAS(Column Address Strobe) 지연시간 — 읽기 명령 발행 후 첫 데이터가 나올 때까지의 사이클 수.
+   * 낮을수록 읽기 지연이 작아지지만 칩 안정성 제약으로 DRAM 세대마다 하한이 있음.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: init()에서 tRTW, tWTR 파생 파라미터 계산; dram_t::issue_col_command()가 데이터 반환 시각 계산.
+   * 값 범위: 양의 DRAM 클럭 사이클; GDDR5 예시: 20~24.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned WL;
+  /* [한국어] 쓰기 지연시간(Write Latency) — 쓰기 명령 발행 후 첫 데이터를 수신하는 시각까지 걸리는 사이클 수.
+   * CL과 비슷하지만 쓰기 방향의 전파 지연을 포함.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: init()에서 tRCDWR, tRTW, tWTR, tWTP 파생 파라미터 계산;
+   *          dram_t가 쓰기 완료 시각 계산에 사용.
+   * 값 범위: 양의 DRAM 클럭 사이클; 보통 CL - 1.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned BL;
+  /* [한국어] 버스트 길이(Burst Length) — DRAM이 한 번의 열 명령으로 전송하는 클럭 수.
+   * 전송 바이트 수 = BL × busW. GDDR3 = 4, GDDR5 = 8.
+   * 설정자: reg_options()에서 -gpgpu_dram_buswidth 등 관련 옵션 또는 timing opt로 등록.
+   * 읽는 자: init()에서 dram_atom_size = BL * busW * gpu_n_mem_per_ctrlr 계산;
+   *          dram_t가 버스 점유 사이클 수 계산에 사용.
+   * 값 범위: 양의 정수; 보통 4 또는 8.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tRTW;
+  /* [한국어] 읽기(Read)에서 쓰기(Write) 전환 시 필요한 최소 간격 (파생 파라미터).
+   * init()에서 elimnate_rw_turnaround가 false이면 CL + BL/ratio + 2 - WL로 계산됨.
+   * 설정자: init()에서 파생 계산으로 저장; 직접 설정 옵션 없음.
+   * 읽는 자: dram_t::issue_col_command()가 읽기 후 쓰기 명령 발행 가능 시각 계산.
+   * 값 범위: 0(elimnate_rw_turnaround=true) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tWTR;
+  /* [한국어] 쓰기(Write)에서 읽기(Read) 전환 시 필요한 최소 간격 (파생 파라미터).
+   * init()에서 elimnate_rw_turnaround가 false이면 WL + BL/ratio + tCDLR로 계산됨.
+   * 설정자: init()에서 파생 계산으로 저장.
+   * 읽는 자: dram_t::issue_col_command()가 쓰기 후 읽기 명령 발행 가능 시각 계산.
+   * 값 범위: 0(elimnate_rw_turnaround=true) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned tWTP;
+  /* [한국어] 마지막 쓰기에서 프리차지까지 필요한 시간 (Write To Precharge, 파생 파라미터).
+   * init()에서 WL + BL/data_command_freq_ratio + tWR로 계산됨.
+   * 설정자: init()에서 파생 계산으로 저장.
+   * 읽는 자: dram_t가 쓰기 완료 후 PRE 명령 발행 가능 시각 계산에 사용.
+   * 값 범위: 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned busW;
+  /* [한국어] DRAM 데이터 버스 폭 — 한 클럭에 전송되는 바이트 수.
+   * 칩당 버스 폭 × 칩 수 = 전체 버스 폭. GDDR5 예시: 2B/칩.
+   * 설정자: reg_options()에서 -gpgpu_dram_buswidth 옵션으로 등록.
+   * 읽는 자: init()에서 dram_atom_size = BL * busW * gpu_n_mem_per_ctrlr 계산.
+   * 값 범위: 양의 정수; 보통 2 또는 4(바이트).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned nbkgrp;
+  /* [한국어] DRAM의 뱅크 그룹(bank group) 수.
+   * DDR4/GDDR5부터 도입된 개념으로, 뱅크를 그룹으로 묶어 그룹 간/내 타이밍을 분리함.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장; 미지정 시 기본값 1(그룹 없음).
+   * 읽는 자: init()에서 bk_tag_length 계산; dram_t가 그룹별 타이밍 시행에 사용.
+   * 값 범위: 1 이상이며 nbk의 약수인 2의 거듭제곱.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned bk_tag_length;
+  /* [한국어] 뱅크 그룹 내에서 특정 뱅크를 식별하는 데 필요한 비트 수.
+   * log2(nbk / nbkgrp)로 계산됨 — 예: 그룹당 4뱅크이면 2비트.
+   * 설정자: init()에서 비트 이동 루프로 계산되어 저장됨.
+   * 읽는 자: dram_t가 주소 디코딩에서 뱅크 번호 추출 시 비트 마스크 계산에 사용.
+   * 값 범위: 0 이상의 정수; nbk/nbkgrp=1이면 0.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned nbk;
+  /* [한국어] 하나의 DRAM 컨트롤러(채널)에 포함된 전체 뱅크(bank) 수.
+   * 뱅크 수가 많을수록 뱅크 충돌 확률이 줄어 병렬성이 높아짐.
+   * 설정자: init()에서 gpgpu_dram_timing_opt 파싱으로 저장.
+   * 읽는 자: init()이 bk_tag_length 계산 및 m_n_sub_partition과의 배수 관계 검증에 사용;
+   *          dram_t, frfcfs_scheduler가 뱅크 배열 크기로 사용.
+   * 값 범위: 2의 거듭제곱이며 m_n_sub_partition_per_memory_channel의 배수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool elimnate_rw_turnaround;
+  /* [한국어] 읽기/쓰기 전환 대기 시간(tRTW, tWTR)을 제거하는 이상적 모드 플래그.
+   * true이면 tRTW=0, tWTR=0으로 설정해 전환 지연 없이 즉시 방향 전환 가능.
+   * 현실에서는 불가능하지만, 상한 성능 분석용으로 사용.
+   * 설정자: reg_options()에서 -gpgpu_dram_elimnate_rw_turnaround 옵션으로 등록.
+   * 읽는 자: init()이 tRTW, tWTR 계산 시 이 값으로 분기.
+   * 값 범위: true(이상적) 또는 false(실제 타이밍 적용).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned data_command_freq_ratio;
+  /* [한국어] DRAM 데이터 버스 전송 주파수와 명령(command) 클럭 주파수의 비율.
+   * GDDR3 = 2(DDR: 클럭당 2회 전송), GDDR5 = 4(QDR: 클럭당 4회 전송).
+   * 버스트 전송 사이클 수 계산에 BL / data_command_freq_ratio로 사용됨.
+   * 설정자: reg_options()에서 -gpgpu_dram_data_command_freq_ratio 옵션으로 등록.
+   * 읽는 자: init()에서 tRTW, tWTR, tWTP, dram_atom_size 계산에 사용.
+   * 값 범위: 2(GDDR3) 또는 4(GDDR5).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned dram_atom_size;
+  /* [한국어] DRAM 한 번의 열 명령으로 전송되는 총 바이트 수 (파생 파라미터).
+   * init()에서 BL * busW * gpu_n_mem_per_ctrlr로 계산됨.
+   * 예: BL=8, busW=2, chips=8이면 128B.
+   * 설정자: init()에서 파생 계산으로 저장; 직접 설정 옵션 없음.
+   * 읽는 자: dram_t와 memory_partition_unit이 전송 단위 크기로 사용.
+   * 값 범위: 양의 정수; 일반적으로 32~128B.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
   linear_to_raw_address_translation m_address_mapping;
+  /* [한국어] 선형 메모리 주소를 DRAM 물리 주소(채널/뱅크그룹/뱅크/행/열)로 변환하는 객체.
+   * addrdec.h에서 정의된 클래스; 인터리빙(interleaving) 정책 및 해시 함수를 캡슐화.
+   * 설정자: init()에서 m_address_mapping.init(m_n_mem, m_n_sub_partition_per_memory_channel)으로 초기화.
+   * 읽는 자: memory_sub_partition::push()와 icnt 라우팅이 목적지 파티션 결정에 사용;
+   *          L2 캐시 set 인덱싱에도 사용됨.
+   * 값 범위: addrdec.h의 linear_to_raw_address_translation 구조체; 채널/뱅크 수를 반영.
+   * 동기화: 초기화 이후 읽기 전용; 여러 파티션에서 동시에 읽을 수 있음. */
 
-  unsigned icnt_flit_size;  // 인터커넥트(interconnect) 네트워크의 flit 크기
-                            // flit = 네트워크에서 한 번에 전송하는 데이터 단위
+  unsigned icnt_flit_size;
+  /* [한국어] ICNT(Network on Chip, intersim2) 네트워크에서 한 번에 전송하는 flit의 바이트 크기.
+   * flit(flow control digit)은 NoC 라우팅에서 최소 전송 단위.
+   * 메모리 요청 패킷(mem_fetch)이 flit 단위로 분할되어 NoC를 통과함.
+   * 설정자: reg_options()에서 -icnt_flit_size 옵션으로 등록.
+   * 읽는 자: icnt_wrapper.cc가 패킷을 flit 단위로 나눌 때;
+   *          mem_fetch::get_num_flits()가 패킷 크기 / flit 크기를 계산할 때 사용.
+   * 값 범위: 양의 정수; 보통 32~40B.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  unsigned dram_bnk_indexing_policy;      // DRAM 뱅크 인덱싱 정책 (주소→뱅크 매핑 방법)
-  unsigned dram_bnkgrp_indexing_policy;   // DRAM 뱅크 그룹 인덱싱 정책
-  bool dual_bus_interface;                // 듀얼 버스 인터페이스 사용 여부 (읽기/쓰기 버스 분리)
+  unsigned dram_bnk_indexing_policy;
+  /* [한국어] DRAM 뱅크 인덱싱 정책 — 메모리 주소에서 뱅크 번호를 추출하는 방법.
+   * 다양한 인터리빙 정책(선형, XOR, IPOLY 등)이 제공됨.
+   * 설정자: reg_options()에서 -gpgpu_dram_bnk_indexing_policy 옵션으로 등록.
+   * 읽는 자: addrdec.cc의 addrdec_tlx()가 주소 디코딩 시 정책별 함수를 선택.
+   * 값 범위: 0(선형), 1(XOR), 2(IPOLY), 3(PAE) 등 hashing.h 정책 인덱스.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  bool seperate_write_queue_enabled;      // 별도 쓰기 큐 활성화 여부
-                                          // (읽기와 쓰기 요청을 분리하여 관리)
-  char *write_queue_size_opt;             // 쓰기 큐 크기 옵션 문자열
-  unsigned gpgpu_frfcfs_dram_write_queue_size;  // FR-FCFS 스케줄러의 쓰기 큐 크기
-  unsigned write_high_watermark;          // 쓰기 큐 상한 워터마크
-  unsigned write_low_watermark;           // 쓰기 큐 하한 워터마크
-  bool m_perf_sim_memcpy;                 // 메모리 복사(memcpy) 성능 시뮬레이션 여부
-  bool simple_dram_model;                 // 단순 DRAM 모델 사용 여부 (빠르지만 덜 정확)
-  bool SST_mode;                          // SST 모드 여부 (외부 메모리 시뮬레이터 사용)
-  gpgpu_context *gpgpu_ctx;              // 시뮬레이터 전체 문맥에 대한 포인터
+  unsigned dram_bnkgrp_indexing_policy;
+  /* [한국어] DRAM 뱅크 그룹 인덱싱 정책 — 주소에서 뱅크 그룹 번호를 추출하는 방법.
+   * 설정자: reg_options()에서 -gpgpu_dram_bnkgrp_indexing_policy 옵션으로 등록.
+   * 읽는 자: addrdec.cc의 addrdec_tlx()가 뱅크 그룹 디코딩 시 정책 선택에 사용.
+   * 값 범위: dram_bnk_indexing_policy와 같은 정책 인덱스.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool dual_bus_interface;
+  /* [한국어] 읽기/쓰기 버스를 분리한 듀얼 버스 인터페이스 활성화 여부.
+   * true이면 읽기와 쓰기가 서로 다른 물리 버스를 사용하여 상호 차단 없이 진행 가능.
+   * 설정자: reg_options()에서 -gpgpu_dual_bus_interface 옵션으로 등록.
+   * 읽는 자: dram_t::cycle()이 버스 점유 상태 추적 방식을 결정할 때 사용.
+   * 값 범위: true(분리 버스) 또는 false(공유 버스).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool seperate_write_queue_enabled;
+  /* [한국어] 읽기 요청 큐와 분리된 전용 쓰기 큐 사용 여부.
+   * true이면 쓰기 요청이 별도 큐에서 워터마크 제어 하에 처리됨 — 읽기 지연 감소 효과.
+   * 설정자: reg_options()에서 -gpgpu_dram_seperate_write_queue_enabled 옵션으로 등록.
+   * 읽는 자: frfcfs_scheduler가 스케줄링 결정 시 별도 쓰기 큐 여부를 확인.
+   * 값 범위: true(분리 쓰기 큐) 또는 false(통합 큐).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *write_queue_size_opt;
+  /* [한국어] 쓰기 큐 크기 설정 문자열 (형식: "큐크기:상한워터마크:하한워터마크").
+   * 설정자: reg_options()에서 -gpgpu_dram_write_queue_size 옵션으로 등록;
+   *         init()에서 sscanf로 파싱하여 세 필드에 저장됨.
+   * 읽는 자: init()에서만 직접 참조됨; 이후는 파싱된 필드들이 사용됨.
+   * 값 범위: "32:28:16" 형식 등 세 양의 정수를 콜론으로 구분.
+   * 동기화: init() 이후 읽기 전용. */
+
+  unsigned gpgpu_frfcfs_dram_write_queue_size;
+  /* [한국어] FR-FCFS 스케줄러의 쓰기 전용 큐 최대 크기 (write_queue_size_opt 첫 번째 값).
+   * 설정자: init()에서 write_queue_size_opt sscanf 파싱으로 저장.
+   * 읽는 자: frfcfs_scheduler가 쓰기 큐 오버플로우 여부 판단에 사용.
+   * 값 범위: 양의 정수; 보통 32~64.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned write_high_watermark;
+  /* [한국어] 쓰기 큐 상한 워터마크 — 이 크기에 도달하면 쓰기 우선 처리 모드로 전환.
+   * 설정자: init()에서 write_queue_size_opt sscanf 파싱으로 저장.
+   * 읽는 자: frfcfs_scheduler가 현재 쓰기 큐 크기와 비교하여 스케줄링 모드 선택.
+   * 값 범위: 0 이상, write_low_watermark 이상의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned write_low_watermark;
+  /* [한국어] 쓰기 큐 하한 워터마크 — 이 크기 이하로 내려오면 일반(읽기 우선) 모드로 복귀.
+   * 설정자: init()에서 write_queue_size_opt sscanf 파싱으로 저장.
+   * 읽는 자: frfcfs_scheduler가 쓰기 우선 모드 해제 조건 판단에 사용.
+   * 값 범위: 0 이상, write_high_watermark 이하의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool m_perf_sim_memcpy;
+  /* [한국어] CPU→GPU memcpy 호출에 대한 성능(타이밍) 시뮬레이션 수행 여부.
+   * true이면 memcpy가 실제 DRAM 대역폭에 기반한 사이클 수를 소비하며 진행됨.
+   * 설정자: reg_options()에서 -gpgpu_perf_sim_memcpy 옵션으로 등록.
+   * 읽는 자: gpgpu_sim::perf_memcpy_to_gpu()가 타이밍 시뮬레이션 수행 여부 결정.
+   * 값 범위: true(타이밍 포함) 또는 false(즉시 완료로 처리).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool simple_dram_model;
+  /* [한국어] 상세 DRAM 타이밍 대신 단순 고정 지연(dram_latency) 모델을 사용할지 여부.
+   * true이면 tRCD/tRAS/CL 등 복잡한 타이밍 없이 dram_latency 고정값만 적용.
+   * 설정자: reg_options()에서 -gpgpu_simple_dram_model 옵션으로 등록.
+   * 읽는 자: dram_t::cycle()이 상세/간이 타이밍 모델 분기에 사용.
+   * 값 범위: true(간이 모델, 빠른 시뮬레이션) 또는 false(상세 타이밍 모델).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool SST_mode;
+  /* [한국어] SST(Structural Simulation Toolkit) 연동 모드 활성화 여부.
+   * true이면 GPGPU-Sim의 내장 DRAM/L2 시뮬레이션을 사용하지 않고
+   * 외부 SST 메모리 시스템이 메모리를 담당함.
+   * 설정자: reg_options()에서 -gpgpu_sst_mode 옵션으로 등록.
+   * 읽는 자: is_SST_mode()를 통해 gpgpu_sim이 사이클 루프 분기를 결정;
+   *          sst_gpgpu_sim이 메모리 처리를 생략할지 판단.
+   * 값 범위: true(SST 연동) 또는 false(독립 실행).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  gpgpu_context *gpgpu_ctx;
+  /* [한국어] 시뮬레이터 전체 컨텍스트(context)에 대한 역방향 포인터.
+   * memory_config가 gpgpu_context 소유의 자원(예: 주소 디코딩 설정)에 접근할 때 사용.
+   * 설정자: 생성자에서 ctx 파라미터로 전달받아 저장됨.
+   * 읽는 자: memory_config 내부 코드가 gpgpu_context의 글로벌 설정에 접근할 때 참조.
+   * 값 범위: 유효한 gpgpu_context 포인터; NULL이면 안 됨.
+   * 동기화: 소유 객체(gpgpusim_entrypoint)가 lifetime을 관리; 별도 락 불필요. */
 };
 
 /*
@@ -875,15 +1397,54 @@ class gpgpu_sim_config : public power_config,
  private:
   // private 멤버들 - 이 클래스 내부에서만 접근 가능
 
-  void init_clock_domains(void);  // 클럭 도메인 초기화 함수 (각 부분의 클럭 속도 설정)
+  /*
+   * [한국어]
+   * init_clock_domains - 클럭 도메인 주파수/주기 초기화 함수
+   *
+   * @return: void
+   *
+   * gpgpu_clock_domains 문자열을 파싱하여 core/icnt/dram/l2 주파수를 설정하고,
+   * 각 주기(period = 1/freq)와 다음 상승 에지 시각(gpgpu_sim::core_time 등)을 초기화.
+   * gpgpusim.config의 -gpgpu_clock_domains "500.0:500.0:1000.0:500.0" 형식에서 읽음.
+   * 단위 변환: MHz → Hz는 MhZ 매크로(×1,000,000)로 처리.
+   *
+   * 호출 체인:
+   *   gpgpu_sim_config::init() → [이 함수]
+   */
+  void init_clock_domains(void);
 
-  // backward pointer - 시뮬레이터 전체 문맥에 대한 역방향 포인터
-  // 역방향 포인터란? 자식이 부모를 가리키는 포인터로, 부모의 정보에 접근할 때 사용
   class gpgpu_context *gpgpu_ctx;
+  /* [한국어] 시뮬레이터 전체 컨텍스트에 대한 역방향 포인터 (backward pointer).
+   * gpgpu_sim_config가 gpgpu_context 소유의 전역 자원에 접근해야 할 때 사용.
+   * 설정자: 생성자 초기화 리스트에서 ctx 인자로 저장됨.
+   * 읽는 자: init_clock_domains() 등 내부 초기화 함수가 전역 설정 접근 시 사용.
+   * 값 범위: 유효한 gpgpu_context 포인터; gpgpusim_entrypoint.cc가 lifetime 관리.
+   * 동기화: 시뮬레이션 시작 전 단일 스레드 접근이므로 락 불필요. */
 
-  bool m_valid;                        // 설정 유효 여부
-  shader_core_config m_shader_config;  // 셰이더 코어 설정 객체
-  memory_config m_memory_config;       // 메모리 시스템 설정 객체
+  bool m_valid;
+  /* [한국어] gpgpu_sim_config 전체가 정상 초기화되었는지 나타내는 유효성 플래그.
+   * 설정자: 생성자에서 false로, init() 마지막 단계에서 true로 변경됨.
+   * 읽는 자: gpgpu_sim 생성자가 설정 객체 유효성을 확인할 때 사용.
+   * 값 범위: false(미초기화) 또는 true(완전 초기화).
+   * 동기화: 시뮬레이션 시작 전 단일 스레드; 런타임 후 읽기 전용. */
+
+  shader_core_config m_shader_config;
+  /* [한국어] 셰이더 코어(SM) 전체의 마이크로아키텍처 설정 객체.
+   * 워프 수, 레지스터 파일 크기, 스케줄러 수, L1 캐시 설정, 파이프라인 스테이지 수 등을 포함.
+   * 설정자: 생성자 초기화 리스트에서 m_shader_config(ctx)로 생성;
+   *         init()에서 m_shader_config.init()으로 파라미터 확정.
+   * 읽는 자: num_shader(), num_cluster() 게터; gpgpu_sim 생성자가 m_shader_config 포인터 설정.
+   * 값 범위: shader_core_config 구조체; shader.h 참조.
+   * 동기화: 초기화 이후 읽기 전용. */
+
+  memory_config m_memory_config;
+  /* [한국어] 메모리 서브시스템(DRAM + L2 캐시 + 큐) 전체 설정 객체.
+   * DRAM 타이밍, 뱅크 수, 채널 수, L2 설정, ICNT flit 크기 등을 포함.
+   * 설정자: 생성자 초기화 리스트에서 m_memory_config(ctx)로 생성;
+   *         init()에서 m_memory_config.init()으로 파라미터 확정.
+   * 읽는 자: is_SST_mode(), gpgpu_sim 생성자가 m_memory_config 포인터 설정.
+   * 값 범위: memory_config 클래스 (이 파일 위에서 정의됨).
+   * 동기화: 초기화 이후 읽기 전용. */
 
   /*
    * 클럭 도메인(Clock Domain) 설정
@@ -897,57 +1458,266 @@ class gpgpu_sim_config : public power_config,
    * freq(frequency, 주파수): 1초에 몇 번 동작하는지 (Hz 단위)
    * period(주기): 한 번 동작하는 데 걸리는 시간 (주파수의 역수)
    */
-  double core_freq;     // 코어 클럭 주파수
-  double icnt_freq;     // 인터커넥트 클럭 주파수
-  double dram_freq;     // DRAM 클럭 주파수
-  double l2_freq;       // L2 캐시 클럭 주파수
-  double core_period;   // 코어 클럭 주기
-  double icnt_period;   // 인터커넥트 클럭 주기
-  double dram_period;   // DRAM 클럭 주기
-  double l2_period;     // L2 캐시 클럭 주기
+  double core_freq;
+  /* [한국어] 셰이더 코어(SM) 클럭의 주파수 (단위: Hz; 설정 단위: MHz).
+   * gpgpusim.config의 -gpgpu_clock_domains에서 첫 번째 값으로 지정됨.
+   * 설정자: init_clock_domains()에서 gpgpu_clock_domains 문자열 파싱 후 MhZ 매크로 적용.
+   * 읽는 자: get_core_freq()를 통해 외부에 공개; init_clock_domains()가 core_period = 1/freq 계산에 사용.
+   * 값 범위: 양의 double; 전형적인 GPU 코어 클럭 500~1500MHz.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double icnt_freq;
+  /* [한국어] ICNT(intersim2 NoC) 클럭의 주파수 (단위: Hz).
+   * 설정자: init_clock_domains()에서 gpgpu_clock_domains 문자열 파싱으로 저장.
+   * 읽는 자: init_clock_domains()가 icnt_period = 1/freq 계산에 사용;
+   *          gpgpu_sim::next_clock_domain()이 icnt_time 비교에 간접 사용.
+   * 값 범위: 양의 double; 보통 코어 주파수와 동일하거나 절반.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double dram_freq;
+  /* [한국어] DRAM 컨트롤러 클럭의 주파수 (단위: Hz).
+   * GDDR5의 경우 코어보다 높은 주파수로 설정될 수 있음.
+   * 설정자: init_clock_domains()에서 gpgpu_clock_domains 세 번째 값으로 저장.
+   * 읽는 자: init_clock_domains()가 dram_period = 1/freq 계산에 사용.
+   * 값 범위: 양의 double; 전형적으로 1000~2000MHz.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double l2_freq;
+  /* [한국어] L2 캐시 클럭의 주파수 (단위: Hz).
+   * L2는 코어와 DRAM 사이의 클럭으로, 별도 설정 또는 코어와 동일하게 설정.
+   * 설정자: init_clock_domains()에서 gpgpu_clock_domains 네 번째 값으로 저장.
+   * 읽는 자: init_clock_domains()가 l2_period = 1/freq 계산에 사용.
+   * 값 범위: 양의 double.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double core_period;
+  /* [한국어] 코어 클럭의 주기 (단위: 시뮬레이션 시간 단위; = 1.0 / core_freq).
+   * gpgpu_sim이 next_clock_domain() 호출 시 core_time 증분에 사용.
+   * 설정자: init_clock_domains()에서 1.0/core_freq로 계산되어 저장.
+   * 읽는 자: gpgpu_sim의 시뮬레이션 루프(gpu-sim.cc)가 코어 도메인 타이밍 계산에 사용.
+   * 값 범위: 양의 double; 예: 1/(500×10^6) ≈ 2×10^-9.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double icnt_period;
+  /* [한국어] ICNT 클럭의 주기 (= 1.0 / icnt_freq).
+   * 설정자: init_clock_domains()에서 계산되어 저장.
+   * 읽는 자: gpgpu_sim::next_clock_domain()이 icnt_time 증분 계산에 사용.
+   * 값 범위: 양의 double.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double dram_period;
+  /* [한국어] DRAM 클럭의 주기 (= 1.0 / dram_freq).
+   * 설정자: init_clock_domains()에서 계산되어 저장.
+   * 읽는 자: gpgpu_sim::next_clock_domain()이 dram_time 증분 계산에 사용.
+   * 값 범위: 양의 double.
+   * 동기화: init() 이후 읽기 전용. */
+
+  double l2_period;
+  /* [한국어] L2 캐시 클럭의 주기 (= 1.0 / l2_freq).
+   * 설정자: init_clock_domains()에서 계산되어 저장.
+   * 읽는 자: gpgpu_sim::next_clock_domain()이 l2_time 증분 계산에 사용.
+   * 값 범위: 양의 double.
+   * 동기화: init() 이후 읽기 전용. */
 
   // === GPGPU-Sim 타이밍 모델 옵션들 ===
 
-  unsigned long long gpu_max_cycle_opt;  // 최대 시뮬레이션 사이클 수 (이 수에 도달하면 시뮬레이션 종료)
-  unsigned long long gpu_max_insn_opt;   // 최대 시뮬레이션 명령어 수 (이 수에 도달하면 종료)
-  unsigned gpu_max_cta_opt;              // 최대 CTA(Cooperative Thread Array) 발행 수
-                                         // CTA = 함께 동작하는 스레드 그룹 (CUDA에서는 블록이라고도 함)
-  unsigned gpu_max_completed_cta_opt;    // 최대 완료된 CTA 수
-  char *gpgpu_runtime_stat;              // 런타임 통계 설정 문자열
-  bool gpgpu_flush_l1_cache;             // 커널 실행 후 L1 캐시 플러시 여부
-  bool gpgpu_flush_l2_cache;             // 커널 실행 후 L2 캐시 플러시 여부
-  bool gpu_deadlock_detect;              // 데드락(deadlock) 감지 활성화 여부
-                                         // 데드락 = 서로 상대방을 기다리며 영원히 멈추는 상태
-  int gpgpu_frfcfs_dram_sched_queue_size;// FR-FCFS 스케줄러 큐 크기
-  int gpgpu_cflog_interval;              // 제어 흐름(control flow) 로그 간격
-  char *gpgpu_clock_domains;             // 클럭 도메인 설정 문자열
-  unsigned max_concurrent_kernel;        // 동시 실행 가능한 최대 커널 수
+  unsigned long long gpu_max_cycle_opt;
+  /* [한국어] 시뮬레이션을 강제 종료할 최대 클럭 사이클 수 제한.
+   * 0이면 제한 없음(무한 실행). cycle_insn_cta_max_hit()에서 종료 조건으로 확인됨.
+   * 설정자: reg_options()에서 -gpgpu_max_cycle_opt 옵션으로 등록.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_tot_sim_cycle + gpu_sim_cycle과 비교.
+   * 값 범위: 0(무제한) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
-  // === 비주얼라이저(Visualizer) 설정 ===
-  // 시뮬레이션 결과를 시각적으로 보여주는 도구 관련 설정
-  bool g_visualizer_enabled;       // 비주얼라이저 활성화 여부
-  char *g_visualizer_filename;     // 비주얼라이저 출력 파일 이름
-  int g_visualizer_zlevel;         // 비주얼라이저 파일 압축 수준
+  unsigned long long gpu_max_insn_opt;
+  /* [한국어] 시뮬레이션을 강제 종료할 최대 명령어 실행 수 제한.
+   * 0이면 제한 없음. gpu_max_cycle_opt와 OR 조건으로 종료 판단.
+   * 설정자: reg_options()에서 -gpgpu_max_insn_opt 옵션으로 등록.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_tot_sim_insn + gpu_sim_insn과 비교.
+   * 값 범위: 0(무제한) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned gpu_max_cta_opt;
+  /* [한국어] 시뮬레이션을 종료할 최대 CTA(Cooperative Thread Array) 발행 수 제한.
+   * CTA = CUDA 블록; 이 수만큼 블록이 SM에 발행되면 시뮬레이션 종료.
+   * 설정자: reg_options()에서 -gpgpu_max_cta_opt 옵션으로 등록.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_tot_issued_cta와 비교.
+   * 값 범위: 0(무제한) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned gpu_max_completed_cta_opt;
+  /* [한국어] 시뮬레이션을 종료할 최대 완료 CTA 수 제한.
+   * 설정자: reg_options()에서 -gpgpu_max_completed_cta_opt 옵션으로 등록.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_completed_cta와 비교.
+   * 값 범위: 0(무제한) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *gpgpu_runtime_stat;
+  /* [한국어] 런타임 통계 출력 주기와 플래그를 담은 설정 문자열 (형식: "주기:플래그(16진수)").
+   * 설정자: reg_options()에서 -gpgpu_runtime_stat 옵션으로 등록;
+   *         init()에서 sscanf로 gpu_stat_sample_freq와 gpu_runtime_stat_flag에 파싱됨.
+   * 읽는 자: init()에서만 직접 참조; 이후는 파싱된 값들이 사용됨.
+   * 값 범위: "10000:0" 형식 등 정수:16진수 쌍.
+   * 동기화: init() 이후 읽기 전용. */
+
+  bool gpgpu_flush_l1_cache;
+  /* [한국어] 커널 실행 완료 후 L1 데이터 캐시를 플러시(invalidate)할지 여부.
+   * true이면 다음 커널이 이전 커널의 캐시 잔류 데이터로부터 격리됨.
+   * 설정자: reg_options()에서 -gpgpu_flush_l1_cache 옵션으로 등록.
+   * 읽는 자: flush_l1() 게터를 통해 gpu-sim.cc::print_stats()나 커널 완료 코드가 캐시 플러시 여부 결정.
+   * 값 범위: true(플러시) 또는 false(캐시 내용 유지).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool gpgpu_flush_l2_cache;
+  /* [한국어] 커널 실행 완료 후 L2 캐시를 플러시할지 여부.
+   * 설정자: reg_options()에서 -gpgpu_flush_l2_cache 옵션으로 등록.
+   * 읽는 자: gpu-sim.cc가 커널 완료 시 L2 캐시 flush 여부 결정.
+   * 값 범위: true(플러시) 또는 false(내용 유지).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool gpu_deadlock_detect;
+  /* [한국어] 데드락(deadlock) 감지 기능 활성화 여부.
+   * 데드락 = 모든 컴포넌트가 서로를 기다리며 아무 진행도 없는 상태.
+   * true이면 gpgpu_sim::deadlock_check()가 일정 사이클마다 교착 상태를 탐지하고 종료.
+   * 설정자: reg_options()에서 -gpgpu_deadlock_detect 옵션으로 등록.
+   * 읽는 자: gpgpu_sim::cycle()이 deadlock_check() 호출 여부를 결정.
+   * 값 범위: true(감지 활성) 또는 false(비활성).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  int gpgpu_frfcfs_dram_sched_queue_size;
+  /* [한국어] (gpgpu_sim_config 수준의) FR-FCFS DRAM 스케줄러 보류 큐 크기 옵션.
+   * memory_config::gpgpu_frfcfs_dram_sched_queue_size와 별개 등록 가능.
+   * 설정자: reg_options()에서 -gpgpu_frfcfs_dram_sched_queue_size 옵션으로 등록.
+   * 읽는 자: 이 값은 직접 사용보다 memory_config 쪽 값이 우선되는 경우가 많음.
+   * 값 범위: 0(무제한) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  int gpgpu_cflog_interval;
+  /* [한국어] 제어 흐름(control flow) 로그를 기록하는 사이클 간격.
+   * 0이면 로그 비활성; 양수이면 매 n 사이클마다 분기 패턴을 로그에 기록.
+   * 설정자: reg_options()에서 -gpgpu_cflog_interval 옵션으로 등록.
+   * 읽는 자: cuda-sim 제어 흐름 로그 코드가 로그 주기 판단에 사용.
+   * 값 범위: 0(비활성) 또는 양의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *gpgpu_clock_domains;
+  /* [한국어] 4개 클럭 도메인의 주파수를 MHz 단위로 지정하는 문자열.
+   * 형식: "core_MHz:icnt_MHz:dram_MHz:l2_MHz" (예: "500.0:500.0:1000.0:500.0").
+   * 설정자: reg_options()에서 -gpgpu_clock_domains 옵션으로 등록.
+   * 읽는 자: init_clock_domains()에서 sscanf로 파싱하여 core/icnt/dram/l2 freq 필드에 저장.
+   * 값 범위: 콜론 구분 4개의 양의 실수 문자열.
+   * 동기화: init() 이후 읽기 전용. */
+
+  unsigned max_concurrent_kernel;
+  /* [한국어] 동시에 GPU에서 실행할 수 있는 최대 커널(kernel) 수.
+   * gpgpu_sim::m_running_kernels 벡터의 유효 슬롯 수를 결정함.
+   * 설정자: reg_options()에서 -gpgpu_max_concurrent_kernel 옵션으로 등록.
+   * 읽는 자: get_max_concurrent_kernel() 게터; gpgpu_sim::can_start_kernel()이 슬롯 여유 확인.
+   * 값 범위: 1 이상의 정수; 보통 1~8.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  bool g_visualizer_enabled;
+  /* [한국어] AerialVision 비주얼라이저 출력 활성화 여부.
+   * true이면 매 gpu_stat_sample_freq 사이클마다 비주얼라이저 로그를 기록.
+   * 설정자: reg_options()에서 -gpgpu_visualizer_enabled 옵션으로 등록.
+   * 읽는 자: gpgpu_sim::visualizer_printstat()가 파일 기록 여부 결정.
+   * 값 범위: true(활성) 또는 false(비활성).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  char *g_visualizer_filename;
+  /* [한국어] AerialVision 비주얼라이저 출력 파일 경로.
+   * 설정자: init()에서 날짜 포함 파일명으로 strdup 생성
+   *         ("gpgpusim_visualizer__<날짜>.log.gz").
+   * 읽는 자: gpgpu_sim::visualizer_printstat()가 gzip 파일 개시 시 사용.
+   * 값 범위: 유효한 .gz 파일 경로 문자열.
+   * 동기화: init() 이후 읽기 전용. */
+
+  int g_visualizer_zlevel;
+  /* [한국어] 비주얼라이저 출력 파일의 gzip 압축 수준.
+   * 설정자: reg_options()에서 -gpgpu_visualizer_zlevel 옵션으로 등록.
+   * 읽는 자: gpgpu_sim::visualizer_printstat()가 zlib 파일 개시 시 전달.
+   * 값 범위: 0(무압축) ~ 9(최대 압축).
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
   // === 통계 수집 설정 ===
-  int gpu_stat_sample_freq;   // 통계 샘플링 주기 (몇 사이클마다 통계를 수집할지)
-  int gpu_runtime_stat_flag;  // 런타임 통계 플래그 (어떤 통계를 수집할지 비트 플래그로 지정)
+  int gpu_stat_sample_freq;
+  /* [한국어] 런타임 통계를 수집·출력하는 주기 (단위: 사이클).
+   * gpgpu_runtime_stat 문자열에서 파싱된 첫 번째 값이 저장됨.
+   * 설정자: init()에서 sscanf로 gpgpu_runtime_stat을 파싱하여 저장; 기본값 10000.
+   * 읽는 자: gpgpu_sim::cycle()이 매 사이클마다 이 주기와 비교하여 통계 출력 여부 결정.
+   * 값 범위: 양의 정수; 0은 통계 비활성.
+   * 동기화: init() 이후 읽기 전용. */
+
+  int gpu_runtime_stat_flag;
+  /* [한국어] 런타임 통계 출력 항목을 선택하는 비트 플래그.
+   * GPU_RSTAT_SHD_INFO, GPU_RSTAT_BW_STAT 등 이 파일 상단의 #define 비트들을 OR 조합.
+   * gpgpu_runtime_stat 문자열에서 파싱된 두 번째 값(16진수)이 저장됨.
+   * 설정자: init()에서 sscanf %x로 파싱하여 저장; 기본값 0.
+   * 읽는 자: gpgpu_sim::shader_print_runtime_stat() 등 통계 함수가 어떤 항목을 출력할지 결정.
+   * 값 범위: GPU_RSTAT_* 플래그들의 비트 OR 조합.
+   * 동기화: init() 이후 읽기 전용. */
 
   // === 디바이스 리밋(Device Limits) ===
   // GPU가 허용하는 최대 자원 크기
-  size_t stack_size_limit;                     // 스레드당 스택 크기 제한
-  size_t heap_size_limit;                      // 힙(동적 메모리) 크기 제한
-  size_t runtime_sync_depth_limit;             // 런타임 동기화 깊이 제한
-  size_t runtime_pending_launch_count_limit;   // 대기 중인 커널 실행 수 제한
+  size_t stack_size_limit;
+  /* [한국어] GPU 스레드당 스택(stack) 메모리 크기 제한 (단위: 바이트).
+   * CUDA Dynamic Parallelism(CDP)에서 자식 커널 호출 시 스택 사용량 제어에 중요.
+   * 설정자: reg_options()에서 -gpgpu_stack_size_limit 옵션으로 등록.
+   * 읽는 자: stack_limit() 게터; cudaDeviceSetLimit(cudaLimitStackSize) 인터셉트에서 사용.
+   * 값 범위: 양의 정수; 일반적으로 1024~8192 바이트.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  size_t heap_size_limit;
+  /* [한국어] GPU 힙(heap) 메모리 최대 크기 제한 (단위: 바이트).
+   * 디바이스 측 malloc()/free() 사용 시 허용되는 최대 동적 메모리 크기.
+   * 설정자: reg_options()에서 -gpgpu_heap_size_limit 옵션으로 등록.
+   * 읽는 자: heap_limit() 게터; cudaDeviceSetLimit(cudaLimitMallocHeapSize) 인터셉트.
+   * 값 범위: 양의 정수; 기본 8MB 이상.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  size_t runtime_sync_depth_limit;
+  /* [한국어] CUDA Dynamic Parallelism에서 커널 중첩 호출 깊이 제한.
+   * 커널이 다른 커널을 호출할 수 있는 최대 재귀 깊이를 제한함.
+   * 설정자: reg_options()에서 -gpgpu_runtime_sync_depth_limit 옵션으로 등록.
+   * 읽는 자: sync_depth_limit() 게터; CDP 커널 발행 코드가 깊이 초과 여부 확인.
+   * 값 범위: 양의 정수; 기본 2~24.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  size_t runtime_pending_launch_count_limit;
+  /* [한국어] CDP에서 동시에 대기 가능한 자식 커널 발행 요청 수 제한.
+   * 설정자: reg_options()에서 -gpgpu_runtime_pending_launch_count_limit 옵션으로 등록.
+   * 읽는 자: pending_launch_count_limit() 게터; CDP 스케줄러가 큐 오버플로우 방지에 사용.
+   * 값 범위: 양의 정수; 기본 2048.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
   // === GPU 컴퓨트 캐퍼빌리티(Compute Capability) ===
   // 컴퓨트 캐퍼빌리티란? GPU의 기능 수준을 나타내는 버전 번호입니다.
   // 예: 7.5 = 주 버전 7, 부 버전 5 (NVIDIA Turing 아키텍처)
   // 버전이 높을수록 더 많은 기능을 지원합니다.
-  unsigned int gpgpu_compute_capability_major;  // 주(major) 버전 번호
-  unsigned int gpgpu_compute_capability_minor;  // 부(minor) 버전 번호
-  unsigned long long liveness_message_freq;     // 생존 메시지 출력 주기
-                                                 // (시뮬레이션이 아직 실행 중임을 알리는 메시지)
+  unsigned int gpgpu_compute_capability_major;
+  /* [한국어] 시뮬레이션하는 GPU의 CUDA 컴퓨트 캐퍼빌리티 주(major) 버전.
+   * cudaDeviceProp::major에 저장되어 CUDA 런타임이 기능 지원 여부를 판단하는 기준.
+   * 예: 7 = Volta/Turing, 8 = Ampere.
+   * 설정자: reg_options()에서 -gpgpu_compute_capability_major 옵션으로 등록.
+   * 읽는 자: compute_capability_major() 게터; libcuda가 cuDeviceGetAttribute() 응답에 사용.
+   * 값 범위: 1 이상의 정수; 현재 CUDA 지원 범위 1~9.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned int gpgpu_compute_capability_minor;
+  /* [한국어] 시뮬레이션하는 GPU의 CUDA 컴퓨트 캐퍼빌리티 부(minor) 버전.
+   * 예: 5 → SM 7.5 = Turing; 0 → SM 8.0 = Ampere.
+   * 설정자: reg_options()에서 -gpgpu_compute_capability_minor 옵션으로 등록.
+   * 읽는 자: compute_capability_minor() 게터; libcuda가 GPU 속성 응답에 사용.
+   * 값 범위: 0 이상의 정수.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
+
+  unsigned long long liveness_message_freq;
+  /* [한국어] 시뮬레이터가 아직 실행 중임을 알리는 "생존 메시지" 출력 간격 (단위: 사이클).
+   * 긴 시뮬레이션 도중 프로세스가 멈추지 않았음을 확인하는 heartbeat 출력.
+   * 설정자: reg_options()에서 -liveness_message_freq 옵션으로 등록.
+   * 읽는 자: gpu-sim.cc::cycle()이 last_liveness_message_time과 비교하여 출력 여부 결정.
+   * 값 범위: 0(비활성) 또는 양의 정수; 보통 50000~100000 사이클.
+   * 동기화: 시뮬레이션 시작 후 읽기 전용. */
 
   /*
    * friend 선언
@@ -983,8 +1753,23 @@ struct occupancy_stats {
       : aggregate_warp_slot_filled(wsf),         // 실제 채워진 워프 슬롯 수
         aggregate_theoretical_warp_slots(tws) {}  // 이론적 총 워프 슬롯 수
 
-  unsigned long long aggregate_warp_slot_filled;       // 누적 채워진 워프 슬롯 수
-  unsigned long long aggregate_theoretical_warp_slots; // 누적 이론적 총 워프 슬롯 수
+  unsigned long long aggregate_warp_slot_filled;
+  /* [한국어] 시뮬레이션 동안 SM의 warp 슬롯에 실제로 워프가 배치된 누적 횟수.
+   * 매 사이클마다 활성 워프 수를 더해 누적하며, 분자(numerator) 역할을 함.
+   * 설정자: shader_core_ctx::cycle()이 매 사이클마다 활성 워프 수를 더함;
+   *         occupancy_stats 생성자에서 0으로 초기화.
+   * 읽는 자: get_occ_fraction()이 분자로 사용; gpgpu_sim::print_stats()가 출력.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근하므로 락 불필요. */
+
+  unsigned long long aggregate_theoretical_warp_slots;
+  /* [한국어] 시뮬레이션 동안 SM이 수용 가능한 이론적 최대 warp 슬롯의 누적 합.
+   * 매 사이클마다 각 SM의 최대 워프 수를 더해 누적하며, 분모(denominator) 역할을 함.
+   * 설정자: shader_core_ctx::cycle()이 매 사이클마다 SM당 최대 워프 수를 더함;
+   *         occupancy_stats 생성자에서 0으로 초기화.
+   * 읽는 자: get_occ_fraction()이 분모로 사용; 0이면 division-by-zero 주의 필요.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   /*
    * 점유율을 분수(비율)로 계산하는 함수
@@ -1057,8 +1842,21 @@ class watchpoint_event {
   const ptx_instruction *inst() const { return m_inst; }      // 명령어 정보 반환
 
  private:
-  const ptx_thread_info *m_thread;  // 워치포인트를 트리거한 스레드에 대한 포인터
-  const ptx_instruction *m_inst;    // 워치포인트를 트리거한 명령어에 대한 포인터
+  const ptx_thread_info *m_thread;
+  /* [한국어] 워치포인트를 트리거한 PTX 스레드의 실행 상태 정보에 대한 포인터.
+   * ptx_thread_info는 스레드 ID, 레지스터 파일, PC 등 스레드 전체 컨텍스트를 포함.
+   * 설정자: watchpoint_event(thd, pI) 생성자에서 thd 파라미터로 저장.
+   * 읽는 자: thread() 게터로 인터랙티브 디버거가 트리거 스레드 정보 출력 시 사용.
+   * 값 범위: 유효한 ptx_thread_info 포인터 또는 NULL(기본 생성자 사용 시).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  const ptx_instruction *m_inst;
+  /* [한국어] 워치포인트를 트리거한 PTX 명령어 객체에 대한 포인터.
+   * 어떤 종류의 메모리 접근(load/store) 명령어가 워치포인트를 발화했는지 정보 제공.
+   * 설정자: watchpoint_event(thd, pI) 생성자에서 pI 파라미터로 저장.
+   * 읽는 자: inst() 게터로 인터랙티브 디버거가 트리거 명령어 디스어셈블리 출력 시 사용.
+   * 값 범위: 유효한 ptx_instruction 포인터 또는 NULL(기본 생성자 사용 시).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 };
 
 /*
@@ -1216,69 +2014,221 @@ class gpgpu_sim : public gpgpu_t {
   // (private보다 조금 더 열린 접근 수준)
 
   // === 클럭 관련 함수들 ===
-  void reinit_clock_domains(void);    // 클럭 도메인을 다시 초기화
-  int next_clock_domain(void);        // 다음에 실행할 클럭 도메인을 결정
-                                      // (어느 부분이 다음 "틱"을 할 차례인지)
-  void issue_block2core();            // CTA(블록)를 코어에 할당하는 함수
-                                      // (어떤 작업을 어떤 코어에서 실행할지 결정)
+
+  /*
+   * [한국어]
+   * reinit_clock_domains - 커널 간 클럭 도메인 시간을 재초기화하는 함수
+   *
+   * 커널이 완료된 후 다음 커널 실행 전에 core_time, icnt_time, dram_time, l2_time을
+   * 각 클럭 주기(period)로 리셋하여 타임 도메인 정렬을 복원한다.
+   *
+   * 호출 체인:
+   *   gpgpu_sim::cycle() 또는 커널 완료 처리 → [이 함수]
+   */
+  void reinit_clock_domains(void);
+
+  /*
+   * [한국어]
+   * next_clock_domain - 사이클 단계에서 다음에 처리할 클럭 도메인을 선택하는 함수
+   *
+   * @return: 비트 플래그로 도메인 조합 반환 (CORE_FLAG, ICNT_FLAG, DRAM_FLAG, L2_FLAG 등)
+   *
+   * core_time, icnt_time, dram_time, l2_time 중 가장 작은 값의 도메인을 선택.
+   * GPU 멀티클럭 시뮬레이션의 핵심 — 빠른 도메인은 더 자주 cycle을 실행.
+   * 반환값의 비트에 따라 gpgpu_sim::cycle()이 해당 서브시스템의 cycle 함수를 호출.
+   *
+   * 호출 체인:
+   *   gpgpu_sim::cycle() → [이 함수] → core/icnt/dram/l2 분기
+   */
+  int next_clock_domain(void);
+
+  /*
+   * [한국어]
+   * issue_block2core - 실행 가능한 CTA(블록)를 유휴 SM 코어에 할당하는 함수
+   *
+   * 라운드로빈(round-robin) 방식으로 클러스터를 순회하며 CTA를 발행.
+   * 각 클러스터의 simt_core_cluster::get_not_completed()로 유휴 코어를 찾고
+   * select_kernel()로 선택된 커널의 다음 CTA를 할당.
+   *
+   * 호출 체인:
+   *   gpgpu_sim::cycle() → [이 함수] → simt_core_cluster::issue_block2core()
+   *                                    → shader_core_ctx::occupy_resource_smem_reg()
+   */
+  void issue_block2core();
 
   // === 통계 출력 함수들 ===
-  void print_dram_stats(FILE *fout) const;         // DRAM 통계 출력
-  void shader_print_runtime_stat(FILE *fout);      // 셰이더 런타임 통계 출력
-  void shader_print_l1_miss_stat(FILE *fout) const;// L1 캐시 미스 통계 출력
-  void shader_print_cache_stats(FILE *fout) const; // 캐시 통계 출력
-  void shader_print_scheduler_stat(FILE *fout, bool print_dynamic_info) const;  // 스케줄러 통계 출력
-  void visualizer_printstat();                      // 비주얼라이저용 통계 출력
-  void print_shader_cycle_distro(FILE *fout) const;// 셰이더 사이클 분포 출력
 
-  void gpgpu_debug();  // GPU 디버그 함수 (디버그 정보 출력)
+  /*
+   * [한국어]
+   * print_dram_stats - 모든 메모리 파티션의 DRAM 통계를 fout에 출력하는 함수
+   * @param fout: 출력 대상 파일 스트림 (stdout 또는 로그 파일)
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수] → dram_t::print_stat()
+   */
+  void print_dram_stats(FILE *fout) const;
+
+  /*
+   * [한국어]
+   * shader_print_runtime_stat - 모든 SM의 런타임 통계(IPC, 스톨, warp 분포 등)를 출력
+   * @param fout: 출력 대상 파일 스트림
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수] → shader_core_ctx::print_pipeline()
+   */
+  void shader_print_runtime_stat(FILE *fout);
+
+  /*
+   * [한국어]
+   * shader_print_l1_miss_stat - 모든 SM의 L1 캐시 미스 통계를 출력하는 함수
+   * @param fout: 출력 대상 파일 스트림
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수]
+   */
+  void shader_print_l1_miss_stat(FILE *fout) const;
+
+  /*
+   * [한국어]
+   * shader_print_cache_stats - L1/L2 캐시 히트/미스 상세 통계를 출력하는 함수
+   * @param fout: 출력 대상 파일 스트림
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수]
+   */
+  void shader_print_cache_stats(FILE *fout) const;
+
+  /*
+   * [한국어]
+   * shader_print_scheduler_stat - 워프 스케줄러의 선택/스톨/발행 통계를 출력하는 함수
+   * @param fout: 출력 대상 파일 스트림
+   * @param print_dynamic_info: true이면 동적 스케줄러 정보도 포함하여 출력
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수]
+   */
+  void shader_print_scheduler_stat(FILE *fout, bool print_dynamic_info) const;
+
+  /*
+   * [한국어]
+   * visualizer_printstat - AerialVision 비주얼라이저용 통계를 gzip 파일에 출력하는 함수
+   * g_visualizer_enabled가 true이고 gpu_stat_sample_freq 주기가 도달했을 때 호출.
+   * 호출 체인: gpgpu_sim::cycle() → [이 함수] → gzprintf()
+   */
+  void visualizer_printstat();
+
+  /*
+   * [한국어]
+   * print_shader_cycle_distro - 셰이더 코어별 사이클 분포 히스토그램을 출력하는 함수
+   * @param fout: 출력 대상 파일 스트림
+   * 호출 체인: gpgpu_sim::print_stats() → [이 함수]
+   */
+  void print_shader_cycle_distro(FILE *fout) const;
+
+  /*
+   * [한국어]
+   * gpgpu_debug - GPU 내부 상태를 상세히 덤프하는 디버깅 보조 함수
+   * g_interactive_debugger_enabled가 true일 때 중단점에서 대화형 디버깅을 지원.
+   * 호출 체인: gpgpu_sim::cycle() → [이 함수]
+   */
+  void gpgpu_debug();
 
  protected:
   // === 데이터 멤버들 ===
 
-  /*
-   * m_cluster - SIMT 클러스터 배열에 대한 이중 포인터
-   * 이중 포인터(**)란? 포인터의 포인터로, 동적으로 크기가 정해지는 배열을 가리킵니다.
-   *
-   * GPU 구조:
-   * GPU → [클러스터0][클러스터1]...[클러스터N]
-   *         ↓
-   *       [코어0][코어1]...[코어M]
-   *
-   * 클러스터(cluster)는 여러 개의 셰이더 코어를 묶은 그룹입니다.
-   * 같은 클러스터 안의 코어들은 L1 캐시나 인터커넥트 포트를 공유합니다.
-   */
   class simt_core_cluster **m_cluster;
+  /* [한국어] GPU의 SIMT 코어 클러스터 배열에 대한 이중 포인터.
+   * GPU는 여러 클러스터로 구성되며, 각 클러스터는 여러 SM(셰이더 코어)을 포함한다.
+   * 구조: m_cluster[0..n_simt_clusters-1], 각 원소는 simt_core_cluster 객체 포인터.
+   * 클러스터 내 SM들은 ICNT 포트와 L1 캐시를 공유하며 함께 CTA를 수신함.
+   * 설정자: gpgpu_sim 생성자 또는 createSIMTCluster()에서 동적 할당 후 저장.
+   * 읽는 자: cycle()의 코어 도메인 루프; issue_block2core(); print_stats() 등.
+   * 값 범위: m_config.num_cluster() 개의 유효한 simt_core_cluster 포인터 배열.
+   * 동기화: 단일 시뮬레이션 스레드; 초기화 후 읽기 전용 (포인터 자체). */
 
-  // 메모리 파티션 유닛 배열 - DRAM 메모리를 여러 구역으로 나눈 것
   class memory_partition_unit **m_memory_partition_unit;
+  /* [한국어] DRAM 메모리 파티션 유닛 배열에 대한 이중 포인터.
+   * 각 파티션은 독립적인 DRAM 컨트롤러와 FR-FCFS 스케줄러를 포함.
+   * 구조: m_memory_partition_unit[0..m_n_mem-1].
+   * 설정자: gpgpu_sim 생성자에서 m_n_mem 개를 동적 할당 후 저장.
+   * 읽는 자: cycle()의 DRAM 도메인 루프; print_dram_stats(); active() 종료 판정.
+   * 값 범위: m_config.m_memory_config.m_n_mem 개의 유효한 포인터.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
-  // 메모리 서브 파티션 배열 - 파티션을 더 작은 단위로 나눈 것
-  // (각 서브 파티션에 L2 캐시 슬라이스가 있음)
   class memory_sub_partition **m_memory_sub_partition;
+  /* [한국어] 메모리 서브파티션(L2 캐시 슬라이스 + ROP 큐) 배열에 대한 이중 포인터.
+   * 전체 서브파티션 수 = m_n_mem × m_n_sub_partition_per_memory_channel.
+   * 각 서브파티션은 하나의 L2 캐시 뱅크와 DRAM 방향 입출력 큐를 가짐.
+   * 설정자: gpgpu_sim 생성자에서 m_n_mem_sub_partition 개를 동적 할당.
+   * 읽는 자: cycle()의 L2 도메인 루프; ICNT→L2 패킷 라우팅; active() 확인.
+   * 값 범위: m_config.m_memory_config.m_n_mem_sub_partition 개의 유효한 포인터.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
-  // 실행 중인 커널들의 벡터(vector, 동적 배열)
-  // 여러 커널이 동시에 실행될 수 있으므로 벡터로 관리합니다
   std::vector<kernel_info_t *> m_running_kernels;
+  /* [한국어] 현재 GPU에서 실행 중이거나 발행 대기 중인 커널 포인터 벡터.
+   * 벡터 크기는 max_concurrent_kernel로 제한되며, NULL 슬롯은 빈 슬롯을 의미.
+   * 설정자: launch()가 커널을 NULL 슬롯에 배치; set_kernel_done()이 NULL로 소거.
+   * 읽는 자: select_kernel()이 라운드로빈으로 실행할 커널 선택;
+   *          can_start_kernel()이 빈 슬롯 존재 여부 확인;
+   *          get_running_kernels()가 복사본 반환.
+   * 값 범위: 유효한 kernel_info_t 포인터 또는 NULL(빈 슬롯).
+   * 동기화: 단일 시뮬레이션 스레드; stream_manager와 동일 스레드에서 접근. */
 
-  unsigned m_last_issued_kernel;  // 마지막으로 발행(issue)된 커널의 인덱스
+  unsigned m_last_issued_kernel;
+  /* [한국어] 마지막으로 select_kernel()에서 선택된 커널의 m_running_kernels 인덱스.
+   * 라운드로빈 선택을 위해 시작점(start index)으로 사용됨.
+   * 설정자: select_kernel()이 커널을 선택할 때마다 인덱스를 업데이트.
+   * 읽는 자: select_kernel()이 다음 시작 인덱스로 사용.
+   * 값 범위: 0 ~ max_concurrent_kernel-1.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
-  // 완료된 커널들의 목록 (list = 연결 리스트 자료구조)
   std::list<unsigned> m_finished_kernel;
+  /* [한국어] 실행이 완료된 커널의 ID(UID) 목록.
+   * 완료 순서대로 front부터 꺼낼 수 있도록 list로 관리됨.
+   * 설정자: set_kernel_done()이 완료 커널 UID를 push_back.
+   * 읽는 자: finished_kernel()이 front()를 꺼내 stream_manager에 전달;
+   *          stream_manager가 완료 이벤트 처리 및 다음 스트림 연산 실행에 사용.
+   * 값 범위: 유효한 커널 UID(kernel_info_t::get_uid()) 정수.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
   // CTA 관련 카운터들
-  // m_total_cta_launched == per-kernel count. gpu_tot_issued_cta == global
-  // count.
-  unsigned long long m_total_cta_launched;  // 현재 커널에서 발행된 총 CTA 수
-  unsigned long long gpu_tot_issued_cta;    // 전체 시뮬레이션에서 발행된 총 CTA 수
-  unsigned gpu_completed_cta;               // 완료된 CTA 수
+  // m_total_cta_launched == per-kernel count. gpu_tot_issued_cta == global count.
+  unsigned long long m_total_cta_launched;
+  /* [한국어] 현재(또는 가장 최근) 커널에서 SM에 발행된 CTA(블록) 총 수.
+   * 커널 완료 후 gpu_tot_issued_cta에 더해진 뒤 리셋될 수 있음.
+   * 설정자: issue_block2core()가 CTA를 발행할 때마다 증가.
+   * 읽는 자: 커널별 통계 출력 시 발행된 블록 수 계산에 사용.
+   * 값 범위: 0 이상의 단조증가 카운터; 커널 초기화 시 리셋.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
-  unsigned m_last_cluster_issue;  // 마지막으로 CTA를 발행한 클러스터 인덱스
-                                  // (라운드 로빈 방식으로 클러스터에 CTA를 분배하기 위해 사용)
+  unsigned long long gpu_tot_issued_cta;
+  /* [한국어] 전체 시뮬레이션에서 발행된 CTA의 전역 누적 수.
+   * 여러 커널에 걸쳐 계속 증가하며 리셋되지 않음.
+   * 설정자: issue_block2core()가 CTA 발행마다 증가; cycle_insn_cta_max_hit() 종료 조건.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_max_cta_opt와 비교; 최종 통계 출력.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드. */
 
-  float *average_pipeline_duty_cycle;  // 평균 파이프라인 활용률 포인터
-                                       // (파이프라인이 실제로 일하는 비율)
-  float *active_sms;                   // 활성 SM(Streaming Multiprocessor) 수 포인터
+  unsigned gpu_completed_cta;
+  /* [한국어] 실행을 완전히 마친(retire된) CTA의 전역 누적 수.
+   * 설정자: inc_completed_cta()를 통해 shader_core_ctx가 CTA 완료 시 증가.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_max_completed_cta_opt와 비교; 통계 출력.
+   * 값 범위: 0 이상의 단조증가 unsigned.
+   * 동기화: 단일 시뮬레이션 스레드. */
+
+  unsigned m_last_cluster_issue;
+  /* [한국어] 마지막으로 CTA를 발행한 클러스터의 인덱스.
+   * issue_block2core()의 라운드로빈 분배 구현에서 시작점으로 사용됨.
+   * 설정자: issue_block2core()가 클러스터에 CTA 발행 성공 시 해당 인덱스로 업데이트.
+   * 읽는 자: issue_block2core()의 다음 순회 시작점 결정에 사용.
+   * 값 범위: 0 ~ m_config.num_cluster()-1.
+   * 동기화: 단일 시뮬레이션 스레드. */
+
+  float *average_pipeline_duty_cycle;
+  /* [한국어] 모든 SM의 평균 파이프라인 활용률(duty cycle) 값을 가리키는 포인터.
+   * AccelWattch 전력 모델이 참조하는 외부 공유 변수를 가리킴.
+   * 설정자: gpgpu_sim 생성자에서 AccelWattch 인터페이스가 제공하는 메모리 위치로 설정.
+   * 읽는 자: AccelWattch 전력 계산 코드가 파이프라인 활용률 기반 동적 전력 추정에 사용.
+   * 값 범위: 0.0(완전 유휴) ~ 1.0(완전 활성).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  float *active_sms;
+  /* [한국어] 현재 활성(active) 상태인 SM 수를 가리키는 포인터.
+   * AccelWattch 전력 모델이 활성 SM 수를 읽어 SM 전력 기여분 계산에 사용.
+   * 설정자: gpgpu_sim 생성자에서 AccelWattch 인터페이스가 제공하는 메모리 위치로 설정.
+   * 읽는 자: AccelWattch 전력 계산; visualizer_printstat()의 통계 출력.
+   * 값 범위: 0.0 ~ (float)num_shader().
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   /*
    * 각 클럭 도메인의 다음 상승 에지(rising edge) 시간
@@ -1289,45 +2239,160 @@ class gpgpu_sim : public gpgpu_t {
    * 시뮬레이터는 이 시간들 중 가장 빠른 것을 먼저 처리합니다.
    * 이것이 cycle() 함수에서 next_clock_domain()을 호출하는 이유입니다.
    */
-  double core_time;  // 코어의 다음 상승 에지 시간
-  double icnt_time;  // 인터커넥트의 다음 상승 에지 시간
-  double dram_time;  // DRAM의 다음 상승 에지 시간
-  double l2_time;    // L2 캐시의 다음 상승 에지 시간
+  double core_time;
+  /* [한국어] 코어(SM) 클럭의 다음 상승 에지 시각 (시뮬레이션 절대 시간 단위).
+   * next_clock_domain()이 4개 도메인 시각 중 최솟값의 도메인을 선택할 때 비교됨.
+   * 설정자: reinit_clock_domains()에서 core_period로 초기화;
+   *         cycle()에서 CORE 도메인이 처리된 후 core_period만큼 증가.
+   * 읽는 자: next_clock_domain()이 어느 도메인을 실행할지 결정할 때 비교.
+   * 값 범위: 0.0 이상의 단조증가 double.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  // 디버깅용 변수
-  bool gpu_deadlock;  // 데드락이 감지되었는지 여부
+  double icnt_time;
+  /* [한국어] ICNT(NoC) 클럭의 다음 상승 에지 시각.
+   * 설정자: reinit_clock_domains()에서 icnt_period로 초기화;
+   *         cycle()에서 ICNT 도메인 처리 후 icnt_period만큼 증가.
+   * 읽는 자: next_clock_domain()의 최솟값 비교.
+   * 값 범위: 0.0 이상의 단조증가 double.
+   * 동기화: 단일 시뮬레이션 스레드. */
+
+  double dram_time;
+  /* [한국어] DRAM 클럭의 다음 상승 에지 시각.
+   * 설정자: reinit_clock_domains()에서 dram_period로 초기화;
+   *         cycle()에서 DRAM 도메인 처리 후 dram_period만큼 증가.
+   * 읽는 자: next_clock_domain()의 최솟값 비교.
+   * 값 범위: 0.0 이상의 단조증가 double.
+   * 동기화: 단일 시뮬레이션 스레드. */
+
+  double l2_time;
+  /* [한국어] L2 캐시 클럭의 다음 상승 에지 시각.
+   * 설정자: reinit_clock_domains()에서 l2_period로 초기화;
+   *         cycle()에서 L2 도메인 처리 후 l2_period만큼 증가.
+   * 읽는 자: next_clock_domain()의 최솟값 비교.
+   * 값 범위: 0.0 이상의 단조증가 double.
+   * 동기화: 단일 시뮬레이션 스레드. */
+
+  bool gpu_deadlock;
+  /* [한국어] 시뮬레이터에서 데드락(deadlock)이 감지되었는지 여부를 나타내는 플래그.
+   * deadlock_check()가 일정 사이클 이상 진전이 없음을 확인하면 true로 설정하고 종료.
+   * 설정자: gpgpu_sim::deadlock_check()가 교착 상태 감지 시 true로 설정.
+   * 읽는 자: active()와 print_stats()가 데드락 종료 사유 표시에 사용.
+   * 값 범위: false(정상) 또는 true(데드락 감지).
+   * 동기화: 단일 시뮬레이션 스레드. */
 
   //// 설정 매개변수들 ////
-  const gpgpu_sim_config &m_config;  // 시뮬레이션 설정에 대한 const 참조
-                                     // const 참조 = 읽기만 가능하고 수정 불가
+  const gpgpu_sim_config &m_config;
+  /* [한국어] 이 시뮬레이터 인스턴스의 전체 설정에 대한 const 참조.
+   * power_config, shader_core_config, memory_config, 클럭 도메인 설정을 모두 포함.
+   * 설정자: 생성자 초기화 리스트에서 외부에서 제공된 gpgpu_sim_config로 바인딩됨.
+   * 읽는 자: cycle(), issue_block2core(), active() 등 거의 모든 함수가 참조.
+   * 값 범위: 유효한 gpgpu_sim_config 객체 (m_valid == true).
+   * 동기화: const 참조이므로 수정 불가; 단일 스레드 읽기만. */
 
-  const struct cudaDeviceProp *m_cuda_properties;  // CUDA 디바이스 속성 포인터
-  const shader_core_config *m_shader_config;       // 셰이더 코어 설정 포인터
-  const memory_config *m_memory_config;            // 메모리 설정 포인터
+  const struct cudaDeviceProp *m_cuda_properties;
+  /* [한국어] CUDA 디바이스 속성 구조체에 대한 포인터.
+   * set_prop()으로 설정되며, libcuda의 cuDeviceGetProperties() 응답에 사용됨.
+   * 설정자: gpgpu_sim::set_prop()에서 외부에서 제공된 cudaDeviceProp 포인터로 설정.
+   * 읽는 자: get_prop() 게터; libcuda가 CUDA 런타임 API 응답 생성 시 사용.
+   * 값 범위: 유효한 cudaDeviceProp 구조체 포인터; set_prop() 호출 전에는 NULL.
+   * 동기화: set_prop() 이후 읽기 전용. */
 
-  // === 통계 관련 객체 포인터들 ===
-  class shader_core_stats *m_shader_stats;        // 셰이더 코어 통계
-  class memory_stats_t *m_memory_stats;           // 메모리 통계
-  class power_stat_t *m_power_stats;              // 전력 통계
-  class gpgpu_sim_wrapper *m_gpgpusim_wrapper;    // 시뮬레이터 래퍼 (전력 모델과의 인터페이스)
-  unsigned long long last_gpu_sim_insn;           // 마지막으로 기록한 시뮬레이션 명령어 수
+  const shader_core_config *m_shader_config;
+  /* [한국어] 셰이더 코어 설정에 대한 const 포인터 (m_config.m_shader_config를 가리킴).
+   * 자주 접근하는 설정을 직접 포인터로 캐싱하여 참조 깊이를 줄임.
+   * 설정자: 생성자에서 &m_config.m_shader_config로 초기화.
+   * 읽는 자: cycle(), getShaderCoreConfig(), 통계 함수 등 빈번히 접근.
+   * 값 범위: 유효한 shader_core_config 객체 포인터.
+   * 동기화: 초기화 이후 읽기 전용. */
 
-  unsigned long long last_liveness_message_time;  // 마지막 생존 메시지 출력 시각
+  const memory_config *m_memory_config;
+  /* [한국어] 메모리 설정에 대한 const 포인터 (m_config.m_memory_config를 가리킴).
+   * 설정자: 생성자에서 &m_config.m_memory_config로 초기화.
+   * 읽는 자: getMemoryConfig(); DRAM/L2 서브시스템 생성 및 통계 출력.
+   * 값 범위: 유효한 memory_config 객체 포인터.
+   * 동기화: 초기화 이후 읽기 전용. */
 
-  // 특수 캐시 설정 맵
-  // 특정 커널에 대해 다른 캐시 설정을 사용하고 싶을 때 사용합니다
-  // std::map = 키-값 쌍으로 데이터를 저장하는 자료구조 (사전과 유사)
+  class shader_core_stats *m_shader_stats;
+  /* [한국어] 모든 SM의 성능 통계를 집계하는 객체 포인터.
+   * IPC, warp 스톨 유형, 메모리 접근 패턴 등 SM 수준 통계를 기록.
+   * 설정자: gpgpu_sim 생성자에서 new shader_core_stats()로 생성.
+   * 읽는 자: print_stats(), visualizer_printstat() 등이 통계 출력 시 참조.
+   * 값 범위: 유효한 shader_core_stats 객체 포인터.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  class memory_stats_t *m_memory_stats;
+  /* [한국어] L2 캐시, DRAM, ROP 큐 등 메모리 서브시스템 전체 통계를 집계하는 객체 포인터.
+   * 캐시 히트/미스율, DRAM 대역폭 활용률, 큐 점유율 등을 기록.
+   * 설정자: gpgpu_sim 생성자에서 new memory_stats_t()로 생성.
+   * 읽는 자: print_dram_stats(), shader_print_cache_stats() 등 통계 출력 함수.
+   * 값 범위: 유효한 memory_stats_t 객체 포인터.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  class power_stat_t *m_power_stats;
+  /* [한국어] AccelWattch 전력 모델에 전달할 성능 카운터(사이클별 통계)를 담는 객체 포인터.
+   * 실행 유닛 사용률, 캐시 접근 횟수, NoC 트래픽 등 전력 추정에 필요한 수치를 기록.
+   * 설정자: gpgpu_sim 생성자에서 new power_stat_t()로 생성.
+   * 읽는 자: AccelWattch 래퍼(m_gpgpusim_wrapper)가 전력 계산 시 이 카운터들을 읽음.
+   * 값 범위: 유효한 power_stat_t 객체 포인터.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  class gpgpu_sim_wrapper *m_gpgpusim_wrapper;
+  /* [한국어] AccelWattch 전력 시뮬레이터와의 인터페이스 래퍼 객체 포인터.
+   * m_power_stats의 카운터를 읽어 McPAT 기반 전력 추정값을 계산하고 보고서 파일에 기록.
+   * 설정자: gpgpu_sim 생성자에서 g_power_simulation_enabled 조건부로 new gpgpu_sim_wrapper()로 생성.
+   * 읽는 자: cycle()에서 주기마다 AccelWattch 업데이트 함수를 호출;
+   *          print_stats()가 최종 전력 보고서 생성 시 사용.
+   * 값 범위: 유효한 gpgpu_sim_wrapper 포인터 또는 NULL(전력 시뮬레이션 비활성 시).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long last_gpu_sim_insn;
+  /* [한국어] 마지막으로 통계/비주얼라이저를 갱신한 시점의 시뮬레이션 명령어 수.
+   * 현재 gpu_sim_insn과 비교하여 IPC(Instructions Per Cycle) 계산에 사용.
+   * 설정자: gpgpu_sim::update_stats()가 통계를 갱신할 때 현재 값으로 업데이트.
+   * 읽는 자: IPC 계산 시 (gpu_sim_insn - last_gpu_sim_insn) / 경과사이클.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long last_liveness_message_time;
+  /* [한국어] 마지막으로 "생존 메시지(heartbeat)"를 출력한 사이클 시각.
+   * 현재 사이클과 비교하여 liveness_message_freq 간격이 지나면 다시 출력.
+   * 설정자: gpgpu_sim::cycle()이 생존 메시지를 출력할 때마다 현재 사이클로 업데이트.
+   * 읽는 자: cycle()이 출력 간격 도달 여부를 (gpu_sim_cycle - last_liveness_message_time)으로 확인.
+   * 값 범위: 0 이상의 사이클 카운터.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
   std::map<std::string, FuncCache> m_special_cache_config;
+  /* [한국어] 특정 커널에 대해 커스텀 L1 캐시 설정(FuncCache)을 매핑하는 사전.
+   * 키: 커널 함수 이름(std::string), 값: FuncCache 열거형(예: cudaFuncCachePreferShared).
+   * set_cache_config(kernel_name, cacheConfig)로 항목을 추가하고,
+   * get_cache_config(kernel_name)으로 조회하여 change_cache_config()에 전달.
+   * 설정자: libcuda의 cudaFuncSetCacheConfig() 인터셉트에서 set_cache_config()로 등록.
+   * 읽는 자: issue_block2core()가 커널을 발행 전 캐시 설정을 적용할 때 get_cache_config() 호출.
+   * 값 범위: 커널 이름 → FuncCache 쌍의 집합; 비어 있으면 기본 캐시 설정 사용.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  // 실행된 커널의 이름과 UID 기록
-  // 나중에 통계 출력 시 사용합니다
-  std::vector<std::string>
-      m_executed_kernel_names;  //< 실행된 커널들의 이름 목록 (통계 출력용)
-  std::vector<unsigned>
-      m_executed_kernel_uids;  //< 실행된 커널들의 고유 ID 목록 (통계 출력용)
+  std::vector<std::string> m_executed_kernel_names;
+  /* [한국어] 이 시뮬레이션 실행 구간에서 실행된 커널들의 이름 목록.
+   * 커널 완료 시 이름을 추가하여 최종 통계 출력 시 어떤 커널들이 실행되었는지 표시.
+   * 설정자: set_kernel_done() 또는 관련 완료 코드에서 push_back으로 추가.
+   * 읽는 자: executed_kernel_info_string(), executed_kernel_name()으로 통계 문자열 생성 시 사용.
+   * 값 범위: 유효한 커널 이름 문자열 목록; 비어 있을 수 있음.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  // 워치포인트 히트 기록 - 워치포인트 번호를 키로 이벤트 정보를 저장
+  std::vector<unsigned> m_executed_kernel_uids;
+  /* [한국어] 실행된 커널들의 고유 ID(UID) 목록 (m_executed_kernel_names와 1:1 대응).
+   * 설정자: set_kernel_done() 또는 관련 완료 코드에서 push_back으로 추가.
+   * 읽는 자: executed_kernel_info_string()이 통계 헤더 생성 시 이름과 함께 사용.
+   * 값 범위: 양의 정수 UID; kernel_info_t::get_uid()로 생성된 값.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
   std::map<unsigned, watchpoint_event> g_watchpoint_hits;
+  /* [한국어] 워치포인트 번호를 키로, 트리거 이벤트 정보를 값으로 저장하는 맵.
+   * 인터랙티브 디버거 모드에서 특정 메모리 주소 접근 시 트리거 정보를 기록.
+   * 설정자: hit_watchpoint()가 워치포인트 발화 시 번호→이벤트 쌍을 삽입.
+   * 읽는 자: 인터랙티브 디버거(gpgpu_debug())가 어느 워치포인트가 발화했는지 확인.
+   * 값 범위: 워치포인트 번호(0~N) → watchpoint_event 쌍.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   // 커널 정보를 문자열로 만드는 함수 (통계 출력용)
   std::string executed_kernel_info_string();
@@ -1354,49 +2419,196 @@ class gpgpu_sim : public gpgpu_t {
   // === 공개 통계 변수들 ===
   // 시뮬레이션 진행 상황을 추적하는 카운터들
 
-  unsigned long long gpu_sim_insn;              // 현재 커널에서 실행된 명령어 수
-  unsigned long long gpu_tot_sim_insn;          // 전체 시뮬레이션에서 실행된 총 명령어 수
-  unsigned long long gpu_sim_insn_last_update;  // 마지막 통계 갱신 시 명령어 수
-  unsigned gpu_sim_insn_last_update_sid;        // 마지막으로 명령어를 갱신한 셰이더 ID
+  unsigned long long gpu_sim_insn;
+  /* [한국어] 현재 실행 중인 커널에서 SM들이 커밋(commit)한 명령어의 총 수.
+   * 새 커널이 시작되면 리셋되지 않고 누적될 수 있으며, gpu_tot_sim_insn에 합산됨.
+   * 설정자: shader_core_ctx::execute()가 명령어 커밋마다 증가시킴;
+   *         cycle_insn_cta_max_hit()의 종료 조건 확인에 사용됨.
+   * 읽는 자: IPC 계산; print_stats(); cycle_insn_cta_max_hit().
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  occupancy_stats gpu_occupancy;      // 현재 커널의 점유율 통계
-  occupancy_stats gpu_tot_occupancy;  // 전체 시뮬레이션의 누적 점유율 통계
+  unsigned long long gpu_tot_sim_insn;
+  /* [한국어] 전체 시뮬레이션에서 모든 커널 걸쳐 실행된 명령어의 전역 누적 수.
+   * 커널이 완료될 때마다 gpu_sim_insn을 여기에 더함.
+   * 설정자: 커널 완료 처리 코드(print_stats 등)에서 현재 gpu_sim_insn을 누적.
+   * 읽는 자: cycle_insn_cta_max_hit()이 gpu_max_insn_opt와 비교; 최종 통계 출력.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long gpu_sim_insn_last_update;
+  /* [한국어] 마지막으로 update_stats()가 호출될 때의 gpu_sim_insn 스냅샷 값.
+   * IPC 측정 구간의 시작점으로 사용; (현재값 - 이 값) / 경과사이클 = 구간 IPC.
+   * 설정자: gpgpu_sim::update_stats()가 호출될 때 현재 gpu_sim_insn으로 업데이트.
+   * 읽는 자: IPC 계산 코드; visualizer_printstat().
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned gpu_sim_insn_last_update_sid;
+  /* [한국어] gpu_sim_insn을 마지막으로 업데이트한 셰이더 코어의 ID(shader ID).
+   * 어느 코어에서 가장 최근에 명령어 실행이 기록되었는지 추적하는 디버깅 보조 정보.
+   * 설정자: shader_core_ctx::execute()가 명령어 커밋 시 자신의 shader ID로 설정.
+   * 읽는 자: 디버깅 및 통계 출력 시 마지막 활성 셰이더 ID 표시.
+   * 값 범위: 0 ~ num_shader()-1.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  occupancy_stats gpu_occupancy;
+  /* [한국어] 현재 실행 중인 커널의 SM warp 슬롯 점유율 통계.
+   * 매 사이클마다 활성 warp 수를 aggregate_warp_slot_filled에 누적.
+   * 설정자: shader_core_ctx가 매 사이클 end에 현재 occupancy를 누적;
+   *         새 커널 시작 시 리셋될 수 있음.
+   * 읽는 자: print_stats()가 get_occ_fraction()으로 점유율 비율 출력.
+   * 값 범위: occupancy_stats 구조체; 분수 = 0.0~1.0.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  occupancy_stats gpu_tot_occupancy;
+  /* [한국어] 전체 시뮬레이션에 걸친 누적 SM warp 슬롯 점유율 통계.
+   * 커널이 완료될 때마다 gpu_occupancy를 여기에 += 연산자로 합산.
+   * 설정자: 커널 완료 시 gpu_occupancy를 누적; 시뮬레이션 전체 동안 리셋 없음.
+   * 읽는 자: 최종 통계 출력 시 전체 기간의 평균 점유율 계산에 사용.
+   * 값 범위: occupancy_stats 구조체; 분수 = 0.0~1.0.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   /*
-   * 커널 실행 시간을 기록하는 구조체
-   * 각 커널이 언제 시작하고 끝났는지를 사이클 단위로 기록합니다
+   * [한국어] 커널 실행 시간을 사이클 단위로 기록하는 내부 구조체.
+   * 각 커널이 언제 SM에 발행되기 시작했고(start_cycle) 언제 완료되었는지(end_cycle) 추적.
+   * gpu_kernel_time 맵의 값 타입으로 사용됨.
    */
   typedef struct {
-    unsigned long long start_cycle;  // 커널 시작 사이클
-    unsigned long long end_cycle;    // 커널 종료 사이클
+    unsigned long long start_cycle;
+    /* [한국어] 커널이 처음 SM에 발행되기 시작한 절대 시뮬레이션 사이클.
+     * 설정자: gpgpu_sim::launch()나 issue_block2core() 첫 호출 시 gpu_sim_cycle로 저장.
+     * 읽는 자: 커널 실행 시간 통계 계산 시 (end_cycle - start_cycle).
+     * 값 범위: 0 이상의 unsigned long long.
+     * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+    unsigned long long end_cycle;
+    /* [한국어] 커널의 모든 CTA가 완료되어 커널이 종료된 절대 시뮬레이션 사이클.
+     * 설정자: set_kernel_done() 호출 시 현재 gpu_sim_cycle로 저장.
+     * 읽는 자: 커널 실행 시간 통계; 총 실행 사이클 = end_cycle - start_cycle.
+     * 값 범위: start_cycle 이상의 unsigned long long.
+     * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
   } kernel_time_t;
 
-  // 커널 실행 시간 기록 맵
-  // 외부 맵의 키: 스트림 ID, 내부 맵의 키: 커널 UID, 값: 시작/종료 시간
-  std::map<unsigned long long, std::map<unsigned, kernel_time_t>>
-      gpu_kernel_time;
-  unsigned long long last_streamID;  // 마지막으로 사용된 스트림 ID
-  unsigned long long last_uid;       // 마지막으로 사용된 커널 UID
+  std::map<unsigned long long, std::map<unsigned, kernel_time_t>> gpu_kernel_time;
+  /* [한국어] 스트림 ID와 커널 UID를 키로 커널 시작/종료 사이클을 기록하는 2단계 맵.
+   * 외부 맵 키: 스트림 ID(streamID), 내부 맵 키: 커널 UID, 값: kernel_time_t.
+   * 이 구조를 통해 스트림별로 커널 실행 시간을 분류하여 분석 가능.
+   * 설정자: launch()에서 start_cycle 기록; set_kernel_done()에서 end_cycle 기록.
+   * 읽는 자: gpu_print_stat()이 스트림별 커널 타임라인을 출력 시 참조.
+   * 값 범위: 유효한 스트림ID→UID→시작/종료 사이클 3중 구조.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  cache_stats aggregated_l1_stats;  // 집계된 L1 캐시 통계 (모든 코어의 L1 합산)
-  cache_stats aggregated_l2_stats;  // 집계된 L2 캐시 통계 (모든 파티션의 L2 합산)
+  unsigned long long last_streamID;
+  /* [한국어] 가장 최근에 통계 출력에 사용된 스트림 ID.
+   * 스트림 단위 통계 출력 시 어느 스트림까지 처리되었는지 추적.
+   * 설정자: gpu_print_stat()이 스트림 출력 후 업데이트.
+   * 읽는 자: 다음 통계 출력 시 새로 추가된 스트림 범위 파악.
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long last_uid;
+  /* [한국어] 가장 최근에 통계 출력에 사용된 커널 UID.
+   * last_streamID와 함께 이미 출력된 커널을 중복 출력하지 않기 위해 사용.
+   * 설정자: gpu_print_stat()이 커널 통계 출력 후 업데이트.
+   * 읽는 자: 다음 출력 시 새로 완료된 커널 범위를 결정.
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  cache_stats aggregated_l1_stats;
+  /* [한국어] 모든 SM의 L1 캐시 통계를 하나로 합산한 집계 객체.
+   * 개별 SM 통계를 += 연산으로 합산하여 GPU 전체 L1 히트/미스율을 계산.
+   * 설정자: shader_print_cache_stats()나 update_stats()에서 모든 SM 통계 누적.
+   * 읽는 자: print_stats()가 전체 L1 캐시 통계 출력 시 사용.
+   * 값 범위: cache_stats 구조체 (gpu-cache.h 참조).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  cache_stats aggregated_l2_stats;
+  /* [한국어] 모든 메모리 서브파티션의 L2 캐시 통계를 하나로 합산한 집계 객체.
+   * 설정자: shader_print_cache_stats()나 update_stats()에서 모든 서브파티션 통계 누적.
+   * 읽는 자: print_stats()가 전체 L2 캐시 통계 출력 시 사용.
+   * 값 범위: cache_stats 구조체.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   // === 정체(congestion)로 인한 스톨(stall) 카운터들 ===
   // 스톨(stall)이란? 어떤 이유로 진행이 멈추는 것입니다.
   // 마치 교통 체증으로 차가 멈추는 것과 같습니다.
 
-  unsigned int gpu_stall_dramfull;  // DRAM 큐가 가득 차서 발생한 스톨 횟수
-  unsigned int gpu_stall_icnt2sh;  // 인터커넥트→셰이더 경로가 막혀서 발생한 스톨 횟수
+  unsigned int gpu_stall_dramfull;
+  /* [한국어] DRAM 요청 큐가 가득 차서 SM→DRAM 방향 요청이 차단된 사이클 수.
+   * 큐 포화로 인해 SM이 메모리 요청을 보내지 못하고 멈춘 횟수를 누적.
+   * 설정자: memory_partition_unit::push()나 ICNT→DRAM 경로에서 큐가 full일 때 증가.
+   * 읽는 자: print_stats()가 메모리 병목 통계 출력 시 사용.
+   * 값 범위: 0 이상의 단조증가 unsigned int.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
-  // 파티션별 요청 병렬처리 관련 통계
-  unsigned long long partiton_reqs_in_parallel;        // 현재 병렬 처리 중인 요청 수
-  unsigned long long partiton_reqs_in_parallel_total;  // 누적 병렬 요청 수
-  unsigned long long partiton_reqs_in_parallel_util;        // 현재 파티션 활용률
-  unsigned long long partiton_reqs_in_parallel_util_total;  // 누적 파티션 활용률
-  unsigned long long gpu_sim_cycle_parition_util;           // 현재 커널의 파티션 활용 사이클
-  unsigned long long gpu_tot_sim_cycle_parition_util;       // 누적 파티션 활용 사이클
-  unsigned long long partiton_replys_in_parallel;           // 현재 병렬 처리 중인 응답 수
-  unsigned long long partiton_replys_in_parallel_total;     // 누적 병렬 응답 수
+  unsigned int gpu_stall_icnt2sh;
+  /* [한국어] ICNT(NoC)에서 셰이더(SM) 방향 경로가 포화되어 응답 패킷 전달이 차단된 사이클 수.
+   * DRAM→SM 방향 응답이 ICNT 출력 포트 포화로 지연되는 상황을 계수.
+   * 설정자: icnt 라우팅 코드에서 SM 방향 포트가 full일 때 증가.
+   * 읽는 자: print_stats()가 NoC 병목 통계 출력 시 사용.
+   * 값 범위: 0 이상의 단조증가 unsigned int.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_reqs_in_parallel;
+  /* [한국어] 현재 사이클에 여러 메모리 파티션에 동시에 처리 중인 요청 수의 합.
+   * 매 사이클마다 각 파티션의 pending 요청 수를 더한 순간값.
+   * 설정자: cycle()의 DRAM 도메인 처리 루프에서 매 DRAM 사이클마다 갱신.
+   * 읽는 자: partiton_reqs_in_parallel_total 누적 계산; 파티션 활용률 계산.
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_reqs_in_parallel_total;
+  /* [한국어] 전체 시뮬레이션 동안 partiton_reqs_in_parallel 값의 누적 합.
+   * 평균 병렬 파티션 요청 수 = partiton_reqs_in_parallel_total / 총 DRAM 사이클.
+   * 설정자: DRAM 도메인 처리 루프에서 partiton_reqs_in_parallel을 매 사이클 누적.
+   * 읽는 자: 최종 통계 출력 시 평균 메모리 파티션 병렬성 계산에 사용.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_reqs_in_parallel_util;
+  /* [한국어] 메모리 파티션 활용률 계산을 위한 현재 기여값 (요청이 있는 파티션 수).
+   * 설정자: DRAM 도메인 처리 루프에서 매 사이클 갱신.
+   * 읽는 자: partiton_reqs_in_parallel_util_total 누적.
+   * 값 범위: 0 ~ m_n_mem의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_reqs_in_parallel_util_total;
+  /* [한국어] 전체 시뮬레이션 동안 partiton_reqs_in_parallel_util 값의 누적 합.
+   * 평균 활성 파티션 수 = partiton_reqs_in_parallel_util_total / 총 DRAM 사이클.
+   * 설정자: DRAM 도메인 처리 루프에서 partiton_reqs_in_parallel_util을 매 사이클 누적.
+   * 읽는 자: 최종 통계 출력 시 파티션 활용률 계산.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long gpu_sim_cycle_parition_util;
+  /* [한국어] 현재 커널에서 메모리 파티션이 활용된 사이클 수.
+   * 설정자: 파티션에 요청이 있는 사이클마다 cycle()이 증가.
+   * 읽는 자: 커널별 파티션 활용률 출력; gpu_tot_sim_cycle_parition_util 누적.
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long gpu_tot_sim_cycle_parition_util;
+  /* [한국어] 전체 시뮬레이션에서 메모리 파티션 활용 사이클의 전역 누적.
+   * 설정자: 커널 완료 시 gpu_sim_cycle_parition_util을 여기에 누적.
+   * 읽는 자: 최종 통계 출력 시 전체 파티션 활용 효율 계산.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_replys_in_parallel;
+  /* [한국어] 현재 사이클에 여러 파티션에서 동시에 처리 중인 응답(reply) 수의 합.
+   * 설정자: DRAM 도메인 처리 루프에서 매 사이클 갱신.
+   * 읽는 자: partiton_replys_in_parallel_total 누적.
+   * 값 범위: 0 이상의 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  unsigned long long partiton_replys_in_parallel_total;
+  /* [한국어] 전체 시뮬레이션 동안 partiton_replys_in_parallel 값의 누적 합.
+   * 평균 병렬 응답 수 = partiton_replys_in_parallel_total / 총 DRAM 사이클.
+   * 설정자: DRAM 도메인 처리 루프에서 partiton_replys_in_parallel을 매 사이클 누적.
+   * 읽는 자: 최종 통계 출력 시 메모리 응답 병렬성 계산.
+   * 값 범위: 0 이상의 단조증가 unsigned long long.
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
   // === 캐시 설정 관련 함수들 ===
   // 커널별로 다른 캐시 설정을 적용할 수 있습니다
@@ -1413,8 +2625,22 @@ class gpgpu_sim : public gpgpu_t {
   // Jin이라는 개발자가 추가한 기능입니다.
  protected:
   // 스트림 연산이 기능적 시뮬레이션을 수행할 때마다 설정됩니다
-  bool m_functional_sim;                    // 기능적 시뮬레이션 모드인지 여부
-  kernel_info_t *m_functional_sim_kernel;   // 기능적 시뮬레이션 중인 커널
+  bool m_functional_sim;
+  /* [한국어] 현재 기능적(functional) 시뮬레이션 모드가 활성화되어 있는지 나타내는 플래그.
+   * 기능적 시뮬레이션: 타이밍 없이 PTX 명령어를 순수하게 실행하여 결과 정확성만 검증.
+   * CUDA Dynamic Parallelism(CDP)에서 자식 커널을 기능적으로 먼저 실행할 때 true.
+   * 설정자: functional_launch()에서 true로, finish_functional_sim()에서 false로 변경.
+   * 읽는 자: is_functional_sim()을 통해 stream_manager나 cycle()이 실행 모드 분기.
+   * 값 범위: true(기능적 시뮬레이션 실행 중) 또는 false(타이밍 시뮬레이션 모드).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
+
+  kernel_info_t *m_functional_sim_kernel;
+  /* [한국어] 현재 기능적 시뮬레이션으로 실행 중인 커널의 정보 객체 포인터.
+   * m_functional_sim이 true일 때만 유효한 포인터를 가짐.
+   * 설정자: functional_launch(k)에서 k로 설정; finish_functional_sim()에서 NULL로 소거.
+   * 읽는 자: get_functional_kernel()을 통해 기능적 시뮬레이션 실행 코드가 커널 정보 접근.
+   * 값 범위: 유효한 kernel_info_t 포인터 또는 NULL(기능적 시뮬레이션 비활성 시).
+   * 동기화: 단일 시뮬레이션 스레드에서만 접근. */
 
  public:
   // 현재 기능적 시뮬레이션 모드인지 반환
@@ -1507,8 +2733,15 @@ class sst_gpgpu_sim : public gpgpu_sim {
    *        ↓
    *      [응답0, 응답1, 응답2, ...]
    */
-  std::vector<std::deque<mem_fetch *>>
-      SST_gpgpu_reply_buffer; /** SST 메모리 응답 큐 */
+  std::vector<std::deque<mem_fetch *>> SST_gpgpu_reply_buffer;
+  /* [한국어] SST 메모리 시뮬레이터로부터 수신한 메모리 응답 패킷 버퍼.
+   * 벡터 크기는 GPU 코어 수와 동일하며, 각 원소는 해당 코어의 응답 큐(deque).
+   * SST_receive_mem_reply(core_id, mem_req)가 응답을 해당 코어 큐에 push_back.
+   * SST_pop_mem_reply(core_id)가 코어 큐의 front에서 응답을 꺼내 SM으로 전달.
+   * 설정자: sst_gpgpu_sim 생성자에서 코어 수만큼 벡터 원소 생성; SST_receive_mem_reply()로 응답 추가.
+   * 읽는 자: SST_cycle()이 코어별로 응답을 SM 파이프라인에 주입할 때 SST_pop_mem_reply() 호출.
+   * 값 범위: 코어 수 개의 deque; 각 deque에는 완료된 mem_fetch 포인터 리스트.
+   * 동기화: SST 콜백이 별도 스레드에서 호출될 수 있으므로, 실제 구현에서 락이 필요할 수 있음. */
 
   /**
    * @brief SST로부터 메모리 요청에 대한 응답을 받아
