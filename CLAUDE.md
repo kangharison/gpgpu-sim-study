@@ -129,7 +129,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 
 ## 주석 작업 진행 현황
 
-### 완료 (26 파일)
+### 완료 (32 파일)
 
 | 파일 | 설명 | 완료일 |
 |------|------|--------|
@@ -170,6 +170,11 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/cuda-sim/cuda-math.h | CUDA 수학 에뮬레이션 (정수→float 변환 16종, float2int/uint, __saturatef, __powf, macOS 보완 함수, 상단 4섹션 블록) | 2026-06-13 |
 | src/cuda-sim/ptx_ir.h | PTX IR 헤더 (type_info_key, symbol, symbol_table, operand_info, basic_block_t, gpgpu_recon_t, ptx_instruction, param_info, function_info, arg_buffer_t 전체 — 모든 필드/메서드 멀티라인 주석) | 2026-06-14 |
 | src/cuda-sim/ptx_ir.cc | PTX IR 구현 (symbol_table, function_info CFG 분석 — create_basic_blocks, find_dominators/postdominators/ipostdominators, do_pdom, ptx_instruction 생성자, ptx_assemble, copy_arg_to_buffer 등 전체 함수 주석) | 2026-06-14 |
+| src/cuda-sim/opcodes.h | PTX opcode 열거형 (opcode_t X-매크로, special_regs 전체 필드 주석, wmma_type Tensor Core 연산 분류) | 2026-06-13 |
+| src/cuda-sim/ptx_sim.cc | PTX 기능 시뮬레이션 CTA/warp/스레드 상태 관리 (ptx_cta_info/ptx_warp_info/ptx_thread_info 전체 함수 + 인라인 주석, 콜스택/레지스터 프레임/특수 레지스터 구현) | 2026-06-14 |
+| src/gpgpu-sim/shader_trace.h | 셰이더 코어 전용 디버그 트레이스 매크로 (SHADER_DTRACE/DPRINTF/SCHED_DPRINTF, TRACING_ON 분기, no-op 정의) | 2026-06-13 |
+| src/gpgpu-sim/l2cache_trace.h | L2 캐시/메모리 파티션 전용 디버그 트레이스 매크로 (MEMPART_DTRACE/DPRINTF, MEM_SUBPART_DTRACE/DPRINTF) | 2026-06-13 |
+| src/gpgpu-sim/stats.h | 메모리 파이프라인 통계 열거형 (mem_stage_access_type 7종, tlb_request_status 3종, mem_stage_stall_type 9종 전체 필드 주석) | 2026-06-13 |
 
 ### 미완료 (우선순위 순)
 
