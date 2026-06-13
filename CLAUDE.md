@@ -168,6 +168,8 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 | src/gpgpu-sim/gpu-sim.h | 최상위 GPU 시뮬레이터 헤더 (gpgpu_sim, gpgpu_sim_config, memory_config, power_config, 필수 4섹션 상단 블록, 모든 필드 멀티라인 주석 보강) | 2026-06-14 |
 | src/gpgpu-sim/gpu-sim.cc | 최상위 GPU 시뮬레이터 구현 (cycle(), init(), launch(), issue_block2core(), 전체 함수 주석) | 2026-06-13 |
 | src/cuda-sim/cuda-math.h | CUDA 수학 에뮬레이션 (정수→float 변환 16종, float2int/uint, __saturatef, __powf, macOS 보완 함수, 상단 4섹션 블록) | 2026-06-13 |
+| src/cuda-sim/ptx_ir.h | PTX IR 헤더 (type_info_key, symbol, symbol_table, operand_info, basic_block_t, gpgpu_recon_t, ptx_instruction, param_info, function_info, arg_buffer_t 전체 — 모든 필드/메서드 멀티라인 주석) | 2026-06-14 |
+| src/cuda-sim/ptx_ir.cc | PTX IR 구현 (symbol_table, function_info CFG 분석 — create_basic_blocks, find_dominators/postdominators/ipostdominators, do_pdom, ptx_instruction 생성자, ptx_assemble, copy_arg_to_buffer 등 전체 함수 주석) | 2026-06-14 |
 
 ### 미완료 (우선순위 순)
 
@@ -175,7 +177,7 @@ GPGPU-Sim 코드의 특성상, 주석에 다음 사항을 반드시 포함한다
 |---------|------|---------|
 | src/gpgpu-sim/shader.* | SM 파이프라인 (핵심) | P0 |
 | src/gpgpu-sim/gpu-cache.* | 캐시 계층 | P0 |
-| src/cuda-sim/ptx_ir.*, instructions.cc | PTX IR 및 명령어 시맨틱 | P1 |
+| src/cuda-sim/instructions.cc | PTX 명령어 시맨틱 | P1 |
 | src/intersim2/ | NoC 시뮬레이터 | P2 |
 | src/accelwattch/ | 전력 모델 | P2 |
 | libcuda/, libopencl/ | 런타임 인터셉트 | P2 |
