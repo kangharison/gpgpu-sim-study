@@ -102,308 +102,847 @@
  * the above Disclaimer and U.S. Government End Users Notice.
  */
 
-#include <assert.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <fstream>
-#include <functional>
-#include <iostream>
-#include <regex>
-#include <sstream>
-#include <string>
+/*
+ * [한국어 설명] CUDA 런타임 API 인터셉트 레이어 (cuda_runtime_api.cc)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 GPGPU-Sim의 가장 핵심적인 인터셉트 레이어로, NVIDIA의 실제
+ * libcudart.so 대신 링크되는 가짜 CUDA 런타임 라이브러리의 본체이다.
+ * CUDA 애플리케이션이 cudaMalloc, cudaMemcpy, cudaLaunchKernel 등 모든
+ * CUDA 런타임 API를 호출할 때, 이 파일에 구현된 stub 함수들이 대신
+ * 실행되어 GPGPU-Sim 시뮬레이터로 요청을 전달한다.
+ * 또한 cuobjdump 파서 콜백, PTX 정보 등록, 디바이스 속성 초기화 등
+ * 시뮬레이터 부트스트래핑에 필요한 모든 초기화 코드를 포함한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * GPGPU-Sim 실행 흐름의 최상위 진입점이다:
+ *   CUDA Application
+ *     → libcuda.so (이 파일) ← 링크 시 NVIDIA libcudart.so 대신 치환
+ *         → GPGPUSim_Context() → GPGPUSim_Init()  (시뮬레이터 싱글톤 초기화)
+ *             → gpgpu_ptx_sim_init_perf()          (타이밍 모델 gpgpu_sim 생성)
+ *             → cuda-sim/ (PTX 기능 시뮬레이션)
+ *             → gpgpu-sim/ (사이클-레벨 타이밍 시뮬레이션)
+ * 즉, 이 파일은 사용자 공간(user-space) 호스트 측에서 실행되며,
+ * 실제 GPU 드라이버/하드웨어 없이 시뮬레이터가 CUDA 애플리케이션을
+ * 투명하게 가로채는 첫 번째 관문이다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈:
+ *   - src/gpgpusim_entrypoint.{cc,h}: GPGPUSim_ctx, start_sim_thread 등 시뮬레이터 생애주기
+ *   - src/gpgpu-sim/gpu-sim.{cc,h}: 타이밍 모델 gpgpu_sim (사이클 루프 본체)
+ *   - src/cuda-sim/cuda-sim.h: PTX 기능 시뮬레이션 인터페이스
+ *   - src/cuda-sim/ptx_ir.h: function_info 등 PTX IR 자료구조
+ *   - src/cuda-sim/ptx_loader.h: PTX 바이너리 파싱/로딩
+ *   - src/cuda-sim/ptx_parser.h: ptxinfo_data, PTX 파서 콜백
+ *   - src/stream_manager.{cc,h}: CUDA 스트림(CUstream_st) 관리
+ *   - src/abstract_hardware_model.h: kernel_info_t, warp_inst_t 등 추상 HW 모델
+ *   - libcuda/cuda_api_object.h: CUctx_st, _cuda_device_id 등 CUDA 객체 정의
+ *   - libcuda/gpgpu_context.h: gpgpu_context 전역 컨텍스트 (시뮬레이터 상태 소유자)
+ * 데이터 흐름:
+ *   - CUDA 앱의 API 호출 → 이 파일의 stub → CUctx_st/gpgpu_sim으로 전달
+ *   - cuobjdump 파서 → addCuobjdumpSection/setCuobjdump* 콜백 → cuobjdumpSectionList
+ *   - PTX 파서 → ptxinfo_data::ptxinfo_addinfo() → CUctx_st::add_ptxinfo()
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - GPGPUSim_Init()        : 시뮬레이터 싱글톤 초기화; gpgpu_sim 생성, cudaDeviceProp 채움
+ * - GPGPUSim_Context()     : CUctx_st 싱글톤 반환 (없으면 생성); 모든 API 함수의 출발점
+ * - GPGPU_Context()        : gpgpu_context 전역 싱글톤 반환 (없으면 heap 할당)
+ * - ptxinfo_addinfo()      : PTX 파서가 .section ptxinfo 지시자 파싱 후 호출하는 콜백
+ * - cuda_not_implemented() : 미구현 CUDA API 호출 시 에러 메시지를 출력하고 abort
+ * - addCuobjdumpSection()  : cuobjdump lex/yacc 파서 콜백; PTX/ELF 섹션 노드 추가
+ * - get_app_binary()       : /proc/self/exe 심볼릭 링크를 통해 현재 실행 바이너리 경로 반환
+ * - cudaArray              : 2D/3D 텍스처/배열을 위한 디바이스 메모리 래퍼 구조체
+ */
+
+#include <assert.h>   // [한국어] assert() 매크로 — 내부 불변 조건(invariant) 위반 시 즉시 abort
+#include <stdarg.h>   // [한국어] va_list/va_start/va_end — 가변 인수 함수(printf-style) 구현에 필요
+#include <stdio.h>    // [한국어] printf/fprintf/fflush/fopen/fgets — 콘솔 출력 및 파일 I/O
+#include <stdlib.h>   // [한국어] malloc/calloc/free/abort/system/mkstemp — 동적 메모리 및 프로세스 제어
+#include <string.h>   // [한국어] strcmp/strdup/strtok/memcpy — C 문자열 조작
+#include <time.h>     // [한국어] time() — 타이머 이벤트 시뮬레이션용 클럭 기준값
+#include <fstream>    // [한국어] std::ifstream/ofstream — PTX 파일 로딩 등 파일 스트림
+#include <functional> // [한국어] std::function — 콜백 래퍼 (스트림 오퍼레이션 dispatch에 사용)
+#include <iostream>   // [한국어] std::cout/cerr — C++ 스타일 콘솔 출력
+#include <regex>      // [한국어] std::regex — CUDA 버전 문자열 파싱 및 섹션 헤더 매칭
+#include <sstream>    // [한국어] std::stringstream — /proc/self/exe 경로 조합 등 문자열 빌더
+#include <string>     // [한국어] std::string — C++ 문자열; API 이름, 파일 경로 저장에 광범위 사용
 #ifdef OPENGL_SUPPORT
-#define GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES  // [한국어] GL 확장 함수 프로토타입을 헤더에서 노출 (OpenGL interop 지원 시)
 #ifdef __APPLE__
 #include <GLUT/glut.h>  // Apple's version of GLUT is here
+// [한국어] macOS: GLUT가 시스템 프레임워크 경로(/System/Library/Frameworks/GLUT.framework)에 위치
 #else
 #include <GL/gl.h>
+// [한국어] Linux/Windows: 표준 OpenGL 헤더 (GL 컨텍스트와 CUDA 메모리 공유 지원)
 #endif
 #endif
 
 #define __CUDA_RUNTIME_API_H__
+// [한국어] CUDA 런타임 API 헤더의 중복 포함 방지 가드를 먼저 정의.
+// 이후 include되는 NVIDIA 헤더들이 CUDA 런타임 함수 원형을 재선언하는 것을 막아
+// GPGPU-Sim이 정의하는 stub 함수들과의 충돌을 방지한다.
+
 // clang-format off
 #include "host_defines.h"
+// [한국어] __host__, __device__, __global__ 등 CUDA 한정자(qualifier) 매크로 정의.
+// 시뮬레이터 환경에서는 이 한정자들이 빈 매크로로 확장되어 호스트 코드로 컴파일된다.
 #include "builtin_types.h"
+// [한국어] dim3, cudaError_t, size_t 등 CUDA 기본 타입 정의.
+// CUDA 앱이 사용하는 모든 기본 자료형의 공통 기반이다.
 #include "driver_types.h"
+// [한국어] cudaMemcpyKind, cudaChannelFormatDesc, cudaDeviceProp 등
+// CUDA 드라이버 수준의 enum/구조체 정의. 이 파일에서 cudaDeviceProp 채움에 직접 사용된다.
 #include "cuda_api.h"
+// [한국어] CUDA API 선언부 (libcuda 내부 전용). CUctx_st, _cuda_device_id 등
+// GPGPU-Sim 전용 CUDA 객체 계층의 인터페이스를 포함한다.
 #include "cudaProfiler.h"
+// [한국어] cudaProfilerStart/Stop 등 CUDA 프로파일러 API 선언.
+// GPGPU-Sim에서는 stub으로만 구현된다.
 // clang-format on
 #if (CUDART_VERSION < 8000)
 #include "__cudaFatFormat.h"
+// [한국어] CUDA 8.0 이전의 fat binary 포맷(__cudaFatCudaBinary 구조체) 정의.
+// CUDA 8.0부터는 fat binary 포맷이 변경되었으므로 구버전 호환성을 위한 분기이다.
 #endif
 #include "../src/abstract_hardware_model.h"
+// [한국어] warp_inst_t, kernel_info_t, core_t 등 GPU 추상 하드웨어 모델.
+// CUDA 커널 실행 요청을 시뮬레이터 내부 자료구조로 변환할 때 사용된다.
 #include "../src/cuda-sim/cuda-sim.h"
+// [한국어] PTX 기능 시뮬레이션 인터페이스 (gpgpu_ptx_sim_init_perf 등).
+// 타이밍 모델(gpgpu-sim/)과 기능 모델(cuda-sim/)을 연결하는 중간 인터페이스다.
 #include "../src/cuda-sim/ptx_ir.h"
+// [한국어] function_info, ptx_instruction 등 PTX IR(중간 표현) 자료구조.
+// register_ptx_function에서 커널 함수를 등록할 때 사용된다.
 #include "../src/cuda-sim/ptx_loader.h"
+// [한국어] PTX 바이너리 파싱/로딩 인터페이스. fat binary에서 PTX를 추출하여
+// 파서에게 넘기는 역할을 한다.
 #include "../src/cuda-sim/ptx_parser.h"
+// [한국어] ptxinfo_data 클래스 정의. PTX 어셈블러(ptxas)가 출력하는
+// 레지스터/공유메모리 사용량 정보를 파싱한 결과를 담는다.
 #include "../src/gpgpu-sim/gpu-sim.h"
+// [한국어] gpgpu_sim 클래스 및 gpgpu_sim_config 정의.
+// 사이클-레벨 타이밍 시뮬레이터의 최상위 클래스; GPGPUSim_Init에서 생성된다.
 #include "../src/gpgpusim_entrypoint.h"
+// [한국어] GPGPUsim_ctx, start_sim_thread 등 시뮬레이터 생애주기 함수.
+// 시뮬레이션 스레드를 시작하고 시뮬레이터 전역 상태를 관리한다.
 #include "../src/stream_manager.h"
+// [한국어] CUstream_st, stream_manager 정의.
+// cudaMemcpyAsync, cudaLaunchKernel 등 비동기 CUDA 오퍼레이션의 큐잉 메커니즘.
 #include "cuda_api_object.h"
+// [한국어] CUctx_st(_cuda_device_id *), CUevent_st 등 CUDA 객체 구현체.
+// 이 파일의 GPGPUSim_Context()가 생성/반환하는 핵심 객체들이 여기 정의된다.
 #include "gpgpu_context.h"
+// [한국어] gpgpu_context 전역 컨텍스트 클래스 — 시뮬레이터 전체 상태의 소유자.
+// GPGPU_Context() 함수가 반환하는 싱글톤 객체의 타입이다.
 
-#include <pthread.h>
-#include <semaphore.h>
+#include <pthread.h>   // [한국어] pthread_t, pthread_create 등 POSIX 스레드 API.
+                       // 시뮬레이션 루프를 별도 스레드로 구동하기 위해 필요하다.
+#include <semaphore.h> // [한국어] sem_t, sem_post/sem_wait — 호스트-시뮬레이터 스레드 간 동기화.
+                       // CUDA 스트림 오퍼레이션 완료를 알리는 데 사용된다.
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+// [한국어] macOS 전용: _NSGetExecutablePath() 함수 선언.
+// Linux의 /proc/self/exe 대신 macOS에서 현재 실행 바이너리 경로를 얻는 API.
 #endif
 
 // SST cycle
 extern bool SST_Cycle();
+// [한국어] SST(Structural Simulation Toolkit) 통합 모드에서 사이클을 진행시키는 외부 함수.
+// GPGPU-Sim을 SST 프레임워크 내 컴포넌트로 연결할 때 이 함수를 통해 동기화한다.
 
 /*DEVICE_BUILTIN*/
+/*
+ * [한국어] cudaArray — CUDA 2D/3D 배열 (텍스처/서피스 메모리 래퍼) 구조체.
+ * cudaMallocArray(), cudaMemcpy2DToArray() 등의 API가 이 구조체를 통해
+ * 디바이스 메모리 내 2D/3D 배열 레이아웃을 표현한다.
+ * GPGPU-Sim에서는 실제 GPU DRAM 대신 시뮬레이터 내부 메모리 공간에 매핑된다.
+ */
 struct cudaArray {
   void *devPtr;
+  /* [한국어] 디바이스 메모리 포인터 (64비트 주소).
+   * 설정자: cudaMallocArray() 등 배열 할당 API가 시뮬레이터 메모리 할당 후 저장.
+   * 읽는 자: cudaMemcpy2DToArray() 등 배열 접근 API가 실제 데이터 복사 대상 주소로 사용.
+   * 값 범위: 시뮬레이터 가상 주소 공간 내 유효한 포인터 (NULL이면 미초기화).
+   * 동기화: 배열 하나는 단일 CUDA 컨텍스트에서 생성·사용되며 별도 락 없음. */
+
   int devPtr32;
+  /* [한국어] 32비트 환경 또는 레거시 CUDA 드라이버 호환성을 위한 32비트 디바이스 포인터.
+   * 설정자: CUDA 1.x 시절 32비트 주소 공간에서 배열 할당 시 저장.
+   * 읽는 자: 32비트 경로의 접근 API (현재 GPGPU-Sim에서는 거의 사용되지 않음).
+   * 값 범위: 유효한 32비트 디바이스 주소 또는 0 (64비트 환경에서는 0).
+   * 동기화: devPtr과 동일, 별도 락 없음. */
+
   struct cudaChannelFormatDesc desc;
+  /* [한국어] 채널 포맷 기술자 (Channel Format Descriptor).
+   * 각 채널(x,y,z,w)의 비트 수와 데이터 종류(int/uint/float)를 기술한다.
+   * 설정자: cudaCreateChannelDesc() 또는 cudaMallocArray() 호출 시 인수로 전달된 값.
+   * 읽는 자: 텍스처 바인딩(cudaBindTextureToArray) 및 배열 복사 시 포맷 검증에 사용.
+   * 값 범위: x,y,z,w 각각 0~32 비트, kind는 cudaChannelFormatKindSigned/Unsigned/Float.
+   * 동기화: 생성 시 1회 설정, 이후 read-only. */
+
   int width;
+  /* [한국어] 배열의 너비 (x 방향 요소 수).
+   * 설정자: cudaMallocArray() 호출 시 width 인수 값.
+   * 읽는 자: 경계 검사, 메모리 크기 계산, 텍스처 좌표 정규화에 사용.
+   * 값 범위: 1 이상의 양의 정수; SM 컴퓨트 능력에 따라 최대값 제한.
+   * 동기화: 생성 후 불변. */
+
   int height;
+  /* [한국어] 배열의 높이 (y 방향 요소 수). 1D 배열의 경우 0 또는 1.
+   * 설정자: cudaMallocArray() 호출 시 height 인수 값.
+   * 읽는 자: 2D/3D 텍스처 참조(texref) 설정 및 경계 검사에 사용.
+   * 값 범위: 0 (1D 배열) 또는 1 이상 (2D/3D 배열).
+   * 동기화: 생성 후 불변. */
+
   int size;  // in bytes
+  /* [한국어] 배열 전체 크기 (바이트 단위).
+   * 설정자: 배열 할당 함수가 width * height * desc 채널 크기로 계산하여 저장.
+   * 읽는 자: cudaMemcpy2DToArray() 등 데이터 복사 시 전체 크기 검증에 사용.
+   * 값 범위: 양의 정수 (0이면 미초기화 또는 할당 실패).
+   * 동기화: 생성 후 불변. */
+
   unsigned dimensions;
+  /* [한국어] 배열의 차원 수 (1, 2, 또는 3).
+   * 설정자: cudaMalloc3DArray() 등 할당 API가 요청된 차원으로 설정.
+   * 읽는 자: 텍스처 바인딩 API가 배열 타입(1D/2D/3D)을 구분하는 데 사용.
+   * 값 범위: 1(1D), 2(2D), 3(3D).
+   * 동기화: 생성 후 불변. */
 };
 
 #if !defined(__dv)
 #if defined(__cplusplus)
 #define __dv(v) = v
+/* [한국어] C++ 모드: __dv(v)를 C++ 기본 인수(default argument) '= v'로 확장.
+ * CUDA API 헤더에서 선택적 파라미터(예: cudaMemcpy의 kind 기본값)를 지원하기 위해 사용. */
 #else /* __cplusplus */
 #define __dv(v)
+/* [한국어] C 모드: __dv(v)를 빈 문자열로 확장.
+ * C언어는 기본 인수를 지원하지 않으므로 매크로를 무시하여 순수 C 호환성을 유지한다. */
 #endif /* __cplusplus */
 #endif /* !__dv */
 
 cudaError_t g_last_cudaError = cudaSuccess;
+/* [한국어] 가장 최근 CUDA API 호출의 에러 코드를 저장하는 전역 변수.
+ * 설정자: 이 파일의 모든 CUDA API stub 함수들이 반환 직전에 'g_last_cudaError = <에러코드>'로 갱신.
+ * 읽는 자: cudaGetLastError() / cudaPeekAtLastError()가 이 값을 반환.
+ * 값 범위: cudaSuccess(0) ~ 정의된 cudaError_t enum 값 중 하나.
+ * 동기화: CUDA 스트림/컨텍스트는 단일 호스트 스레드에서 사용하므로 별도 락 없이 안전하다.
+ *          단, 멀티스레드 환경에서 동시 API 호출 시 경쟁 조건 가능 — CUDA 스펙상 동일 컨텍스트
+ *          동시 호출은 정의되지 않은 동작이므로 현재 구현은 이를 보호하지 않는다. */
 
+/*
+ * [한국어]
+ * register_ptx_function - PTX 함수 등록 (현재 미사용 stub)
+ *
+ * @name: 등록하려는 PTX 커널 함수의 이름 문자열.
+ * @impl: 해당 커널의 function_info 포인터 (PTX IR 표현).
+ * @return: 없음 (void).
+ *
+ * 예전 GPGPU-Sim 버전에서는 PTX 커널을 이름으로 등록하는 역할을 했으나,
+ * 현재 버전에서는 PTX 로더(ptx_loader.cc)가 직접 커널 함수를 관리하므로
+ * 이 함수는 아무 동작도 하지 않는 빈 stub으로 남아 있다.
+ * 하위 호환성을 위해 함수 시그니처는 유지된다.
+ *
+ * 호출 체인:
+ *   (이전) cudaRegisterFunction() 경로 → [register_ptx_function] → (미사용)
+ */
 void register_ptx_function(const char *name, function_info *impl) {
   // no longer need this
+  // [한국어] 과거 PTX 함수 등록 코드; 현재 버전에서는 ptx_loader가 직접 처리하므로 비워둠
 }
 
 #if defined __APPLE__
 #define __my_func__ __PRETTY_FUNCTION__
+// [한국어] macOS/Clang 환경: __PRETTY_FUNCTION__은 클래스::메서드(인자타입) 형태의 상세 함수명 제공
 #else
 #if defined __cplusplus ? __GNUC_PREREQ(2, 6) : __GNUC_PREREQ(2, 4)
 #define __my_func__ __PRETTY_FUNCTION__
+// [한국어] GCC 2.6+(C++) 또는 GCC 2.4+(C): __PRETTY_FUNCTION__으로 시그니처 포함 함수명 제공
 #else
 #if defined __STDC_VERSION__ && __STDC_VERSION__ >= 199901L
 #define __my_func__ __func__
+// [한국어] C99 이상: __func__는 현재 함수명 문자열 리터럴 (단순 이름, 시그니처 없음)
 #else
 #define __my_func__ ((__const char *)0)
+// [한국어] 구형 컴파일러: 함수명 제공 불가 — NULL 포인터로 정의하여 printf에서 "(null)" 출력
 #endif
 #endif
 #endif
+// [한국어] __my_func__: announce_call()이 어떤 CUDA API가 호출되었는지 로그로 출력할 때
+// 컴파일러/플랫폼에 관계없이 현재 함수명을 가져오기 위한 이식성 래퍼 매크로.
 
+/*
+ * [한국어]
+ * gpgpu_context::GPGPUSim_Init - GPGPU-Sim 시뮬레이터 싱글톤 초기화
+ *
+ * @return: 초기화된 _cuda_device_id 포인터.
+ *          cudaGetDeviceProperties() 등의 API가 장치 속성을 조회할 때 반환된다.
+ *
+ * 이 함수는 GPGPU-Sim 시뮬레이터의 핵심 초기화 루틴이다.
+ * 최초 호출 시(the_cude_device == NULL) gpgpu_sim 타이밍 모델 객체를 생성하고,
+ * gpgpusim.config에 설정된 GPU 아키텍처 파라미터를 읽어 cudaDeviceProp 구조체를
+ * 채운 뒤, _cuda_device_id 싱글톤을 생성한다.
+ * 이후 start_sim_thread(1)을 호출하여 사이클-레벨 시뮬레이션 루프를 실행하는
+ * 별도의 POSIX 스레드를 시작한다.
+ * 두 번째 이후 호출에서는 이미 초기화된 the_cude_device를 즉시 반환한다.
+ *
+ * 실행 컨텍스트: 호스트 스레드 (CUDA API를 처음 호출하는 애플리케이션 스레드).
+ * 동시성: GPGPUSim_Context()가 한 번만 호출하도록 보호하므로 재진입 없음.
+ *
+ * 호출 체인:
+ *   GPGPUSim_Context() → [GPGPUSim_Init] → gpgpu_ptx_sim_init_perf()
+ *                                         → start_sim_thread(1)
+ */
 struct _cuda_device_id *gpgpu_context::GPGPUSim_Init() {
-  _cuda_device_id *the_device = the_gpgpusim->the_cude_device;
-  if (!the_device) {
+  _cuda_device_id *the_device = the_gpgpusim->the_cude_device; // [한국어] 기존 싱글톤 장치 포인터 로드 (두 번째 이후 호출 시 NULL이 아님)
+  if (!the_device) { // [한국어] 아직 초기화되지 않은 경우에만 시뮬레이터를 생성 (최초 1회 진입)
     gpgpu_sim *the_gpu = gpgpu_ptx_sim_init_perf();
+    // [한국어] gpgpusim.config를 파싱하여 타이밍 모델(gpgpu_sim) 객체 생성.
+    // 이 함수 내부에서 SM 수, 캐시 크기, DRAM 파라미터 등이 모두 초기화된다.
 
     cudaDeviceProp *prop = (cudaDeviceProp *)calloc(sizeof(cudaDeviceProp), 1);
+    // [한국어] cudaGetDeviceProperties()가 반환할 cudaDeviceProp 구조체를 heap에 할당.
+    // calloc을 사용하여 모든 필드를 0으로 초기화한 뒤 명시적으로 채운다.
+
     snprintf(prop->name, 256, "GPGPU-Sim_v%s", g_gpgpusim_version_string);
+    // [한국어] 장치 이름을 "GPGPU-Sim_v<버전>" 형태로 설정.
+    // cudaGetDeviceProperties()로 이름을 조회하는 앱이 시뮬레이터임을 인식할 수 있게 한다.
+
     prop->major = the_gpu->compute_capability_major();
+    // [한국어] CUDA 컴퓨트 능력 메이저 버전 (예: SM 7.0 → 7) — gpgpusim.config의 sm 설정에서 읽음
     prop->minor = the_gpu->compute_capability_minor();
+    // [한국어] CUDA 컴퓨트 능력 마이너 버전 (예: SM 7.0 → 0)
     prop->totalGlobalMem = 0x80000000 /* 2 GB */;
+    // [한국어] 전체 글로벌 메모리 크기를 2GB로 고정. 실제 GPU처럼 다양한 용량을 지원하지 않고
+    // 시뮬레이터는 고정 값을 사용한다. cudaMalloc의 범위 검사 기준이 된다.
     prop->memPitch = 0;
+    // [한국어] 2D 메모리 pitch (행 간격) — 시뮬레이터에서는 pitch 정렬 최적화를 하지 않으므로 0.
+
     if (prop->major >= 2) {
-      prop->maxThreadsPerBlock = 1024;
-      prop->maxThreadsDim[0] = 1024;
-      prop->maxThreadsDim[1] = 1024;
+      // [한국어] Fermi(SM 2.x) 이상: 스레드 블록당 최대 1024개 스레드 허용
+      prop->maxThreadsPerBlock = 1024; // [한국어] 블록당 최대 스레드 수 (1024 = 32 warp × 32)
+      prop->maxThreadsDim[0] = 1024;  // [한국어] x 방향 최대 스레드 수
+      prop->maxThreadsDim[1] = 1024;  // [한국어] y 방향 최대 스레드 수
     } else {
-      prop->maxThreadsPerBlock = 512;
-      prop->maxThreadsDim[0] = 512;
-      prop->maxThreadsDim[1] = 512;
+      // [한국어] Tesla(SM 1.x): 블록당 최대 512개 스레드 (16 warp × 32)
+      prop->maxThreadsPerBlock = 512; // [한국어] Tesla SM의 블록당 스레드 한계
+      prop->maxThreadsDim[0] = 512;  // [한국어] Tesla x 방향 최대 스레드 수
+      prop->maxThreadsDim[1] = 512;  // [한국어] Tesla y 방향 최대 스레드 수
     }
 
-    prop->maxThreadsDim[2] = 64;
-    prop->maxGridSize[0] = 0x40000000;
-    prop->maxGridSize[1] = 0x40000000;
-    prop->maxGridSize[2] = 0x40000000;
-    prop->totalConstMem = 0x40000000;
-    prop->textureAlignment = 0;
+    prop->maxThreadsDim[2] = 64;          // [한국어] z 방향 최대 스레드 수 (SM 버전 무관 64로 제한)
+    prop->maxGridSize[0] = 0x40000000;    // [한국어] 그리드 x 방향 최대 블록 수 (1G = 2^30)
+    prop->maxGridSize[1] = 0x40000000;    // [한국어] 그리드 y 방향 최대 블록 수
+    prop->maxGridSize[2] = 0x40000000;    // [한국어] 그리드 z 방향 최대 블록 수
+    prop->totalConstMem = 0x40000000;     // [한국어] 상수 메모리 총 크기 1GB (실제 GPU는 64KB; 시뮬레이터 단순화)
+    prop->textureAlignment = 0;           // [한국어] 텍스처 주소 정렬 바이트 수 — 시뮬레이터는 정렬 제약 없으므로 0
     //        * TODO: Update the .config and xml files of all GPU config files
     //        with new value of sharedMemPerBlock and regsPerBlock
     prop->sharedMemPerBlock = the_gpu->shared_mem_per_block();
+    // [한국어] 블록당 공유 메모리 크기 (bytes) — gpgpusim.config의 gpgpu_shmem_size 값에서 읽음
 #if (CUDART_VERSION > 5050)
     prop->regsPerMultiprocessor = the_gpu->num_registers_per_core();
+    // [한국어] CUDA 5.5 이후: SM 당 레지스터 수 (예: Kepler = 65536, Maxwell = 65536)
     prop->sharedMemPerMultiprocessor = the_gpu->shared_mem_size();
+    // [한국어] CUDA 5.5 이후: SM 당 전체 공유 메모리 크기 (bytes)
 #endif
     prop->sharedMemPerBlock = the_gpu->shared_mem_per_block();
+    // [한국어] 블록당 공유 메모리 재설정 (위 CUDART_VERSION 분기 후 무조건 적용)
     prop->regsPerBlock = the_gpu->num_registers_per_block();
+    // [한국어] 블록당 레지스터 수 — 컴파일러가 레지스터 압력(register spilling) 판단에 사용
     prop->warpSize = the_gpu->wrp_size();
+    // [한국어] warp 크기 (NVIDIA GPU 표준 = 32) — PTX 스케줄러와 SIMT 스택 크기의 기준
     prop->clockRate = the_gpu->shader_clock();
+    // [한국어] SM 클럭 속도 (kHz 단위) — gpgpusim.config의 gpgpu_clock_gated_el_cta 등에서 파생
 #if (CUDART_VERSION >= 2010)
     prop->multiProcessorCount = the_gpu->get_config().num_shader();
+    // [한국어] CUDA 2.1 이후: GPU 내 SM(Streaming Multiprocessor) 총 수
+    // num_shader()는 gpgpusim.config의 gpgpu_n_clusters * gpgpu_n_cores_per_cluster에서 계산
 #endif
 #if (CUDART_VERSION >= 4000)
     prop->maxThreadsPerMultiProcessor = the_gpu->threads_per_core();
+    // [한국어] CUDA 4.0 이후: SM당 동시 활성 스레드 최대 수 (Fermi=1536, Kepler=2048 등)
 #endif
     the_gpu->set_prop(prop);
+    // [한국어] 방금 채운 cudaDeviceProp을 gpgpu_sim 객체 내부에 저장.
+    // 이후 cudaGetDeviceProperties() 호출 시 이 포인터를 반환한다.
+
     the_gpgpusim->the_cude_device = new _cuda_device_id(the_gpu);
+    // [한국어] gpgpu_sim 포인터를 래핑하는 _cuda_device_id 싱글톤 생성.
+    // 이 객체가 CUctx_st(CUDA 컨텍스트)에 바인딩되는 "장치 핸들"이다.
+
     the_device = the_gpgpusim->the_cude_device;
+    // [한국어] 로컬 변수에도 새 장치 포인터를 저장하여 함수 끝에서 반환할 준비
   }
   start_sim_thread(1);
-  return the_device;
+  // [한국어] 사이클-레벨 시뮬레이션 루프를 실행하는 POSIX 스레드를 시작한다.
+  // 인수 1은 스레드를 바로 활성화(detach하지 않고 join 가능)하는 플래그.
+  // 이 스레드가 gpgpu_sim::cycle()을 반복 호출하며 GPU 타이밍을 시뮬레이션한다.
+
+  return the_device; // [한국어] 초기화된 (또는 기존의) 장치 싱글톤 반환
 }
 
+/*
+ * [한국어]
+ * GPGPUSim_Context - CUDA 컨텍스트(CUctx_st) 싱글톤 반환
+ *
+ * @ctx: GPGPU-Sim 전역 시뮬레이터 컨텍스트 포인터 (GPGPU_Context()가 반환한 값).
+ * @return: 초기화된 CUctx_st 포인터 (CUDA 컨텍스트 객체, NULL이 반환되는 경우 없음).
+ *
+ * 이 함수는 GPGPU-Sim에서 CUDA 컨텍스트를 나타내는 CUctx_st 싱글톤을 관리한다.
+ * 모든 CUDA API stub 함수(cudaMalloc, cudaLaunchKernel 등)는 이 함수를 통해
+ * 현재 활성 컨텍스트를 얻은 뒤 시뮬레이터에 요청을 전달한다.
+ * 최초 호출 시 GPGPUSim_Init()을 호출하여 시뮬레이터 전체를 초기화하고,
+ * 이후 호출에서는 already-created 컨텍스트를 즉시 반환한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: ctx->the_context가 단일 스레드에서 설정됨.
+ *
+ * 호출 체인:
+ *   (모든 CUDA API stub) → [GPGPUSim_Context] → GPGPUSim_Init()
+ *                                              → new CUctx_st(the_gpu)
+ */
 CUctx_st *GPGPUSim_Context(gpgpu_context *ctx) {
   // static CUctx_st *the_context = NULL;
   CUctx_st *the_context = ctx->the_gpgpusim->the_context;
+  // [한국어] gpgpu_context 내부에 저장된 기존 CUDA 컨텍스트 포인터 읽기.
+  // 이전에 이미 GPGPUSim_Context()가 호출됐다면 NULL이 아닌 값이 반환된다.
+
   if (the_context == NULL) {
+    // [한국어] 최초 호출: 아직 CUDA 컨텍스트가 없으므로 시뮬레이터 전체를 초기화
     _cuda_device_id *the_gpu = ctx->GPGPUSim_Init();
+    // [한국어] GPGPUSim_Init()으로 gpgpu_sim 객체와 cudaDeviceProp을 초기화하고
+    // _cuda_device_id 싱글톤을 얻는다. 이 안에서 시뮬레이션 스레드도 시작된다.
+
     ctx->the_gpgpusim->the_context = new CUctx_st(the_gpu);
+    // [한국어] _cuda_device_id를 감싸는 CUctx_st(CUDA 컨텍스트 객체) 생성.
+    // CUctx_st는 커널 등록 테이블, ptxinfo 맵, 스트림 목록을 소유한다.
+
     the_context = ctx->the_gpgpusim->the_context;
+    // [한국어] 로컬 변수도 갱신하여 함수 끝의 반환에서 사용
   }
-  return the_context;
+  return the_context; // [한국어] 초기화된(또는 기존의) CUDA 컨텍스트 싱글톤 반환
 }
 
+/*
+ * [한국어]
+ * GPGPU_Context - gpgpu_context 전역 싱글톤 반환
+ *
+ * @return: 전역 gpgpu_context 포인터. 항상 동일한 객체가 반환된다.
+ *
+ * gpgpu_context는 GPGPU-Sim 시뮬레이터의 모든 전역 상태를 소유하는 최상위 컨테이너다.
+ * 이 함수는 프로세스 내에서 단 하나의 gpgpu_context 인스턴스만 존재하도록 보장하는
+ * 고전적인 lazy-initialization 싱글톤 패턴을 구현한다.
+ * libcuda.so가 로드될 때 자동으로 생성되지 않고, 첫 번째 CUDA API 호출 시
+ * 이 함수가 호출되어 비로소 시뮬레이터가 초기화되기 시작한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 스레드 가정 (CUDA 컨텍스트 생성은 thread-safe 아님).
+ *
+ * 호출 체인:
+ *   (모든 CUDA API stub) → [GPGPU_Context] → GPGPUSim_Context() → GPGPUSim_Init()
+ */
 gpgpu_context *GPGPU_Context() {
   static gpgpu_context *gpgpu_ctx = NULL;
+  // [한국어] 함수-스코프 static: 최초 호출 시 한 번만 초기화되는 싱글톤 포인터.
+  // C++11부터 function-local static 초기화는 thread-safe하지만,
+  // 여기서는 명시적 NULL 체크 방식을 사용한다.
+
   if (gpgpu_ctx == NULL) {
+    // [한국어] 최초 호출: gpgpu_context 객체를 힙에 할당 (이후 프로세스 종료까지 유지)
     gpgpu_ctx = new gpgpu_context();
+    // [한국어] gpgpu_context 생성자에서 api, the_gpgpusim 등 하위 객체가 초기화된다.
+    // 이 시점에서는 아직 gpgpu_sim이나 CUDA 컨텍스트는 생성되지 않는다.
   }
-  return gpgpu_ctx;
+  return gpgpu_ctx; // [한국어] 전역 gpgpu_context 싱글톤 반환
 }
 
+/*
+ * [한국어]
+ * ptxinfo_data::ptxinfo_addinfo - PTX 어셈블러 정보를 CUDA 컨텍스트에 등록
+ *
+ * @return: 없음 (void).
+ *
+ * 이 함수는 CUDA fat binary를 처리하는 과정에서 ptxinfo 섹션을 파싱할 때
+ * PTX 파서(ptx_parser.y)가 호출하는 콜백이다.
+ * ptxinfo 섹션에는 ptxas(PTX 어셈블러)가 컴파일한 각 커널의 레지스터 수,
+ * 공유 메모리 사용량, 상수 메모리 사용량 등이 기록되어 있다.
+ * 이 정보는 GPGPUSim_Context()를 통해 현재 CUDA 컨텍스트(CUctx_st)에 등록되어
+ * 이후 커널 실행 시 스케줄러와 타이밍 모델이 사용한다.
+ * CUDA 5.0 이후에는 커널별 정보 외에 바이너리 전체에 적용되는 전역 정보
+ * (gmem, cmem 등)도 ptxinfo 섹션에 포함되므로 커널 이름 없는 경우를 별도 처리한다.
+ * 실행 컨텍스트: 호스트 스레드 (fat binary 등록 시 동기적으로 실행).
+ *
+ * 호출 체인:
+ *   cuobjdump 파서 / PTX 파서 → [ptxinfo_addinfo] → CUctx_st::add_ptxinfo()
+ */
 void ptxinfo_data::ptxinfo_addinfo() {
   CUctx_st *context = GPGPUSim_Context(gpgpu_ctx);
+  // [한국어] 현재 활성 CUDA 컨텍스트를 가져온다. 없으면 이 시점에 초기화됨.
+  // gpgpu_ctx는 ptxinfo_data가 참조하는 전역 gpgpu_context 포인터다.
+
   if (!get_ptxinfo_kname()) {
     /* This info is not per kernel (since CUDA 5.0 some info (e.g. gmem, and
      * cmem) is added at the beginning for the whole binary ) */
-    print_ptxinfo();
-    context->add_ptxinfo(get_ptxinfo());
-    clear_ptxinfo();
-    return;
+    // [한국어] 커널 이름이 NULL인 경우: CUDA 5.0 이후의 바이너리 전체 ptxinfo (gmem/cmem).
+    // 특정 커널에 귀속되지 않는 전역 메모리 사용량 정보를 컨텍스트에 등록한다.
+    print_ptxinfo();                    // [한국어] ptxinfo 내용을 stdout에 디버그 출력
+    context->add_ptxinfo(get_ptxinfo()); // [한국어] 커널 이름 없이 전역 ptxinfo를 컨텍스트에 추가
+    clear_ptxinfo();                    // [한국어] 현재 ptxinfo_data 내부 상태 초기화 (다음 파싱 준비)
+    return;                             // [한국어] 전역 정보 처리 완료, 이하 커널별 처리 불필요
   }
   if (!strcmp("__cuda_dummy_entry__", get_ptxinfo_kname())) {
     // this string produced by ptxas for empty ptx files (e.g., bandwidth test)
-    clear_ptxinfo();
-    return;
+    // [한국어] ptxas가 빈 PTX 파일(커널이 없는 경우, 예: bandwidth test)에
+    // 더미 엔트리로 생성하는 특수 이름. 실제 커널이 아니므로 정보를 버린다.
+    clear_ptxinfo(); // [한국어] 더미 엔트리 정보 폐기 후 상태 초기화
+    return;          // [한국어] 더미 엔트리 처리 완료, 등록 불필요
   }
   print_ptxinfo();
+  // [한국어] 커널명과 함께 ptxinfo 내용을 stdout에 출력 (디버그/로그용)
+
   context->add_ptxinfo(get_ptxinfo_kname(), get_ptxinfo());
+  // [한국어] 커널 이름(kname)을 키로 하여 ptxinfo를 CUDA 컨텍스트의 맵에 등록.
+  // 이후 cudaLaunchKernel 시 해당 커널의 레지스터/메모리 사용량을 조회할 수 있게 된다.
+
   clear_ptxinfo();
+  // [한국어] ptxinfo_data 내부 상태 초기화 — 다음 파싱 사이클을 위해 비워둠
 }
 
+/*
+ * [한국어]
+ * cuda_not_implemented - 미구현 CUDA API 호출 시 에러 출력 후 프로세스 종료
+ *
+ * @func: 미구현 CUDA API 함수의 이름 문자열 (예: "cudaBindSurfaceToArray").
+ * @line: 이 함수를 호출한 stub 코드의 소스 라인 번호 (디버그 위치 추적용).
+ * @return: 없음 (abort()로 프로세스가 종료되므로 실제로 반환되지 않음).
+ *
+ * GPGPU-Sim은 모든 CUDA API를 구현하지 않는다. 구현되지 않은 API의 stub 함수가
+ * 호출될 때 이 함수를 통해 명확한 에러 메시지를 출력하고 시뮬레이션을 종료한다.
+ * stdout/stderr를 명시적으로 flush하는 이유는 버퍼링된 출력이 abort() 이전에
+ * 반드시 화면에 표시되도록 보장하기 위해서다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: abort() 이후 모든 스레드 종료.
+ *
+ * 호출 체인:
+ *   (미구현 CUDA API stub) → [cuda_not_implemented] → abort()
+ */
 void cuda_not_implemented(const char *func, unsigned line) {
-  fflush(stdout);
-  fflush(stderr);
+  fflush(stdout); // [한국어] stdout 버퍼 강제 플러시 — abort() 전에 이전 출력이 모두 보이도록
+  fflush(stderr); // [한국어] stderr 버퍼 강제 플러시 — 에러 메시지가 유실되지 않도록
   printf(
       "\n\nGPGPU-Sim PTX: Execution error: CUDA API function \"%s()\" has not "
       "been implemented yet.\n"
       "                 [$GPGPUSIM_ROOT/libcuda/%s around line %u]\n\n\n",
       func, __FILE__, line);
-  fflush(stdout);
-  abort();
+  // [한국어] 미구현 API 이름과 소스 파일/라인을 포함한 에러 메시지 출력.
+  // __FILE__은 "cuda_runtime_api.cc"로 확장되어 GPGPU-Sim 루트 경로를 안내한다.
+  fflush(stdout); // [한국어] printf 출력이 abort() 전에 화면에 표시되도록 재차 플러시
+  abort();        // [한국어] SIGABRT 신호 발생으로 프로세스 즉시 종료 (코어 덤프 생성 가능)
 }
 
+/*
+ * [한국어]
+ * announce_call - CUDA API 호출 디버그 로그 출력
+ *
+ * @func: 호출된 CUDA API 함수의 이름 문자열.
+ * @return: 없음 (void).
+ *
+ * g_debug_execution >= 3 조건에서 각 CUDA API stub이 호출될 때 이 함수를 통해
+ * 함수명을 stdout에 출력한다. GPU 디버거가 없는 시뮬레이터 환경에서 API 호출
+ * 시퀀스를 추적하기 위한 경량 트레이싱 유틸리티다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: printf는 FILE 락을 사용하므로 출력 혼용 없음.
+ *
+ * 호출 체인:
+ *   (CUDA API stub, g_debug_execution >= 3인 경우) → [announce_call]
+ */
 void announce_call(const char *func) {
   printf("\n\nGPGPU-Sim PTX: CUDA API function \"%s\" has been called.\n",
          func);
-  fflush(stdout);
+  // [한국어] 호출된 CUDA API 함수명을 표준 형식으로 출력 (디버그 트레이싱용)
+  fflush(stdout); // [한국어] 출력을 즉시 화면에 반영 — 버퍼링으로 인한 지연 출력 방지
 }
 
 #define gpgpusim_ptx_error(msg, ...) \
   gpgpusim_ptx_error_impl(__func__, __FILE__, __LINE__, msg, ##__VA_ARGS__)
+// [한국어] gpgpusim_ptx_error 매크로: 호출 지점의 함수명(__func__), 파일(__FILE__),
+// 라인(__LINE__)을 자동으로 캡처하여 gpgpusim_ptx_error_impl에 전달한다.
+// 이를 통해 에러 메시지에 정확한 소스 위치가 포함된다.
+
 #define gpgpusim_ptx_assert(cond, msg, ...)                           \
   gpgpusim_ptx_assert_impl((cond), __func__, __FILE__, __LINE__, msg, \
                            ##__VA_ARGS__)
+// [한국어] gpgpusim_ptx_assert 매크로: 조건(cond)이 false일 때 에러를 발생시키는
+// assert 래퍼. cond, 함수명, 파일, 라인을 gpgpusim_ptx_assert_impl에 전달한다.
+// 표준 assert()와 달리 NDEBUG 여부에 무관하게 항상 검사가 활성화된다.
 
+/*
+ * [한국어]
+ * gpgpusim_ptx_error_impl - PTX/CUDA API 에러 메시지 출력 후 abort
+ *
+ * @func: 에러가 발생한 함수 이름 (gpgpusim_ptx_error 매크로에서 __func__로 전달).
+ * @file: 에러가 발생한 소스 파일 이름 (__FILE__).
+ * @line: 에러가 발생한 소스 라인 번호 (__LINE__).
+ * @msg:  printf 스타일 포맷 문자열 (가변 인수 지원).
+ * @...:  포맷 문자열에 대응하는 가변 인수.
+ * @return: 없음 (abort()로 프로세스 종료).
+ *
+ * PTX 시뮬레이션 또는 CUDA API 처리 중 복구 불가능한 에러가 발생할 때 사용된다.
+ * printf-style 포맷으로 상세한 에러 메시지를 출력하고 프로세스를 종료한다.
+ * va_list를 직접 사용하므로 gpgpusim_ptx_error 매크로를 통해 간접 호출된다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: abort()로 즉시 종료.
+ *
+ * 호출 체인:
+ *   gpgpusim_ptx_error 매크로 → [gpgpusim_ptx_error_impl] → abort()
+ *   gpgpusim_ptx_assert_impl (조건 실패 시) → [gpgpusim_ptx_error_impl] → abort()
+ */
 void gpgpusim_ptx_error_impl(const char *func, const char *file, unsigned line,
                              const char *msg, ...) {
-  va_list ap;
-  char buf[1024];
-  va_start(ap, msg);
-  vsnprintf(buf, 1024, msg, ap);
-  va_end(ap);
+  va_list ap;                       // [한국어] 가변 인수 목록 핸들 선언
+  char buf[1024];                   // [한국어] 포맷팅된 에러 메시지를 담을 스택 버퍼 (최대 1023자)
+  va_start(ap, msg);                // [한국어] msg 이후의 가변 인수 순회 시작
+  vsnprintf(buf, 1024, msg, ap);    // [한국어] 포맷 문자열과 가변 인수를 buf에 안전하게 스프린트 (버퍼 오버플로 방지)
+  va_end(ap);                       // [한국어] 가변 인수 목록 순회 종료 (스택 정리)
 
   printf("GPGPU-Sim CUDA API: %s\n", buf);
+  // [한국어] 포맷팅된 에러 메시지 출력
   printf("                    [%s:%u : %s]\n", file, line, func);
-  abort();
+  // [한국어] 에러 발생 위치(파일:라인 : 함수명)를 두 번째 줄에 정렬하여 출력
+  abort(); // [한국어] SIGABRT로 프로세스 즉시 종료 (코어 덤프 허용)
 }
 
+/*
+ * [한국어]
+ * gpgpusim_ptx_assert_impl - 조건부 에러 검사 (assert 구현체)
+ *
+ * @test_value: 검사할 조건값. 0이면 에러(조건 실패), 0이 아니면 정상 통과.
+ * @func: 에러가 발생한 함수 이름.
+ * @file: 에러가 발생한 소스 파일.
+ * @line: 에러가 발생한 소스 라인.
+ * @msg:  에러 시 출력할 printf 스타일 포맷 문자열.
+ * @...:  포맷 문자열 가변 인수.
+ * @return: 없음 (test_value가 0이면 abort(), 아니면 정상 반환).
+ *
+ * gpgpusim_ptx_assert 매크로의 실제 구현체다.
+ * test_value가 0(조건 실패)이면 gpgpusim_ptx_error_impl을 호출하여 abort한다.
+ * va_list를 파싱하지만 실제로는 msg 자체를 gpgpusim_ptx_error_impl에 넘기므로
+ * 가변 인수는 에러 구현체에서 재처리된다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 조건 실패 시 abort().
+ *
+ * 호출 체인:
+ *   gpgpusim_ptx_assert 매크로 → [gpgpusim_ptx_assert_impl]
+ *                                  → gpgpusim_ptx_error_impl() (조건 실패 시)
+ */
 void gpgpusim_ptx_assert_impl(int test_value, const char *func,
                               const char *file, unsigned line, const char *msg,
                               ...) {
-  va_list ap;
-  char buf[1024];
-  va_start(ap, msg);
-  vsnprintf(buf, 1024, msg, ap);
-  va_end(ap);
+  va_list ap;                    // [한국어] 가변 인수 목록 핸들 선언
+  char buf[1024];                // [한국어] 포맷팅 버퍼 (현재 assert에서는 직접 사용하지 않음)
+  va_start(ap, msg);             // [한국어] 가변 인수 순회 시작
+  vsnprintf(buf, 1024, msg, ap); // [한국어] 포맷팅 (결과 buf는 현재 직접 출력에 사용되지 않음)
+  va_end(ap);                    // [한국어] 가변 인수 순회 종료
 
   if (test_value == 0) gpgpusim_ptx_error_impl(func, file, line, msg);
+  // [한국어] test_value가 0(조건 실패)이면 에러 출력 후 abort.
+  // msg를 포맷 문자열로 직접 넘기므로 가변 인수의 실제 처리는 error_impl에서 수행된다.
+  // 조건이 참(0이 아님)이면 이 줄은 실행되지 않고 정상 반환된다.
 }
 
 typedef std::map<unsigned, CUevent_st *> event_tracker_t;
+// [한국어] event_tracker_t: CUDA 이벤트 UID(unsigned) → CUevent_st 포인터 맵 타입.
+// cudaEventCreate/Record/Destroy 구현에서 이벤트 핸들을 정수 UID로 관리하기 위해 사용된다.
 
 int CUevent_st::m_next_event_uid;
+// [한국어] CUevent_st 클래스의 static 멤버 정의 (선언은 cuda_api_object.h).
+// 새 CUDA 이벤트가 생성될 때마다 단조 증가하는 전역 UID 카운터.
+// 동기화: 이벤트 생성은 단일 호스트 스레드에서 수행 가정 (별도 락 없음).
+
 event_tracker_t g_timer_events;
+// [한국어] 전역 이벤트 추적 맵: UID → CUevent_st* 연관 저장.
+// cudaEventRecord, cudaEventSynchronize, cudaEventElapsedTime 등이 이 맵으로
+// 이벤트 핸들을 조회한다.
 
 extern int cuobjdump_lex_init(yyscan_t *scanner);
+// [한국어] cuobjdump lex 스캐너 초기화 함수 (cuobjdump.l에서 자동 생성).
+// 재진입 가능(reentrant) 스캐너를 초기화하여 scanner 포인터에 저장한다.
+
 extern void cuobjdump_set_in(FILE *_in_str, yyscan_t yyscanner);
+// [한국어] cuobjdump 스캐너의 입력 스트림을 설정한다.
+// cuobjdump의 출력 파일을 파이프로 열어 이 함수에 전달하면 파서가 읽는다.
+
 extern int cuobjdump_parse(yyscan_t scanner, struct cuobjdump_parser *parser,
                            std::list<cuobjdumpSection *> &cuobjdumpSectionList);
+// [한국어] cuobjdump lex/yacc 파서의 파싱 엔트리포인트 (cuobjdump.y에서 자동 생성).
+// 파싱 결과로 cuobjdumpSectionList에 PTX/ELF 섹션 노드들이 추가된다.
+
 extern int cuobjdump_lex_destroy(yyscan_t scanner);
+// [한국어] cuobjdump lex 스캐너 자원 해제 (파싱 완료 후 반드시 호출해야 메모리 누수 없음).
 
 enum cuobjdumpSectionType { PTXSECTION = 0, ELFSECTION };
+// [한국어] cuobjdump 섹션 타입 열거형.
+// PTXSECTION(0): PTX(가상 ISA) 코드를 담는 섹션.
+// ELFSECTION(1): ELF 형식의 SASS(실제 GPU ISA) 코드를 담는 섹션.
+// addCuobjdumpSection()의 sectiontype 파라미터가 이 값을 참조한다.
 
 // sectiontype: 0 for ptx, 1 for elf
+/*
+ * [한국어]
+ * addCuobjdumpSection - cuobjdump 파서 콜백: 새 PTX/ELF 섹션 노드 추가
+ *
+ * @sectiontype: 섹션 타입. 0이면 PTX(cuobjdumpPTXSection), 1이면 ELF(cuobjdumpELFSection).
+ * @cuobjdumpSectionList: 섹션 노드들을 축적하는 리스트. 파싱이 진행되면서 채워진다.
+ * @return: 없음 (void).
+ *
+ * cuobjdump lex/yacc 파서가 fat binary 내에서 새 섹션 헤더를 인식할 때 호출된다.
+ * 섹션 타입에 따라 cuobjdumpPTXSection 또는 cuobjdumpELFSection 객체를 생성하고
+ * 리스트의 앞(front)에 삽입한다. 이후 setCuobjdump* 콜백들이 이 front() 노드의
+ * 속성(arch, identifier, filename)을 채운다.
+ * 실행 컨텍스트: fat binary 등록 시 호스트 스레드에서 동기적으로 실행.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [addCuobjdumpSection] → cuobjdumpSectionList.push_front()
+ */
 void addCuobjdumpSection(int sectiontype,
                          std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
-  if (sectiontype)
-    cuobjdumpSectionList.push_front(new cuobjdumpELFSection());
+  if (sectiontype)                                                       // [한국어] ELF 섹션인 경우 (sectiontype == 1)
+    cuobjdumpSectionList.push_front(new cuobjdumpELFSection());          // [한국어] ELF 섹션 노드를 리스트 앞에 삽입 (이후 콜백이 front()로 접근)
   else
-    cuobjdumpSectionList.push_front(new cuobjdumpPTXSection());
-  printf("## Adding new section %s\n", sectiontype ? "ELF" : "PTX");
+    cuobjdumpSectionList.push_front(new cuobjdumpPTXSection());          // [한국어] PTX 섹션 노드를 리스트 앞에 삽입
+  printf("## Adding new section %s\n", sectiontype ? "ELF" : "PTX");    // [한국어] 섹션 추가 로그 출력 (타입 이름 표시)
 }
 
+/*
+ * [한국어]
+ * setCuobjdumparch - cuobjdump 파서 콜백: 현재 섹션의 GPU 아키텍처 설정
+ *
+ * @arch: SM 아키텍처 문자열 (예: "sm_70", "sm_86"). "sm_%u" 형식.
+ * @cuobjdumpSectionList: 섹션 리스트. front()가 현재 파싱 중인 섹션이다.
+ * @return: 없음 (void).
+ *
+ * cuobjdump 출력에서 각 섹션의 GPU 아키텍처 지시자(예: .arch sm_70)를 파싱할 때
+ * 호출된다. "sm_%u" 형식의 문자열에서 숫자 부분을 추출하여 섹션 객체에 저장한다.
+ * 이 아키텍처 번호는 GPGPU-Sim이 시뮬레이션할 GPU 아키텍처와 일치하는 섹션을
+ * 선택하는 데 사용된다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 파싱 스레드.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [setCuobjdumparch] → cuobjdumpSection::setArch()
+ */
 void setCuobjdumparch(const char *arch,
                       std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
-  unsigned archnum;
-  sscanf(arch, "sm_%u", &archnum);
-  assert(archnum && "cannot have sm_0");
-  printf("Adding arch: %s\n", arch);
-  cuobjdumpSectionList.front()->setArch(archnum);
+  unsigned archnum;                                  // [한국어] "sm_%u"에서 추출할 숫자 부분 (예: "sm_70" → 70)
+  sscanf(arch, "sm_%u", &archnum);                   // [한국어] arch 문자열에서 SM 번호 파싱 (예: "sm_70" → archnum=70)
+  assert(archnum && "cannot have sm_0");             // [한국어] archnum=0은 유효하지 않은 아키텍처 — 파싱 실패 감지
+  printf("Adding arch: %s\n", arch);                 // [한국어] 아키텍처 설정 로그 출력
+  cuobjdumpSectionList.front()->setArch(archnum);    // [한국어] 현재 섹션(front)에 SM 아키텍처 번호 저장
 }
 
+/*
+ * [한국어]
+ * setCuobjdumpidentifier - cuobjdump 파서 콜백: 현재 섹션의 식별자(커널 이름) 설정
+ *
+ * @identifier: 섹션 식별자 문자열 (일반적으로 커널 함수 이름 또는 모듈 이름).
+ * @cuobjdumpSectionList: 섹션 리스트. front()가 현재 파싱 중인 섹션이다.
+ * @return: 없음 (void).
+ *
+ * cuobjdump 출력에서 섹션 식별자(커널 심볼 이름 또는 모듈 식별 문자열)를
+ * 파싱할 때 호출된다. 이 식별자로 어떤 커널이 이 섹션에 속하는지 구분한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 파싱 스레드.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [setCuobjdumpidentifier] → cuobjdumpSection::setIdentifier()
+ */
 void setCuobjdumpidentifier(
     const char *identifier,
     std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
-  printf("Adding identifier: %s\n", identifier);
-  cuobjdumpSectionList.front()->setIdentifier(identifier);
+  printf("Adding identifier: %s\n", identifier);                     // [한국어] 식별자 설정 로그 출력
+  cuobjdumpSectionList.front()->setIdentifier(identifier);           // [한국어] 현재 섹션(front)에 식별자 문자열 저장
 }
 
+/*
+ * [한국어]
+ * setCuobjdumpptxfilename - cuobjdump 파서 콜백: PTX 섹션의 파일명 설정
+ *
+ * @filename: cuobjdump가 추출한 PTX 파일의 임시 경로 문자열.
+ * @cuobjdumpSectionList: 섹션 리스트. front()가 현재 파싱 중인 PTX 섹션이어야 한다.
+ * @return: 없음 (void). front()가 PTX 섹션이 아니면 assert로 abort.
+ *
+ * cuobjdump가 fat binary에서 PTX 코드를 임시 파일로 추출했을 때 그 파일 경로를
+ * 현재 섹션에 등록하는 파서 콜백이다. 반드시 PTX 섹션에만 호출되어야 하므로
+ * dynamic_cast로 타입을 검증한다.
+ * 이 파일명은 나중에 ptx_loader가 파일을 열어 PTX 코드를 파싱하는 데 사용된다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 파싱 스레드.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [setCuobjdumpptxfilename] → cuobjdumpPTXSection::setPTXfilename()
+ */
 void setCuobjdumpptxfilename(
     const char *filename, std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
-  printf("Adding ptx filename: %s\n", filename);
-  cuobjdumpSection *x = cuobjdumpSectionList.front();
+  printf("Adding ptx filename: %s\n", filename);      // [한국어] PTX 파일명 설정 로그 출력
+  cuobjdumpSection *x = cuobjdumpSectionList.front(); // [한국어] 현재 파싱 중인 섹션 포인터 획득
   if (dynamic_cast<cuobjdumpPTXSection *>(x) == NULL) {
+    // [한국어] front() 섹션이 PTX가 아니라 ELF 섹션인 경우 — 파서 상태 불일치, 즉시 abort
     assert(0 &&
            "You shouldn't be trying to add a ptxfilename to an elf section");
   }
   (dynamic_cast<cuobjdumpPTXSection *>(x))->setPTXfilename(filename);
+  // [한국어] 타입 검증 통과 후 PTX 섹션 객체에 파일명 저장.
+  // dynamic_cast는 위에서 이미 NULL 체크를 했으므로 여기서는 안전하게 사용된다.
 }
 
+/*
+ * [한국어]
+ * setCuobjdumpelffilename - cuobjdump 파서 콜백: ELF 섹션의 파일명 설정
+ *
+ * @filename: cuobjdump가 추출한 ELF 파일의 임시 경로 문자열.
+ * @cuobjdumpSectionList: 섹션 리스트. front()가 현재 파싱 중인 ELF 섹션이어야 한다.
+ * @return: 없음 (void). front()가 ELF 섹션이 아니면 assert로 abort.
+ *
+ * cuobjdump가 fat binary에서 ELF(SASS) 코드를 임시 파일로 추출했을 때 경로를
+ * 현재 ELF 섹션에 등록한다. dynamic_cast로 ELF 섹션임을 검증한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 파싱 스레드.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [setCuobjdumpelffilename] → cuobjdumpELFSection::setELFfilename()
+ */
 void setCuobjdumpelffilename(
     const char *filename, std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
   if (dynamic_cast<cuobjdumpELFSection *>(cuobjdumpSectionList.front()) ==
       NULL) {
+    // [한국어] front() 섹션이 PTX 섹션인 경우 — ELF 파일명을 PTX 섹션에 추가하려는 잘못된 상태, abort
     assert(0 &&
            "You shouldn't be trying to add a elffilename to an ptx section");
   }
   (dynamic_cast<cuobjdumpELFSection *>(cuobjdumpSectionList.front()))
       ->setELFfilename(filename);
+  // [한국어] 타입 검증 통과 후 ELF 섹션 객체에 ELF 파일 경로를 저장.
+  // 이 경로는 ELF 바이너리 로더가 SASS 코드를 추출할 때 사용된다.
 }
 
+/*
+ * [한국어]
+ * setCuobjdumpsassfilename - cuobjdump 파서 콜백: ELF 섹션의 SASS 파일명 설정
+ *
+ * @filename: cuobjdump가 추출한 SASS(디스어셈블된 기계어) 파일의 임시 경로.
+ * @cuobjdumpSectionList: 섹션 리스트. front()가 현재 파싱 중인 ELF 섹션이어야 한다.
+ * @return: 없음 (void). front()가 ELF 섹션이 아니면 assert로 abort.
+ *
+ * cuobjdump --dump-sass로 추출된 SASS 코드의 파일 경로를 현재 ELF 섹션에 등록한다.
+ * SASS는 NVIDIA GPU의 실제 ISA로 PTXPlus(PTXPlus emulation) 경로에서 사용된다.
+ * dynamic_cast로 ELF 섹션임을 검증한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 파싱 스레드.
+ *
+ * 호출 체인:
+ *   cuobjdump_parse() → [setCuobjdumpsassfilename] → cuobjdumpELFSection::setSASSfilename()
+ */
 void setCuobjdumpsassfilename(
     const char *filename, std::list<cuobjdumpSection *> &cuobjdumpSectionList) {
   if (dynamic_cast<cuobjdumpELFSection *>(cuobjdumpSectionList.front()) ==
       NULL) {
+    // [한국어] front() 섹션이 PTX인 경우 — SASS 파일명을 PTX 섹션에 추가하려는 잘못된 상태, abort
     assert(0 &&
            "You shouldn't be trying to add a sassfilename to an ptx section");
   }
   (dynamic_cast<cuobjdumpELFSection *>(cuobjdumpSectionList.front()))
       ->setSASSfilename(filename);
+  // [한국어] 타입 검증 통과 후 ELF 섹션 객체에 SASS 파일 경로를 저장.
+  // SASS 파일은 PTXPlus 시뮬레이션 경로에서 로드되어 기계어 수준 시뮬레이션에 사용된다.
 }
 
 //! Return the executable file of the process containing the PTX/SASS code
@@ -418,58 +957,131 @@ void setCuobjdumpsassfilename(
 //!
 // In SST need the string to pass the binary information
 // as we cannot get it from /proc/self/exe
+/*
+ * [한국어]
+ * get_app_binary(const char *fn) - SST 통합 모드용: 직접 지정된 바이너리 경로 반환
+ *
+ * @fn: 실행 바이너리의 경로 문자열 (SST 프레임워크가 명시적으로 전달).
+ * @return: fn을 그대로 std::string으로 래핑하여 반환.
+ *
+ * SST(Structural Simulation Toolkit) 연동 모드에서는 /proc/self/exe로 실행 파일을
+ * 자동 탐지하는 것이 불가능하므로 (SST 컴포넌트로 실행되기 때문), 바이너리 경로를
+ * 외부에서 명시적으로 전달받아 반환한다. 이 오버로드는 아래의 무인수 버전과
+ * 쌍을 이루며, 호출 컨텍스트에 따라 둘 중 하나가 선택된다.
+ * 실행 컨텍스트: 호스트 스레드 (fat binary 등록 또는 시뮬레이터 초기화 시).
+ *
+ * 호출 체인:
+ *   get_app_cuda_version(fn) → [get_app_binary(fn)] → get_app_cuda_version_internal()
+ */
 std::string get_app_binary(const char *fn) {
-  printf("self exe links to: %s\n", fn);
-  return fn;
+  printf("self exe links to: %s\n", fn); // [한국어] 전달받은 바이너리 경로를 로그로 출력
+  return fn;                             // [한국어] 전달받은 경로를 std::string으로 변환하여 반환
 }
 
+/*
+ * [한국어]
+ * get_app_binary() - /proc/self/exe 또는 macOS API로 현재 실행 바이너리 경로 반환
+ *
+ * @return: 현재 프로세스의 실행 파일 절대 경로 문자열. 실패 시 exit(1).
+ *
+ * Linux에서는 /proc/self/exe 심볼릭 링크를 readlink로 역참조하여 절대 경로를 얻는다.
+ * valgrind 환경에서는 cuobjdump 같은 자식 프로세스가 /proc/<pid>/exe를 읽으면
+ * valgrind 에뮬레이터 바이너리를 가리키므로, GPGPU-Sim 프로세스 내에서 미리
+ * readlink로 실제 앱 경로를 확인하는 워크어라운드이다.
+ * macOS에서는 _NSGetExecutablePath()를 사용한다 (Linux /proc이 없음).
+ * 실행 컨텍스트: 호스트 스레드 (fat binary 등록 시).
+ *
+ * 호출 체인:
+ *   get_app_cuda_version() → [get_app_binary()] → get_app_cuda_version_internal()
+ *   get_app_binary_name() 의 입력으로도 사용된다.
+ */
 std::string get_app_binary() {
-  char self_exe_path[1025];
+  char self_exe_path[1025]; // [한국어] 실행 파일 경로를 담을 버퍼 (최대 1024자 + NULL)
 #ifdef __APPLE__
-  uint32_t size = sizeof(self_exe_path);
+  uint32_t size = sizeof(self_exe_path);              // [한국어] 버퍼 크기를 uint32_t로 전달 (macOS API 요구사항)
   if (_NSGetExecutablePath(self_exe_path, &size) != 0) {
+    // [한국어] 버퍼가 너무 작아 경로를 담지 못한 경우 — size에 필요한 크기가 채워지지만 여기서는 abort
     printf("GPGPU-Sim ** ERROR: _NSGetExecutablePath input buffer too small\n");
-    exit(1);
+    exit(1); // [한국어] 복구 불가능한 초기화 오류 — 시뮬레이터 종료
   }
 #else
-  std::stringstream exec_link;
-  exec_link << "/proc/self/exe";
+  std::stringstream exec_link;         // [한국어] /proc/self/exe 경로 조합용 스트림
+  exec_link << "/proc/self/exe";       // [한국어] Linux에서 현재 프로세스의 실행 파일을 가리키는 심볼릭 링크 경로
 
   ssize_t path_length = readlink(exec_link.str().c_str(), self_exe_path, 1024);
-  assert(path_length != -1);
-  self_exe_path[path_length] = '\0';
+  // [한국어] /proc/self/exe 심볼릭 링크를 역참조하여 실제 실행 파일 절대 경로를 얻음.
+  // 반환값은 실제 쓰여진 바이트 수 (NULL 종료 문자 미포함). 실패 시 -1.
+  assert(path_length != -1);           // [한국어] readlink 실패(심볼릭 링크 없음, 권한 오류 등)는 복구 불가 — abort
+  self_exe_path[path_length] = '\0';   // [한국어] readlink는 NULL을 추가하지 않으므로 수동으로 종료 문자 추가
 #endif
 
-  printf("self exe links to: %s\n", self_exe_path);
-  return self_exe_path;
+  printf("self exe links to: %s\n", self_exe_path); // [한국어] 탐지된 실행 파일 경로 로그 출력
+  return self_exe_path;                              // [한국어] 경로 문자열을 std::string으로 변환하여 반환
 }
 
 // above func gives abs path whereas this give just the name of application.
+/*
+ * [한국어]
+ * get_app_binary_name - 절대 경로에서 애플리케이션 파일 이름(확장자 제외)만 추출
+ *
+ * @abs_path: get_app_binary()가 반환한 실행 파일 절대 경로 (예: "/path/to/matrixMul").
+ * @return: 경로에서 디렉토리와 확장자를 제거한 순수 파일명 (예: "matrixMul").
+ *          반환 포인터는 내부 strdup 버퍼를 가리키므로 호출자가 free해야 한다.
+ *
+ * '/' 구분자로 경로를 순회하여 마지막 토큰(파일명 부분)만 추출하고,
+ * '.' 구분자로 다시 토큰화하여 확장자를 제거한다. 결과는 애플리케이션 이름으로
+ * 임시 파일 생성이나 설정 파일 검색 등에 사용된다.
+ * macOS는 미테스트 상태이므로 abort()로 안전하게 차단한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: strtok는 내부 static 포인터를 사용하므로 비재진입성 주의.
+ *
+ * 호출 체인:
+ *   (fat binary 처리 경로) → [get_app_binary_name] (get_app_binary() 결과를 입력으로 사용)
+ */
 char *get_app_binary_name(std::string abs_path) {
-  char *self_exe_path = NULL;
+  char *self_exe_path = NULL;         // [한국어] 최종 결과(파일명) 포인터 초기화
 #ifdef __APPLE__
   // TODO: get apple device and check the result.
-  printf("WARNING: not tested for Apple-mac devices \n");
-  abort();
+  printf("WARNING: not tested for Apple-mac devices \n"); // [한국어] macOS 미테스트 경고 출력
+  abort();                            // [한국어] macOS에서 안전하게 차단 (미구현)
 #else
   char *buf = strdup(abs_path.c_str());
-  char *token = strtok(buf, "/");
+  // [한국어] abs_path를 heap에 복사 (strtok가 원본 문자열을 수정하기 때문에 복사본 필요)
+  char *token = strtok(buf, "/");     // [한국어] '/'로 경로 분리 시작 (첫 번째 토큰)
   while (token != NULL) {
-    self_exe_path = token;
-    token = strtok(NULL, "/");
+    self_exe_path = token;            // [한국어] 매 반복마다 마지막 토큰을 갱신 — 루프 종료 시 파일명이 됨
+    token = strtok(NULL, "/");        // [한국어] 다음 '/' 토큰 획득 (NULL이면 루프 종료)
   }
 #endif
   self_exe_path = strtok(self_exe_path, ".");
-  printf("self exe links to: %s\n", self_exe_path);
-  return self_exe_path;
+  // [한국어] 파일명에서 '.' 이후(확장자)를 제거. 예: "matrixMul.exe" → "matrixMul".
+  // strtok는 내부 static 상태를 사용하므로 위의 strtok 루프와 독립적으로 사용 가능.
+  printf("self exe links to: %s\n", self_exe_path); // [한국어] 추출된 앱 이름 로그 출력
+  return self_exe_path;                              // [한국어] 순수 앱 파일명 반환 (buf 내부 포인터)
 }
 
+/*
+ * [한국어]
+ * get_app_cuda_version_internal - ldd/strings 명령으로 앱이 링크한 CUDA 버전 탐지 (내부 구현)
+ *
+ * @app_binary: 탐색할 실행 파일 경로 (get_app_binary()가 반환한 값).
+ * @return: 앱이 링크한 CUDA 런타임 버전 정수 (예: 10020 = CUDA 10.2). 실패 시 exit(1).
+ *
+ * ldd 명령으로 앱이 의존하는 libcudart.so 버전을 추출하고, strings 명령으로
+ * Balar/Vanadis SST 통합 바이너리 내 libcudart_vanadis.a 버전 문자열도 함께 검색한다.
+ * 결과를 임시 파일(mkstemp)에 저장하고 atoi로 정수 버전으로 변환한다.
+ * 이 버전 정보는 GPGPU-Sim이 어떤 CUDA API 집합을 활성화할지 결정하는 데 사용된다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: mkstemp/system/fopen은 단일 호출 보장.
+ *
+ * 호출 체인:
+ *   get_app_cuda_version() / get_app_cuda_version(fn) → [get_app_cuda_version_internal]
+ */
 static int get_app_cuda_version_internal(std::string app_binary) {
-  int app_cuda_version = 0;
-  char fname[1024];
+  int app_cuda_version = 0;           // [한국어] 탐지된 CUDA 버전 (초기값 0: 탐지 실패 표시)
+  char fname[1024];                   // [한국어] 임시 파일 이름 버퍼
   snprintf(fname, 1024, "_app_cuda_version_XXXXXX");
-  int fd = mkstemp(fname);
-  close(fd);
+  // [한국어] mkstemp용 임시 파일 이름 템플릿. "XXXXXX"는 mkstemp가 유일한 문자로 치환한다.
+  int fd = mkstemp(fname);            // [한국어] 임시 파일 생성 및 파일 디스크립터 반환 (fname이 실제 이름으로 갱신됨)
+  close(fd);                          // [한국어] 파일 디스크립터 즉시 닫기 — 이후 shell 명령이 파일에 직접 쓸 것임
   // Weili: Add way to extract CUDA version information from Balar Vanadis
   // binary (stored as a const string)
   std::string app_cuda_version_command =
@@ -479,43 +1091,107 @@ static int get_app_cuda_version_internal(std::string app_binary) {
       " | grep libcudart_vanadis.a | sed  "
       "'s/.*libcudart_vanadis.a.\\(.*\\)/\\1/' >> " +
       fname;
+  // [한국어] 쉘 명령 문자열 구성:
+  //   1) ldd <바이너리> | grep libcudart.so: 동적 링크된 CUDA 런타임 라이브러리 버전 탐지
+  //   2) sed: "libcudart.so.<버전> =>" 형식에서 버전 부분만 추출
+  //   3) > fname: 결과를 임시 파일에 저장
+  //   4) strings <바이너리> | grep libcudart_vanadis.a: SST Balar 통합 바이너리 내
+  //      정적으로 임베딩된 CUDA 버전 문자열 탐지
+  //   5) >> fname: 결과를 임시 파일에 추가 (ldd 결과 다음에 이어붙임)
   int res = system(app_cuda_version_command.c_str());
+  // [한국어] 위 쉘 명령을 실행. system()은 쉘을 fork하여 명령을 실행하고 종료를 기다린다.
+  // 반환값 -1은 fork 실패 또는 쉘 실행 불가 상태를 의미한다.
   if (res == -1) {
+    // [한국어] system() 실패 — fork/exec 오류. CUDA 버전을 탐지할 수 없으므로 종료.
     printf("Error - Cannot detect the app's CUDA version. Command: %s\n",
            app_cuda_version_command.c_str());
-    exit(1);
+    exit(1); // [한국어] 복구 불가능한 초기화 오류 — 시뮬레이터 종료
   }
-  FILE *cmd = fopen(fname, "r");
-  char buf[256];
+  FILE *cmd = fopen(fname, "r");      // [한국어] 임시 파일을 읽기 모드로 열어 버전 문자열 읽기
+  char buf[256];                      // [한국어] 파일 한 줄을 읽을 버퍼
   while (fgets(buf, sizeof(buf), cmd) != 0) {
-    std::cout << buf;
-    app_cuda_version = atoi(buf);
+    // [한국어] 임시 파일에서 한 줄씩 읽기. 여러 줄이 있을 경우 마지막 줄이 최종 버전이 됨.
+    std::cout << buf;                       // [한국어] 읽은 내용 stdout 출력 (디버그용)
+    app_cuda_version = atoi(buf);           // [한국어] 줄 문자열을 정수 버전으로 변환 (예: "10020\n" → 10020)
   }
-  fclose(cmd);
+  fclose(cmd);                        // [한국어] 임시 파일 닫기 (이후 임시 파일 삭제는 별도 처리 필요)
   if (app_cuda_version == 0) {
+    // [한국어] 파일이 비어 있거나 변환 결과가 0 — 버전 탐지 실패
     printf("Error - Cannot detect the app's CUDA version. Command: %s\n",
            app_cuda_version_command.c_str());
-    exit(1);
+    exit(1); // [한국어] 버전 없이 시뮬레이터를 실행하면 API 호환성 판단 불가 — 종료
   }
-  return app_cuda_version;
+  return app_cuda_version; // [한국어] 탐지된 CUDA 버전 정수 반환
 }
 
+/*
+ * [한국어]
+ * get_app_cuda_version(const char *fn) - SST 통합 모드용: 지정 바이너리의 CUDA 버전 탐지
+ *
+ * @fn: 탐색할 실행 바이너리 경로 (SST가 명시적으로 전달).
+ * @return: 앱이 링크한 CUDA 런타임 버전 정수. 실패 시 exit(1).
+ *
+ * SST 통합 모드에서 /proc/self/exe 자동 탐지 대신 fn으로 바이너리 경로를 전달하는 오버로드.
+ * get_app_binary(fn)으로 경로를 확인하고 공통 구현체에 위임한다.
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 초기화 경로.
+ *
+ * 호출 체인:
+ *   (SST 초기화 경로) → [get_app_cuda_version(fn)] → get_app_binary(fn)
+ *                                                    → get_app_cuda_version_internal()
+ */
 static int get_app_cuda_version(const char *fn) {
   // Use for other simulator integration
-  std::string app_binary = get_app_binary(fn);
-  return get_app_cuda_version_internal(app_binary);
+  std::string app_binary = get_app_binary(fn);            // [한국어] 전달받은 경로를 std::string으로 변환
+  return get_app_cuda_version_internal(app_binary);        // [한국어] 공통 구현체에 위임하여 CUDA 버전 탐지
 }
 
+/*
+ * [한국어]
+ * get_app_cuda_version() - /proc/self/exe로 현재 앱 바이너리의 CUDA 버전 자동 탐지
+ *
+ * @return: 앱이 링크한 CUDA 런타임 버전 정수. 실패 시 exit(1).
+ *
+ * 일반 실행 환경(SST 없음)에서 /proc/self/exe를 통해 실행 바이너리 경로를 자동으로
+ * 탐지하고 CUDA 버전을 추출한다. valgrind 환경 지원을 위해 get_app_binary()에서
+ * 미리 경로를 역참조한다 (상세는 get_app_binary() 주석 참고).
+ * 실행 컨텍스트: 호스트 스레드. 동시성: 단일 초기화 경로.
+ *
+ * 호출 체인:
+ *   (fat binary 등록 경로, 일반 모드) → [get_app_cuda_version()] → get_app_binary()
+ *                                                                  → get_app_cuda_version_internal()
+ */
 static int get_app_cuda_version() {
-  std::string app_binary = get_app_binary();
-  return get_app_cuda_version_internal(app_binary);
+  std::string app_binary = get_app_binary();              // [한국어] /proc/self/exe로 현재 실행 파일 경로 자동 탐지
+  return get_app_cuda_version_internal(app_binary);        // [한국어] 공통 구현체에 위임하여 CUDA 버전 탐지
 }
 
+/*
+ * [한국어]
+ * cuobjdumpRegisterFatBinary - fat binary 핸들과 소스 파일명의 매핑을 등록한다
+ *
+ * @handle:   NVCC가 생성한 fatbin 핸들 번호 (1부터 시작하는 단조 증가 정수).
+ *            cudaRegisterFatBiaryInternal_impl()에서 next_fat_bin_handle로 발급된 값.
+ * @filename: fat binary가 생성된 원본 소스 파일명 (CUDA < 6.0: 포인터 산술로 추출,
+ *            CUDA >= 6.0: "default" 문자열).
+ * @context:  현재 CUctx_st 컨텍스트 (현재 구현에서는 사용하지 않음, 확장 여지).
+ * @return:   없음 (void).
+ *
+ * 이 함수는 cuobjdump가 출력하는 섹션 정보에서 파일명으로 PTX 코드를 찾아야 할 때
+ * 어떤 핸들이 어떤 파일명에 대응하는지를 fatbinmap에 기록한다.
+ * cudaLaunch() 또는 cudaRegisterFunction() 이후, cuobjdumpParseBinary() 내부에서
+ * 핸들 → 파일명 매핑을 이 맵에서 조회하여 PTX/SASS 섹션을 특정한다.
+ *
+ * 실행 컨텍스트: CPU 호스트 스레드 (앱 시작 시 __cudaRegisterFatBinary 체인에서 호출).
+ * 동기화: 단일 스레드 초기화 시점에 호출되므로 락 불필요.
+ *
+ * 호출 체인:
+ *   cudaRegisterFatBiaryInternal_impl() → ctx->api->cuobjdumpRegisterFatBinary()
+ */
 //! Keep track of the association between filename and cubin handle
 void cuda_runtime_api::cuobjdumpRegisterFatBinary(unsigned int handle,
                                                   const char *filename,
                                                   CUctx_st *context) {
-  fatbinmap[handle] = filename;
+  fatbinmap[handle] = filename; // [한국어] handle → filename 매핑을 fatbinmap STL map에 삽입 (이미 존재하면 덮어씀)
 }
 
 /*******************************************************************************
