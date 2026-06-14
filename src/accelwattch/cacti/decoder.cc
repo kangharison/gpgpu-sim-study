@@ -31,16 +31,68 @@
 
 
 
-#include "area.h"
-#include "decoder.h"
-#include "parameter.h"
-#include <iostream>
-#include <math.h>
-#include <assert.h>
+/*
+ * [한국어 설명] CACTI 디코더/프리디코더 모델 구현 (decoder.cc)
+ *
+ * === 파일의 역할 ===
+ * decoder.h에 선언된 Decoder, PredecBlk, PredecBlkDrv, Predec, Driver 클래스의
+ * 생성자와 compute_widths/compute_area/compute_delays/leakage_feedback 메서드를 구현한다.
+ * 각 클래스는 캐시 주소 비트를 워드라인 선택 신호로 변환하는 회로 단계를 나타내며,
+ * logical_effort() 함수로 최소 지연 게이트 크기를 결정하고,
+ * cmos_Isub/Ig_leakage로 누설전류, horowitz()로 전파 지연을 계산한다.
+ * 모든 값은 조합된 뒤 CACTI 캐시 전력/면적/지연 최적화에 입력된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * AccelWattch → CACTI → decoder.cc (디코더/프리디코더 회로 모델 구현).
+ * 호출 체인: Mat(캐시 어레이 타일) 생성자 → Predec 생성자 → PredecBlkDrv + PredecBlk
+ *   생성자 → Decoder 생성자 → compute_widths → compute_area.
+ * compute_delays는 Mat의 타이밍 분석 단계에서 Predec::compute_delays → PredecBlkDrv/PredecBlk/Decoder::compute_delays 순으로 호출.
+ * 실행 컨텍스트: 호스트 유저스페이스 — 시뮬레이션 초기화 시 1회 실행.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: area.h (Area, compute_gate_area), decoder.h (클래스 선언),
+ *   parameter.h (g_tp — TechnologyParameter 전역), basic_circuit.h (gate_C, drain_C_,
+ *   tr_R_on, horowitz, cmos_Isub_leakage, cmos_Ig_leakage, pmos_to_nmos_sz_ratio).
+ * 이 파일에 의존: mat.cc (Mat 클래스가 Predec/Decoder 결과로 전체 MAT 타이밍 집계).
+ * 데이터 흐름: compute_widths()가 게이트 폭 배열을 채우면, compute_area()가 그 결과로
+ *   누설전류를 계산하고, compute_delays()가 horowitz()로 지연을 누적한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * Decoder::compute_widths()        : logical_effort()로 NAND2/3 + 인버터 체인 크기 결정
+ * Decoder::compute_delays()        : 첫 NAND 게이트부터 최종 인버터까지 horowitz() 지연 누적
+ * PredecBlk::compute_widths()      : 입력 비트 수(1~9)에 따른 L1/L2 게이트 경로 크기 결정
+ * PredecBlkDrv::compute_delays()   : nand2/nand3 두 경로 드라이버 지연 계산
+ * Predec::compute_delays()         : drv→blk 순서로 지연 계산, 최대 지연 경로 선택
+ */
+
+#include "area.h"      // [한국어] Area 클래스 및 compute_gate_area() — 게이트 면적 계산
+#include "decoder.h"   // [한국어] Decoder, PredecBlk, PredecBlkDrv, Predec, Driver 선언
+#include "parameter.h" // [한국어] g_tp (TechnologyParameter 전역) — 게이트 크기/전압/RC 파라미터
+#include <iostream>    // [한국어] 디버깅용 cout (현재 미사용)
+#include <math.h>      // [한국어] sqrt, log — 타이밍 계산에서 사용
+#include <assert.h>    // [한국어] assert() — 잘못된 주소 비트 수 감지
 
 using namespace std;
 
 
+/*
+ * [한국어]
+ * Decoder::Decoder — 워드라인 디코더 생성자
+ * @_num_dec_signals : 디코더 출력 신호 수 (워드라인 수)
+ * @flag_way_select  : 웨이 선택 신호 추가 입력 여부
+ * @_C_ld_dec_out    : 출력 부하 커패시턴스 (F)
+ * @_R_wire_dec_out  : 출력 와이어 저항 (ohm)
+ * @fully_assoc_     : 완전 결합 캐시 여부 (NAND2 강제 사용)
+ * @is_dram_         : DRAM 여부
+ * @is_wl_tr_        : 워드라인 트랜지스터 여부 (Vpp 사용)
+ * @cell_            : 셀 높이/폭 참조 (area.h 기준)
+ * @return           : (생성자이므로 없음)
+ * _num_dec_signals를 _log2()로 변환하여 주소 비트 수를 구하고, 그 값에 따라
+ * exist 플래그와 num_in_signals(2=NAND2, 3=NAND3)를 결정한다.
+ * 디코더 셀 높이를 g_tp.h_dec * cell.h로 설정한 뒤 compute_widths/compute_area 호출.
+ * 실행 컨텍스트: Mat 생성자 → Predec 생성자 내에서 단일 스레드 호출.
+ * 호출 체인: Mat → Predec → PredecBlkDrv → [Decoder()] → compute_widths → compute_area
+ */
 Decoder::Decoder(
     int    _num_dec_signals,
     bool   flag_way_select,
@@ -50,20 +102,20 @@ Decoder::Decoder(
     bool   is_dram_,
     bool   is_wl_tr_,
     const  Area & cell_)
-:exist(false),
-  C_ld_dec_out(_C_ld_dec_out),
-  R_wire_dec_out(_R_wire_dec_out),
-  num_gates(0), num_gates_min(2),
-  delay(0),
-  //power(),
-  fully_assoc(fully_assoc_), is_dram(is_dram_),
-  is_wl_tr(is_wl_tr_), cell(cell_)
+:exist(false),              // [한국어] 기본값: 디코더 불필요로 초기화
+  C_ld_dec_out(_C_ld_dec_out),  // [한국어] 출력 부하 커패시턴스 저장
+  R_wire_dec_out(_R_wire_dec_out), // [한국어] 출력 와이어 저항 저장
+  num_gates(0), num_gates_min(2), // [한국어] 게이트 수 초기화 (최소 2: NAND + INV)
+  delay(0),                       // [한국어] 지연 누적값 초기화
+  //power(),                      // [한국어] (주석됨) Component::power 사용
+  fully_assoc(fully_assoc_), is_dram(is_dram_), // [한국어] 완전 결합/DRAM 플래그
+  is_wl_tr(is_wl_tr_), cell(cell_) // [한국어] 워드라인 트랜지스터 여부, 셀 참조
 {
 
-  for (int i = 0; i < MAX_NUMBER_GATES_STAGE; i++)
+  for (int i = 0; i < MAX_NUMBER_GATES_STAGE; i++) // [한국어] 게이트 폭 배열 0으로 초기화
   {
-    w_dec_n[i] = 0;
-    w_dec_p[i] = 0;
+    w_dec_n[i] = 0; // [한국어] NMOS 폭 초기화
+    w_dec_p[i] = 0; // [한국어] PMOS 폭 초기화
   }
 
   /*
@@ -71,217 +123,283 @@ Decoder::Decoder(
    * num_addr_bits_dec is the number of signal to be decoded
    * as the decoders input.
    */
-  int num_addr_bits_dec = _log2(_num_dec_signals);
+  int num_addr_bits_dec = _log2(_num_dec_signals); // [한국어] 출력 신호 수를 로그₂로 변환 → 입력 주소 비트 수
 
-  if (num_addr_bits_dec < 4)
+  if (num_addr_bits_dec < 4) // [한국어] 주소 비트가 4 미만이면 프리디코더만으로 충분
   {
-    if (flag_way_select)
+    if (flag_way_select) // [한국어] 웨이 선택 신호가 있으면 NAND2 디코더 필요
     {
-      exist = true;
-      num_in_signals = 2;
+      exist = true;       // [한국어] 디코더 존재 플래그 설정
+      num_in_signals = 2; // [한국어] NAND2 게이트 사용 (입력 2개)
     }
     else
     {
-      num_in_signals = 0;
+      num_in_signals = 0; // [한국어] 디코더 불필요 — 프리디코더 출력이 직접 워드라인 구동
     }
   }
-  else
+  else // [한국어] 주소 비트 4 이상 — 반드시 Decoder 필요
   {
-    exist = true;
+    exist = true; // [한국어] 디코더 존재 플래그 설정
 
-    if (flag_way_select)
+    if (flag_way_select) // [한국어] 웨이 선택이 추가되면 NAND3 (주소 2비트 + 웨이 1비트)
     {
-      num_in_signals = 3;
+      num_in_signals = 3; // [한국어] NAND3 게이트 사용 (입력 3개)
     }
     else
     {
-      num_in_signals = 2;
+      num_in_signals = 2; // [한국어] 기본 NAND2 게이트 사용
     }
   }
 
-  assert(cell.h>0);
-  assert(cell.w>0);
+  assert(cell.h>0); // [한국어] 셀 높이 유효성 확인 (0이면 면적 계산 오류)
+  assert(cell.w>0); // [한국어] 셀 폭 유효성 확인
   // the height of a row-decoder-driver cell is fixed to be 4 * cell.h;
   //area.h = 4 * cell.h;
-  area.h = g_tp.h_dec * cell.h;
+  area.h = g_tp.h_dec * cell.h; // [한국어] 디코더 셀 높이 = h_dec(기술 파라미터) × 셀 높이
 
-  compute_widths();
-  compute_area();
+  compute_widths(); // [한국어] logical_effort()로 게이트 폭 결정
+  compute_area();   // [한국어] 게이트 면적 및 누설전류 계산
 }
 
 
 
+/*
+ * [한국어]
+ * Decoder::compute_widths - logical_effort 기반 게이트 체인 크기 결정
+ * NAND2(num_in_signals==2 또는 fully_assoc) 또는 NAND3(num_in_signals==3) 첫 단 게이트와
+ * 이후 인버터 체인의 각 단 NMOS/PMOS 폭을 계산하여 w_dec_n/p 배열을 채운다.
+ * gnand2/gnand3는 NAND 게이트의 논리적 노력 (logical effort per stage) 이다.
+ * F는 전체 전기적 노력(electrical effort = C_ld_dec_out / C_in_first) × gnand이다.
+ * logical_effort()가 num_gates와 w_dec_n/p[]를 결정하고 반환한다.
+ * 실행 컨텍스트: Decoder 생성자 내에서 단일 스레드 호출.
+ * 호출 체인: Decoder() → [compute_widths] → logical_effort
+ */
 void Decoder::compute_widths()
 {
-  double F;
-  double p_to_n_sz_ratio = pmos_to_nmos_sz_ratio(is_dram, is_wl_tr);
-  double gnand2     = (2 + p_to_n_sz_ratio) / (1 + p_to_n_sz_ratio);
-  double gnand3     = (3 + p_to_n_sz_ratio) / (1 + p_to_n_sz_ratio);
+  double F;                                                  // [한국어] 총 전기적 노력 × 논리적 노력
+  double p_to_n_sz_ratio = pmos_to_nmos_sz_ratio(is_dram, is_wl_tr); // [한국어] PMOS/NMOS 크기 비율 (이동도 차이 보정)
+  double gnand2     = (2 + p_to_n_sz_ratio) / (1 + p_to_n_sz_ratio); // [한국어] NAND2 논리적 노력 g = (n+p_ratio)/(1+p_ratio)
+  double gnand3     = (3 + p_to_n_sz_ratio) / (1 + p_to_n_sz_ratio); // [한국어] NAND3 논리적 노력
 
-  if (exist)
+  if (exist) // [한국어] 디코더가 필요한 경우에만 계산
   {
-    if (num_in_signals == 2 || fully_assoc)
+    if (num_in_signals == 2 || fully_assoc) // [한국어] NAND2 게이트 사용 (완전 결합도 NAND2 강제)
     {
-      w_dec_n[0] = 2 * g_tp.min_w_nmos_;
-      w_dec_p[0] = p_to_n_sz_ratio * g_tp.min_w_nmos_;
-      F = gnand2;
+      w_dec_n[0] = 2 * g_tp.min_w_nmos_;           // [한국어] NAND2 NMOS: 최소 폭 × 2 (직렬 2개)
+      w_dec_p[0] = p_to_n_sz_ratio * g_tp.min_w_nmos_; // [한국어] PMOS: p_to_n_ratio × 최소 폭
+      F = gnand2;                                   // [한국어] 논리적 노력 초기화 (NAND2)
     }
-    else
+    else // [한국어] NAND3 게이트 사용
     {
-      w_dec_n[0] = 3 * g_tp.min_w_nmos_;
-      w_dec_p[0] = p_to_n_sz_ratio * g_tp.min_w_nmos_;
-      F = gnand3;
+      w_dec_n[0] = 3 * g_tp.min_w_nmos_;           // [한국어] NAND3 NMOS: 최소 폭 × 3 (직렬 3개)
+      w_dec_p[0] = p_to_n_sz_ratio * g_tp.min_w_nmos_; // [한국어] PMOS 폭
+      F = gnand3;                                   // [한국어] 논리적 노력 초기화 (NAND3)
     }
 
+    // [한국어] 전체 전기적 노력 = g_nand × (C_ld_out / C_in_first)
+    // 입력 커패시턴스는 첫 NAND 게이트의 NMOS+PMOS 게이트 커패시턴스 합산
     F *= C_ld_dec_out / (gate_C(w_dec_n[0], 0, is_dram, false, is_wl_tr) +
                          gate_C(w_dec_p[0], 0, is_dram, false, is_wl_tr));
+    // [한국어] logical_effort()가 F와 g_nand로 최적 게이트 단 수와 각 단 폭을 계산
     num_gates = logical_effort(
-        num_gates_min,
-        num_in_signals == 2 ? gnand2 : gnand3,
-        F,
-        w_dec_n,
-        w_dec_p,
-        C_ld_dec_out,
-        p_to_n_sz_ratio,
-        is_dram,
-        is_wl_tr,
-        g_tp.max_w_nmos_dec);
+        num_gates_min,                              // [한국어] 최소 게이트 단 수 (2)
+        num_in_signals == 2 ? gnand2 : gnand3,      // [한국어] 첫 단 논리적 노력 (NAND2 or NAND3)
+        F,                                          // [한국어] 총 전기적×논리적 노력
+        w_dec_n,                                    // [한국어] 출력: NMOS 폭 배열
+        w_dec_p,                                    // [한국어] 출력: PMOS 폭 배열
+        C_ld_dec_out,                               // [한국어] 출력 부하 커패시턴스
+        p_to_n_sz_ratio,                            // [한국어] PMOS/NMOS 크기 비율
+        is_dram,                                    // [한국어] DRAM 여부
+        is_wl_tr,                                   // [한국어] 워드라인 트랜지스터 여부
+        g_tp.max_w_nmos_dec);                       // [한국어] 디코더 NMOS 최대 폭 제한
   }
 }
 
 
 
+/*
+ * [한국어]
+ * Decoder::compute_area - 디코더 게이트 면적 및 누설전류 계산
+ * 첫 단 NAND2 또는 NAND3 게이트와 이후 num_gates-1개 인버터의 면적을 누적하고,
+ * 각 단의 서브스레숄드 누설전류(cmos_Isub_leakage)와 게이트 누설전류(cmos_Ig_leakage)를 합산.
+ * 결과를 power.readOp.leakage/gate_leakage에 저장하고, area.w를 결정한다.
+ * 호출 체인: Decoder() → [compute_area] → compute_gate_area, cmos_Isub/Ig_leakage
+ */
 void Decoder::compute_area()
 {
-  double cumulative_area = 0;
-  double cumulative_curr = 0;  // cumulative leakage current
-  double cumulative_curr_Ig = 0;  // cumulative leakage current
+  double cumulative_area = 0;       // [한국어] 누적 게이트 면적 (m²)
+  double cumulative_curr = 0;       // cumulative leakage current — [한국어] 누적 서브스레숄드 누설전류 (A)
+  double cumulative_curr_Ig = 0;    // cumulative leakage current — [한국어] 누적 게이트 누설전류 (A)
 
-  if (exist)
-  { // First check if this decoder exists
-    if (num_in_signals == 2)
+  if (exist) // First check if this decoder exists — [한국어] 디코더 존재 시에만 계산
+  {
+    if (num_in_signals == 2) // [한국어] NAND2 첫 단 면적/누설 계산
     {
-      cumulative_area = compute_gate_area(NAND, 2, w_dec_p[0], w_dec_n[0], area.h);
-      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram);
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram);
+      cumulative_area = compute_gate_area(NAND, 2, w_dec_p[0], w_dec_n[0], area.h); // [한국어] NAND2 게이트 면적
+      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram); // [한국어] NAND2 서브스레숄드 누설
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram); // [한국어] NAND2 게이트 누설
     }
-    else if (num_in_signals == 3)
+    else if (num_in_signals == 3) // [한국어] NAND3 첫 단 면적/누설 계산
     {
-      cumulative_area = compute_gate_area(NAND, 3, w_dec_p[0], w_dec_n[0], area.h);
-      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);;
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);
+      cumulative_area = compute_gate_area(NAND, 3, w_dec_p[0], w_dec_n[0], area.h); // [한국어] NAND3 게이트 면적
+      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);; // [한국어] NAND3 서브스레숄드 누설
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram); // [한국어] NAND3 게이트 누설
     }
 
+    // [한국어] 인버터 체인(2번째 단부터 마지막 단까지)의 면적과 누설전류 누적
     for (int i = 1; i < num_gates; i++)
     {
-      cumulative_area += compute_gate_area(INV, 1, w_dec_p[i], w_dec_n[i], area.h);
-      cumulative_curr += cmos_Isub_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram);
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram);
+      cumulative_area += compute_gate_area(INV, 1, w_dec_p[i], w_dec_n[i], area.h); // [한국어] 인버터 면적 추가
+      cumulative_curr += cmos_Isub_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram); // [한국어] 인버터 서브스레숄드 누설
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram); // [한국어] 인버터 게이트 누설
     }
-    power.readOp.leakage = cumulative_curr * g_tp.peri_global.Vdd;
-    power.readOp.gate_leakage = cumulative_curr_Ig * g_tp.peri_global.Vdd;
+    power.readOp.leakage = cumulative_curr * g_tp.peri_global.Vdd;     // [한국어] 누설전력 = 누설전류 × Vdd
+    power.readOp.gate_leakage = cumulative_curr_Ig * g_tp.peri_global.Vdd; // [한국어] 게이트 누설전력
 
-    area.w = (cumulative_area / area.h);
+    area.w = (cumulative_area / area.h); // [한국어] 면적 폭 = 총 면적 / 셀 높이
   }
 }
 
 
 
+/*
+ * [한국어]
+ * Decoder::compute_delays - 디코더 단별 전파 지연 계산 (horowitz 모델)
+ * @inrisetime : 입력 신호 상승 시간 (s) — 첫 단 NAND 게이트 입력
+ * @return     : 출력 신호 상승 시간 (s) — 최종 인버터 출력 (워드라인 드라이버 입력)
+ * NAND 첫 단의 on-resistance(rd), 내부 노드 커패시턴스(c_intrinsic),
+ * 다음 단 게이트 커패시턴스(c_load)를 구하여 RC 시정수 tf = rd*(c_int+c_load)를 계산.
+ * horowitz()로 50%→50% 지연을 구하고 delay에 누적.
+ * 마지막 인버터에는 R_wire_dec_out*c_load/2 와이어 지연을 추가.
+ * Vpp: DRAM 워드라인은 vpp, SRAM 워드라인은 sram_cell.Vdd, 그 외는 peri_global.Vdd.
+ * 마지막 단 동적 전력은 c_load*Vpp² (워드라인 스윙) + c_intrinsic*Vdd² (내부 노드).
+ * 실행 컨텍스트: Mat → Predec → [Decoder::compute_delays] — 단일 스레드.
+ * 호출 체인: Predec::compute_delays → [Decoder::compute_delays] → tr_R_on, gate_C, drain_C_, horowitz
+ */
 double Decoder::compute_delays(double inrisetime)
 {
-  if (exist)
+  if (exist) // [한국어] 디코더가 존재하는 경우에만 지연 계산
   {
-    double ret_val = 0;  // outrisetime
-    int    i;
-    double rd, tf, this_delay, c_load, c_intrinsic, Vpp;
-    double Vdd = g_tp.peri_global.Vdd;
+    double ret_val = 0;  // outrisetime — [한국어] 최종 출력 상승 시간 (반환값)
+    int    i;            // [한국어] 게이트 단 인덱스
+    double rd, tf, this_delay, c_load, c_intrinsic, Vpp; // [한국어] 각 단 RC 파라미터
+    double Vdd = g_tp.peri_global.Vdd; // [한국어] 주변부 공급 전압
 
+    // [한국어] 워드라인 구동 전압(Vpp) 결정: DRAM → vpp, SRAM WL-TR → sram_cell.Vdd, 기타 → Vdd
     if ((is_wl_tr) && (is_dram))
     {
-      Vpp = g_tp.vpp;
+      Vpp = g_tp.vpp; // [한국어] DRAM 워드라인 부스트 전압 (vpp > Vdd)
     }
     else if (is_wl_tr)
     {
-      Vpp = g_tp.sram_cell.Vdd;
+      Vpp = g_tp.sram_cell.Vdd; // [한국어] SRAM 셀 공급 전압 (패스 트랜지스터 구동)
     }
     else
     {
-      Vpp = g_tp.peri_global.Vdd;
+      Vpp = g_tp.peri_global.Vdd; // [한국어] 일반 주변부 전압
     }
 
-    // first check whether a decoder is required at all
-    rd = tr_R_on(w_dec_n[0], NCH, num_in_signals, is_dram, false, is_wl_tr);
-    c_load = gate_C(w_dec_n[1] + w_dec_p[1], 0.0, is_dram, false, is_wl_tr);
-    c_intrinsic = drain_C_(w_dec_p[0], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) * num_in_signals +
-                  drain_C_(w_dec_n[0], NCH, num_in_signals, 1, area.h, is_dram, false, is_wl_tr);
-    tf = rd * (c_intrinsic + c_load);
-    this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
-    delay += this_delay;
-    inrisetime = this_delay / (1.0 - 0.5);
-    power.readOp.dynamic += (c_load + c_intrinsic) * Vdd * Vdd;
+    // first check whether a decoder is required at all — [한국어] 첫 단(NAND2 or NAND3) 지연
+    rd = tr_R_on(w_dec_n[0], NCH, num_in_signals, is_dram, false, is_wl_tr); // [한국어] NAND 직렬 NMOS on-저항
+    c_load = gate_C(w_dec_n[1] + w_dec_p[1], 0.0, is_dram, false, is_wl_tr); // [한국어] 다음 단 게이트 커패시턴스
+    c_intrinsic = drain_C_(w_dec_p[0], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) * num_in_signals + // [한국어] PMOS 드레인 × 입력 수
+                  drain_C_(w_dec_n[0], NCH, num_in_signals, 1, area.h, is_dram, false, is_wl_tr);      // [한국어] 직렬 NMOS 스택 드레인
+    tf = rd * (c_intrinsic + c_load); // [한국어] RC 시정수 tf = R_on × (C_int + C_next)
+    this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 50%→50% 지연
+    delay += this_delay;                                    // [한국어] 총 지연에 이 단 지연 누적
+    inrisetime = this_delay / (1.0 - 0.5);                 // [한국어] 다음 단 입력 상승 시간 업데이트
+    power.readOp.dynamic += (c_load + c_intrinsic) * Vdd * Vdd; // [한국어] 동적 에너지 = C × Vdd²
 
+    // [한국어] 중간 인버터 단들(1 ~ num_gates-2)의 지연 계산
     for (i = 1; i < num_gates - 1; ++i)
     {
-      rd = tr_R_on(w_dec_n[i], NCH, 1, is_dram, false, is_wl_tr);
-      c_load = gate_C(w_dec_p[i+1] + w_dec_n[i+1], 0.0, is_dram, false, is_wl_tr);
-      c_intrinsic = drain_C_(w_dec_p[i], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) +
-                    drain_C_(w_dec_n[i], NCH, 1, 1, area.h, is_dram, false, is_wl_tr);
-      tf = rd * (c_intrinsic + c_load);
-      this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
-      delay += this_delay;
-      inrisetime = this_delay / (1.0 - 0.5);
-      power.readOp.dynamic += (c_load + c_intrinsic) * Vdd * Vdd;
+      rd = tr_R_on(w_dec_n[i], NCH, 1, is_dram, false, is_wl_tr); // [한국어] 단일 NMOS on-저항
+      c_load = gate_C(w_dec_p[i+1] + w_dec_n[i+1], 0.0, is_dram, false, is_wl_tr); // [한국어] 다음 단 게이트 커패시턴스
+      c_intrinsic = drain_C_(w_dec_p[i], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) + // [한국어] PMOS 드레인
+                    drain_C_(w_dec_n[i], NCH, 1, 1, area.h, is_dram, false, is_wl_tr);  // [한국어] NMOS 드레인
+      tf = rd * (c_intrinsic + c_load); // [한국어] RC 시정수
+      this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] 이 단 지연
+      delay += this_delay;                                    // [한국어] 누적
+      inrisetime = this_delay / (1.0 - 0.5);                 // [한국어] 다음 단 입력 상승 시간
+      power.readOp.dynamic += (c_load + c_intrinsic) * Vdd * Vdd; // [한국어] 동적 에너지 누적
     }
 
-    // add delay of final inverter that drives the wordline
-    i = num_gates - 1;
-    c_load = C_ld_dec_out;
-    rd = tr_R_on(w_dec_n[i], NCH, 1, is_dram, false, is_wl_tr);
-    c_intrinsic = drain_C_(w_dec_p[i], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) +
-                  drain_C_(w_dec_n[i], NCH, 1, 1, area.h, is_dram, false, is_wl_tr);
-    tf = rd * (c_intrinsic + c_load) + R_wire_dec_out * c_load / 2;
-    this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
-    delay  += this_delay;
-    ret_val = this_delay / (1.0 - 0.5);
-    power.readOp.dynamic += c_load * Vpp * Vpp + c_intrinsic * Vdd * Vdd;
+    // add delay of final inverter that drives the wordline — [한국어] 최종 인버터 (워드라인 직접 구동)
+    i = num_gates - 1;                              // [한국어] 마지막 단 인덱스
+    c_load = C_ld_dec_out;                          // [한국어] 출력 부하 = 워드라인 커패시턴스
+    rd = tr_R_on(w_dec_n[i], NCH, 1, is_dram, false, is_wl_tr); // [한국어] 최종 인버터 NMOS on-저항
+    c_intrinsic = drain_C_(w_dec_p[i], PCH, 1, 1, area.h, is_dram, false, is_wl_tr) + // [한국어] PMOS 드레인
+                  drain_C_(w_dec_n[i], NCH, 1, 1, area.h, is_dram, false, is_wl_tr);  // [한국어] NMOS 드레인
+    tf = rd * (c_intrinsic + c_load) + R_wire_dec_out * c_load / 2; // [한국어] RC + 와이어 저항×부하/2 (분산 RC 모델)
+    this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] 최종 인버터 지연
+    delay  += this_delay;                                   // [한국어] 총 지연 누적
+    ret_val = this_delay / (1.0 - 0.5);                    // [한국어] 출력 상승 시간 계산
+    power.readOp.dynamic += c_load * Vpp * Vpp + c_intrinsic * Vdd * Vdd; // [한국어] WL: Vpp², 내부: Vdd²
 
-    return ret_val;
+    return ret_val; // [한국어] 최종 출력 상승 시간 반환 (다음 회로 입력으로 사용)
   }
   else
   {
-    return 0.0;
+    return 0.0; // [한국어] 디코더 불필요 시 지연 0 반환
   }
 }
 
+/*
+ * [한국어]
+ * Decoder::leakage_feedback - 온도에 따른 누설전류 재계산
+ * @temperature : 동작 온도 (K)
+ * compute_area()와 동일한 구조로 cmos_Isub/Ig_leakage를 재계산하여
+ * power.readOp.leakage/gate_leakage를 현재 온도 기준으로 갱신한다.
+ * 게이트 폭은 이미 결정된 w_dec_n/p를 재사용하므로 크기 재계산 불필요.
+ * 호출 체인: 온도 피드백 루프 → [Decoder::leakage_feedback] → cmos_Isub/Ig_leakage
+ */
 void Decoder::leakage_feedback(double temperature)
 {
-  double cumulative_curr = 0;  // cumulative leakage current
-  double cumulative_curr_Ig = 0;  // cumulative leakage current
+  double cumulative_curr = 0;       // cumulative leakage current — [한국어] 누적 서브스레숄드 누설전류
+  double cumulative_curr_Ig = 0;    // cumulative leakage current — [한국어] 누적 게이트 누설전류
 
-  if (exist)
-  { // First check if this decoder exists
-    if (num_in_signals == 2)
+  if (exist) // First check if this decoder exists — [한국어] 디코더 존재 시에만 재계산
+  {
+    if (num_in_signals == 2) // [한국어] NAND2 첫 단 누설전류 재계산
     {
-      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram);
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram);
+      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram); // [한국어] NAND2 서브스레숄드 누설
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 2, nand,is_dram); // [한국어] NAND2 게이트 누설
     }
-    else if (num_in_signals == 3)
+    else if (num_in_signals == 3) // [한국어] NAND3 첫 단 누설전류 재계산
     {
-      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);;
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);
-    }
-
-    for (int i = 1; i < num_gates; i++)
-    {
-      cumulative_curr += cmos_Isub_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram);
-      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram);
+      cumulative_curr = cmos_Isub_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram);; // [한국어] NAND3 서브스레숄드 누설
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[0], w_dec_p[0], 3, nand, is_dram); // [한국어] NAND3 게이트 누설
     }
 
-    power.readOp.leakage = cumulative_curr * g_tp.peri_global.Vdd;
-    power.readOp.gate_leakage = cumulative_curr_Ig * g_tp.peri_global.Vdd;
+    for (int i = 1; i < num_gates; i++) // [한국어] 인버터 체인 각 단 누설전류 누적
+    {
+      cumulative_curr += cmos_Isub_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram);  // [한국어] 인버터 서브스레숄드
+      cumulative_curr_Ig = cmos_Ig_leakage(w_dec_n[i], w_dec_p[i], 1, inv, is_dram); // [한국어] 인버터 게이트 누설
+    }
+
+    power.readOp.leakage = cumulative_curr * g_tp.peri_global.Vdd;     // [한국어] 누설전력 = I × Vdd
+    power.readOp.gate_leakage = cumulative_curr_Ig * g_tp.peri_global.Vdd; // [한국어] 게이트 누설전력
   }
 }
 
+/*
+ * [한국어]
+ * PredecBlk::PredecBlk — 프리디코더 블록 생성자
+ * @num_dec_signals          : 디코더 출력 신호 수 (주소 비트 수 계산용)
+ * @dec_                     : 연결된 Decoder 포인터
+ * @C_wire_predec_blk_out   : L2 출력 와이어 커패시턴스 (F)
+ * @R_wire_predec_blk_out_  : L2 출력 와이어 저항 (ohm)
+ * @num_dec_per_predec       : 이 블록에 연결된 디코더 수 (branch effort 계산용)
+ * @is_dram                  : DRAM 여부
+ * @is_blk1                 : 하위 비트 블록(true) 또는 상위 비트 블록(false)
+ * num_dec_signals로부터 총 주소 비트를 계산하고, is_blk1에 따라 절반씩 분배.
+ * is_blk1=true: 4비트 미만이면 L1만으로 직접 워드라인 구동, 4비트 이상이면 L1+L2 구성.
+ * is_blk1=false: 4비트 이상일 때만 exist=true (상위 비트 블록).
+ * branch_effort_predec_out: 한 L2 게이트가 구동하는 Decoder 수.
+ * C_ld_predec_blk_out: L2 출력 부하 = branch_effort × 디코더 입력 커패시턴스 + 와이어.
+ * 실행 컨텍스트: Predec 생성자 내에서 단일 스레드 호출.
+ * 호출 체인: Predec → PredecBlkDrv → [PredecBlk()] → compute_widths → compute_area
+ */
 PredecBlk::PredecBlk(
     int    num_dec_signals,
     Decoder * dec_,
@@ -290,81 +408,81 @@ PredecBlk::PredecBlk(
     int    num_dec_per_predec,
     bool   is_dram,
     bool   is_blk1)
- :dec(dec_),
-  exist(false),
-  number_input_addr_bits(0),
-  C_ld_predec_blk_out(0),
-  R_wire_predec_blk_out(0),
-  branch_effort_nand2_gate_output(1),
-  branch_effort_nand3_gate_output(1),
-  flag_two_unique_paths(false),
-  flag_L2_gate(0),
-  number_inputs_L1_gate(0),
-  number_gates_L1_nand2_path(0),
-  number_gates_L1_nand3_path(0),
-  number_gates_L2(0),
-  min_number_gates_L1(2),
-  min_number_gates_L2(2),
-  num_L1_active_nand2_path(0),
-  num_L1_active_nand3_path(0),
-  delay_nand2_path(0),
-  delay_nand3_path(0),
-  power_nand2_path(),
-  power_nand3_path(),
-  power_L2(),
-  is_dram_(is_dram)
+ :dec(dec_),              // [한국어] 연결된 Decoder 포인터 저장
+  exist(false),           // [한국어] 기본값: 블록 불필요
+  number_input_addr_bits(0), // [한국어] 처리할 주소 비트 수 (초기화)
+  C_ld_predec_blk_out(0),    // [한국어] L2 출력 부하 커패시턴스 (초기화)
+  R_wire_predec_blk_out(0),  // [한국어] L2 출력 와이어 저항 (초기화)
+  branch_effort_nand2_gate_output(1), // [한국어] NAND2 분기 노력 초기화
+  branch_effort_nand3_gate_output(1), // [한국어] NAND3 분기 노력 초기화
+  flag_two_unique_paths(false),      // [한국어] nand2/nand3 두 경로 모두 사용 여부 초기화
+  flag_L2_gate(0),                   // [한국어] L2 게이트 유형 (0=없음)
+  number_inputs_L1_gate(0),          // [한국어] L1 게이트 입력 수 초기화
+  number_gates_L1_nand2_path(0),     // [한국어] L1 NAND2 경로 게이트 수 초기화
+  number_gates_L1_nand3_path(0),     // [한국어] L1 NAND3 경로 게이트 수 초기화
+  number_gates_L2(0),                // [한국어] L2 게이트 수 초기화
+  min_number_gates_L1(2),            // [한국어] L1 최소 게이트 단 수
+  min_number_gates_L2(2),            // [한국어] L2 최소 게이트 단 수
+  num_L1_active_nand2_path(0),       // [한국어] 활성 NAND2 경로 수 초기화
+  num_L1_active_nand3_path(0),       // [한국어] 활성 NAND3 경로 수 초기화
+  delay_nand2_path(0),               // [한국어] NAND2 경로 총 지연 초기화
+  delay_nand3_path(0),               // [한국어] NAND3 경로 총 지연 초기화
+  power_nand2_path(),                // [한국어] NAND2 경로 전력 초기화
+  power_nand3_path(),                // [한국어] NAND3 경로 전력 초기화
+  power_L2(),                        // [한국어] L2 전력 초기화
+  is_dram_(is_dram)                  // [한국어] DRAM 여부 저장
 {
-  int    branch_effort_predec_out;
-  double C_ld_dec_gate;
-  int    num_addr_bits_dec = _log2(num_dec_signals);
-  int    blk1_num_input_addr_bits = (num_addr_bits_dec + 1) / 2;
-  int    blk2_num_input_addr_bits = num_addr_bits_dec - blk1_num_input_addr_bits;
+  int    branch_effort_predec_out;   // [한국어] L2 게이트 1개가 구동하는 Decoder 입력 수
+  double C_ld_dec_gate;              // [한국어] Decoder 1개 입력 게이트 커패시턴스 × num_dec_per_predec
+  int    num_addr_bits_dec = _log2(num_dec_signals); // [한국어] 총 디코더 주소 비트 수
+  int    blk1_num_input_addr_bits = (num_addr_bits_dec + 1) / 2; // [한국어] blk1 담당 비트(상위 절반)
+  int    blk2_num_input_addr_bits = num_addr_bits_dec - blk1_num_input_addr_bits; // [한국어] blk2 담당 비트(하위 절반)
 
-  w_L1_nand2_n[0] = 0;
-  w_L1_nand2_p[0] = 0;
-  w_L1_nand3_n[0] = 0;
-  w_L1_nand3_p[0] = 0;
+  w_L1_nand2_n[0] = 0; // [한국어] L1 NAND2 NMOS 폭 초기화
+  w_L1_nand2_p[0] = 0; // [한국어] L1 NAND2 PMOS 폭 초기화
+  w_L1_nand3_n[0] = 0; // [한국어] L1 NAND3 NMOS 폭 초기화
+  w_L1_nand3_p[0] = 0; // [한국어] L1 NAND3 PMOS 폭 초기화
 
-  if (is_blk1 == true)
+  if (is_blk1 == true) // [한국어] blk1(하위 비트 담당) 설정
   {
-    if (num_addr_bits_dec <= 0)
+    if (num_addr_bits_dec <= 0) // [한국어] 주소 비트가 없으면 블록 불필요
     {
-      return;
+      return; // [한국어] 초기화 없이 종료 (exist=false 유지)
     }
-    else if (num_addr_bits_dec < 4)
+    else if (num_addr_bits_dec < 4) // [한국어] 4비트 미만: L1만으로 워드라인 직접 구동
     {
       // Just one predecoder block is required with NAND2 gates. No decoder required.
       // The first level of predecoding directly drives the decoder output load
-      exist = true;
-      number_input_addr_bits = num_addr_bits_dec;
-      R_wire_predec_blk_out = dec->R_wire_dec_out;
-      C_ld_predec_blk_out = dec->C_ld_dec_out;
+      exist = true;                                   // [한국어] 블록 필요 플래그
+      number_input_addr_bits = num_addr_bits_dec;     // [한국어] 전체 주소 비트를 blk1이 담당
+      R_wire_predec_blk_out = dec->R_wire_dec_out;    // [한국어] 디코더 출력 와이어 저항 그대로 사용
+      C_ld_predec_blk_out = dec->C_ld_dec_out;        // [한국어] 디코더 출력 부하 커패시턴스 그대로 사용
     }
-    else
+    else // [한국어] 4비트 이상: L1+L2 두 단계 프리디코딩
     {
-      exist = true;
-      number_input_addr_bits   = blk1_num_input_addr_bits;
-      branch_effort_predec_out = (1 << blk2_num_input_addr_bits);
-      C_ld_dec_gate = num_dec_per_predec * gate_C(dec->w_dec_n[0] + dec->w_dec_p[0], 0, is_dram_, false, false);
-      R_wire_predec_blk_out = R_wire_predec_blk_out_;
-      C_ld_predec_blk_out = branch_effort_predec_out * C_ld_dec_gate + C_wire_predec_blk_out;
+      exist = true;                                           // [한국어] 블록 필요 플래그
+      number_input_addr_bits   = blk1_num_input_addr_bits;   // [한국어] blk1 담당 비트 수
+      branch_effort_predec_out = (1 << blk2_num_input_addr_bits); // [한국어] L2 한 신호가 구동하는 Decoder 수 = 2^blk2_bits
+      C_ld_dec_gate = num_dec_per_predec * gate_C(dec->w_dec_n[0] + dec->w_dec_p[0], 0, is_dram_, false, false); // [한국어] 디코더 입력 커패시턴스
+      R_wire_predec_blk_out = R_wire_predec_blk_out_;         // [한국어] L2 출력 와이어 저항
+      C_ld_predec_blk_out = branch_effort_predec_out * C_ld_dec_gate + C_wire_predec_blk_out; // [한국어] L2 출력 부하 = 분기노력 × 디코더 커패시턴스 + 와이어
     }
   }
-  else
+  else // [한국어] blk2(상위 비트 담당) 설정
   {
-    if (num_addr_bits_dec >= 4)
+    if (num_addr_bits_dec >= 4) // [한국어] 4비트 이상일 때만 blk2 필요
     {
-      exist = true;
-      number_input_addr_bits   = blk2_num_input_addr_bits;
-      branch_effort_predec_out = (1 << blk1_num_input_addr_bits);
-      C_ld_dec_gate = num_dec_per_predec * gate_C(dec->w_dec_n[0] + dec->w_dec_p[0], 0, is_dram_, false, false);
-      R_wire_predec_blk_out = R_wire_predec_blk_out_;
-      C_ld_predec_blk_out = branch_effort_predec_out * C_ld_dec_gate + C_wire_predec_blk_out;
+      exist = true;                                           // [한국어] 블록 필요 플래그
+      number_input_addr_bits   = blk2_num_input_addr_bits;   // [한국어] blk2 담당 비트 수
+      branch_effort_predec_out = (1 << blk1_num_input_addr_bits); // [한국어] 2^blk1_bits
+      C_ld_dec_gate = num_dec_per_predec * gate_C(dec->w_dec_n[0] + dec->w_dec_p[0], 0, is_dram_, false, false); // [한국어] 디코더 입력 커패시턴스
+      R_wire_predec_blk_out = R_wire_predec_blk_out_;         // [한국어] L2 출력 와이어 저항
+      C_ld_predec_blk_out = branch_effort_predec_out * C_ld_dec_gate + C_wire_predec_blk_out; // [한국어] L2 출력 부하
     }
   }
 
-  compute_widths();
-  compute_area();
+  compute_widths(); // [한국어] L1/L2 게이트 체인 크기 결정
+  compute_area();   // [한국어] 면적 및 누설전류 계산
 }
 
 
