@@ -1781,57 +1781,83 @@ cache_stats &cache_stats::operator+=(const cache_stats &cs) {
   /// Overloaded += operator to allow for simple stat accumulation
   ///
   for (auto iter = cs.m_stats.begin(); iter != cs.m_stats.end(); ++iter) {
-    unsigned long long streamID = iter->first;
+    /* [한국어] cs.m_stats의 각 스트림 엔트리를 순회하며 this->m_stats에 누적
+     * m_stats는 streamID → [접근타입][상태] 형태의 중첩 맵/벡터 구조 */
+    unsigned long long streamID = iter->first; /* [한국어] 현재 순회 중인 CUDA 스트림 ID 추출 */
     if (m_stats.find(streamID) == m_stats.end()) {
+      /* [한국어] this->m_stats에 해당 streamID가 없으면: cs의 엔트리를 통째로 복사하여 삽입
+       * 새 스트림이 처음 등장하는 경우로, 기존 값이 없으므로 덮어쓰기 없이 직접 insert */
       m_stats.insert(std::pair<unsigned long long,
                                std::vector<std::vector<unsigned long long>>>(
           streamID, cs.m_stats.at(streamID)));
     } else {
+      /* [한국어] 이미 this->m_stats에 해당 streamID가 존재하면: (타입, 상태) 쌍별로 누적 */
       for (unsigned type = 0; type < NUM_MEM_ACCESS_TYPE; ++type) {
+        /* [한국어] 모든 메모리 접근 타입(GLOBAL_ACC_R, GLOBAL_ACC_W, L1_ACC_R 등) 순회 */
         for (unsigned status = 0; status < NUM_CACHE_REQUEST_STATUS; ++status) {
+          /* [한국어] 모든 캐시 요청 결과(HIT, MISS, SECTOR_MISS, HIT_RESERVED, RESERVATION_FAIL) 순회 */
           m_stats.at(streamID)[type][status] +=
               cs(type, status, false, streamID);
+          /* [한국어] cs의 해당 (streamID, type, status) 카운터를 this에 누적
+           * cs(type, status, false, streamID): fail_stat=false → m_stats에서 값 조회 */
         }
       }
     }
   }
   for (auto iter = cs.m_stats_pw.begin(); iter != cs.m_stats_pw.end(); ++iter) {
-    unsigned long long streamID = iter->first;
+    /* [한국어] 윈도우별 통계(m_stats_pw)를 동일한 방식으로 누적
+     * m_stats_pw는 주기적 성능 윈도우(AerialVision 등)에서 리셋되는 통계 */
+    unsigned long long streamID = iter->first; /* [한국어] 현재 순회 중인 스트림 ID */
     if (m_stats_pw.find(streamID) == m_stats_pw.end()) {
+      /* [한국어] 해당 streamID가 없으면 cs의 윈도우 통계를 통째로 삽입 */
       m_stats_pw.insert(std::pair<unsigned long long,
                                   std::vector<std::vector<unsigned long long>>>(
           streamID, cs.m_stats_pw.at(streamID)));
     } else {
+      /* [한국어] 이미 존재하면 (타입, 상태) 쌍별로 누적 */
       for (unsigned type = 0; type < NUM_MEM_ACCESS_TYPE; ++type) {
+        /* [한국어] 모든 메모리 접근 타입 순회 */
         for (unsigned status = 0; status < NUM_CACHE_REQUEST_STATUS; ++status) {
+          /* [한국어] 모든 캐시 요청 결과 순회 */
           m_stats_pw.at(streamID)[type][status] +=
               cs(type, status, false, streamID);
+          /* [한국어] 윈도우 통계 누적 — fail_stat=false이므로 m_stats_pw 기준 조회 */
         }
       }
     }
   }
   for (auto iter = cs.m_fail_stats.begin(); iter != cs.m_fail_stats.end();
        ++iter) {
-    unsigned long long streamID = iter->first;
+    /* [한국어] 실패 원인별 통계(m_fail_stats)를 누적
+     * m_fail_stats는 LINE_ALLOC_FAIL, MISS_QUEUE_FULL, MSHR_ENRTY_FAIL 등 예약 실패 원인 추적 */
+    unsigned long long streamID = iter->first; /* [한국어] 현재 순회 중인 스트림 ID */
     if (m_fail_stats.find(streamID) == m_fail_stats.end()) {
+      /* [한국어] 해당 streamID가 없으면 cs의 실패 통계를 통째로 삽입 */
       m_fail_stats.insert(
           std::pair<unsigned long long,
                     std::vector<std::vector<unsigned long long>>>(
               streamID, cs.m_fail_stats.at(streamID)));
     } else {
+      /* [한국어] 이미 존재하면 (타입, 실패 원인) 쌍별로 누적 */
       for (unsigned type = 0; type < NUM_MEM_ACCESS_TYPE; ++type) {
+        /* [한국어] 모든 메모리 접근 타입 순회 */
         for (unsigned status = 0; status < NUM_CACHE_RESERVATION_FAIL_STATUS;
              ++status) {
+          /* [한국어] 모든 예약 실패 원인(LINE_ALLOC_FAIL, MISS_QUEUE_FULL 등) 순회 */
           m_fail_stats.at(streamID)[type][status] +=
               cs(type, status, true, streamID);
+          /* [한국어] 실패 통계 누적 — fail_stat=true이므로 m_fail_stats에서 값 조회 */
         }
       }
     }
   }
   m_cache_port_available_cycles += cs.m_cache_port_available_cycles;
+  /* [한국어] 포트 가용 사이클 수 누적 — 포트 사용률 계산의 분모 */
   m_cache_data_port_busy_cycles += cs.m_cache_data_port_busy_cycles;
+  /* [한국어] 데이터 포트 사용 사이클 수 누적 — data_port_util 계산에 사용 */
   m_cache_fill_port_busy_cycles += cs.m_cache_fill_port_busy_cycles;
-  return *this;
+  /* [한국어] fill 포트 사용 사이클 수 누적 — fill_port_util 계산에 사용 */
+  return *this; /* [한국어] 복합 대입 연산자 관례에 따라 *this를 반환하여 체인 연산 가능 */
 }
 
 /*
@@ -1890,43 +1916,109 @@ void cache_stats::print_stats(FILE *fout, unsigned long long streamID,
   }
 }
 
+/*
+ * [한국어]
+ * cache_stats::print_fail_stats - 캐시 예약 실패 통계를 파일로 출력
+ *
+ * @fout: 출력 대상 파일 스트림
+ * @streamID: 출력할 CUDA 스트림 ID (-1이면 모든 스트림 출력)
+ * @cache_name: 출력 레이블 접두어 (기본값 "Cache_stats")
+ *
+ * m_fail_stats를 순회하여 (접근 타입, 실패 원인) 쌍별로 0이 아닌 카운터를 출력한다.
+ * 실패 원인은 LINE_ALLOC_FAIL, MISS_QUEUE_FULL, MSHR_ENRTY_FAIL, MSHR_MERGE_ENRTY_FAIL,
+ * MSHR_RW_PENDING 등 cache_reservation_fail_reason enum 값에 해당한다.
+ * print_stats()와 달리 HIT/MISS 카운터가 아니라 스톨(stall) 원인 분류 데이터를 출력한다.
+ * 시뮬레이션 종료 시 gpu-sim.cc의 성능 리포트 단계에서 호출된다.
+ *
+ * 호출 체인:
+ *   gpu-sim.cc (성능 통계 리포트) → [이 함수]
+ */
 void cache_stats::print_fail_stats(FILE *fout, unsigned long long streamID,
                                    const char *cache_name) const {
-  std::string m_cache_name = cache_name;
+  std::string m_cache_name = cache_name; /* [한국어] C 문자열을 std::string으로 복사 — fprintf 포맷 편의 */
   for (auto iter = m_fail_stats.begin(); iter != m_fail_stats.end(); ++iter) {
-    unsigned long long streamid = iter->first;
+    /* [한국어] m_fail_stats의 모든 스트림 엔트리를 순회 */
+    unsigned long long streamid = iter->first; /* [한국어] 현재 순회 중인 스트림 ID */
     // when streamID is specified, skip stats for all other streams, otherwise,
     // print stats from all streams
     if ((streamID != -1) && (streamid != streamID)) continue;
+    /* [한국어] streamID가 지정된 경우(-1이 아닌 경우) 일치하는 스트림만 출력, 나머지 건너뜀 */
     for (unsigned type = 0; type < NUM_MEM_ACCESS_TYPE; ++type) {
+      /* [한국어] 모든 메모리 접근 타입(GLOBAL_ACC_R, GLOBAL_ACC_W 등) 순회 */
       for (unsigned fail = 0; fail < NUM_CACHE_RESERVATION_FAIL_STATUS;
            ++fail) {
+        /* [한국어] 모든 예약 실패 원인(LINE_ALLOC_FAIL, MISS_QUEUE_FULL, MSHR_ENRTY_FAIL 등) 순회 */
         if (m_fail_stats.at(streamid)[type][fail] > 0) {
+          /* [한국어] 0이 아닌 카운터만 출력하여 리포트 간결성 유지 */
           fprintf(
               fout, "\t%s[%s][%s] = %llu\n", m_cache_name.c_str(),
               mem_access_type_str((enum mem_access_type)type),
               cache_fail_status_str((enum cache_reservation_fail_reason)fail),
               m_fail_stats.at(streamid)[type][fail]);
+          /* [한국어] 형식: "<cache_name>[<접근타입>][<실패원인>] = <카운터값>"
+           * cache_fail_status_str(): 실패 원인 enum을 사람이 읽을 수 있는 문자열로 변환 */
         }
       }
     }
   }
 }
 
+/*
+ * [한국어]
+ * cache_sub_stats::print_port_stats - 캐시 데이터/fill 포트 사용률을 파일로 출력
+ *
+ * @fout: 출력 대상 파일 스트림
+ * @cache_name: 출력 레이블 접두어
+ *
+ * 캐시에는 두 가지 포트가 있다:
+ *   - 데이터 포트(data port): CPU 측(SM) 요청이 캐시에 접근하는 포트
+ *   - fill 포트(fill port): 하위 메모리(L2/DRAM)에서 데이터가 캐시를 채우는 포트
+ * 사용률 = 해당_포트_사용_사이클 / 포트_가용_사이클 (0~1.0 범위)
+ * port_available_cycles가 0이면 나누기 금지이므로 0.0으로 초기화된 채 출력한다.
+ * 시뮬레이션 종료 시 gpu-sim.cc의 성능 리포트 단계에서 호출된다.
+ *
+ * 호출 체인:
+ *   gpu-sim.cc (성능 통계 리포트) → get_sub_stats() → [이 함수]
+ */
 void cache_sub_stats::print_port_stats(FILE *fout,
                                        const char *cache_name) const {
-  float data_port_util = 0.0f;
+  float data_port_util = 0.0f; /* [한국어] 데이터 포트 사용률 초기값 — port_available_cycles가 0일 때 안전한 기본값 */
   if (port_available_cycles > 0) {
+    /* [한국어] 가용 사이클이 1 이상인 경우에만 나눗셈 수행 (0 나누기 방지) */
     data_port_util = (float)data_port_busy_cycles / port_available_cycles;
+    /* [한국어] 데이터 포트 사용률 계산: SM 접근이 포트를 점유한 사이클 비율 */
   }
   fprintf(fout, "%s_data_port_util = %.3f\n", cache_name, data_port_util);
-  float fill_port_util = 0.0f;
+  /* [한국어] 데이터 포트 사용률 출력, 소수점 3자리까지 표시 */
+  float fill_port_util = 0.0f; /* [한국어] fill 포트 사용률 초기값 */
   if (port_available_cycles > 0) {
+    /* [한국어] 가용 사이클이 1 이상인 경우에만 나눗셈 수행 */
     fill_port_util = (float)fill_port_busy_cycles / port_available_cycles;
+    /* [한국어] fill 포트 사용률 계산: 하위 메모리가 캐시 라인을 채우는 포트 점유 비율 */
   }
   fprintf(fout, "%s_fill_port_util = %.3f\n", cache_name, fill_port_util);
+  /* [한국어] fill 포트 사용률 출력, 소수점 3자리까지 표시 */
 }
 
+/*
+ * [한국어]
+ * cache_stats::get_stats - 지정된 (접근타입, 상태) 배열 조합의 통계 합산
+ *
+ * @access_type: 합산할 mem_access_type 배열 (예: {GLOBAL_ACC_R, GLOBAL_ACC_W})
+ * @num_access_type: access_type 배열의 원소 수
+ * @access_status: 합산할 cache_request_status 배열 (예: {HIT, MISS})
+ * @num_access_status: access_status 배열의 원소 수
+ * @return: 지정된 모든 (타입, 상태) 쌍의 카운터를 모든 스트림에 걸쳐 합산한 값
+ *
+ * 모든 CUDA 스트림에 걸쳐 지정된 (접근타입, 상태) 쌍의 카운터를 합산한다.
+ * 예를 들어 전체 글로벌 읽기 히트 수를 구하려면 access_type={GLOBAL_ACC_R},
+ * access_status={HIT}로 호출한다.
+ * check_valid()로 유효성을 검사하고, 무효한 인자에는 assert로 패닉한다.
+ * gpu-sim.cc의 성능 지표 계산 및 Accel-Sim 통계 수집에서 사용된다.
+ *
+ * 호출 체인:
+ *   gpu-sim.cc (성능 카운터 집계) → [이 함수] → check_valid()
+ */
 unsigned long long cache_stats::get_stats(
     enum mem_access_type *access_type, unsigned num_access_type,
     enum cache_request_status *access_status,
@@ -1937,18 +2029,23 @@ unsigned long long cache_stats::get_stats(
   /// mem_access_types. "access_status" is an array of "num_access_status"
   /// cache_request_statuses.
   ///
-  unsigned long long total = 0;
+  unsigned long long total = 0; /* [한국어] 합산 누적 변수 초기화 */
   for (auto iter = m_stats.begin(); iter != m_stats.end(); ++iter) {
-    unsigned long long streamID = iter->first;
+    /* [한국어] 모든 CUDA 스트림 엔트리를 순회하여 스트림 구분 없이 전체 합산 */
+    unsigned long long streamID = iter->first; /* [한국어] 현재 순회 중인 스트림 ID */
     for (unsigned type = 0; type < num_access_type; ++type) {
+      /* [한국어] 호출자가 지정한 접근 타입 배열 순회 */
       for (unsigned status = 0; status < num_access_status; ++status) {
+        /* [한국어] 호출자가 지정한 요청 상태 배열 순회 */
         if (!check_valid((int)access_type[type], (int)access_status[status]))
           assert(0 && "Unknown cache access type or access outcome");
+        /* [한국어] 무효한 (타입, 상태) 조합이면 즉시 패닉 — 호출자 버그 감지 */
         total += m_stats.at(streamID)[access_type[type]][access_status[status]];
+        /* [한국어] 해당 (스트림, 접근타입, 상태) 카운터를 누적 합산 */
       }
     }
   }
-  return total;
+  return total; /* [한국어] 모든 스트림에 걸친 지정 (타입, 상태) 카운터의 총합 반환 */
 }
 
 /*
@@ -2019,45 +2116,65 @@ void cache_stats::get_sub_stats_pw(struct cache_sub_stats_pw &css) const {
   t_css.clear(); /* [한국어] 0으로 초기화 */
 
   for (auto iter = m_stats_pw.begin(); iter != m_stats_pw.end(); ++iter) {
-    unsigned long long streamID = iter->first;
+    /* [한국어] m_stats_pw의 모든 스트림 엔트리를 순회하여 윈도우 통계 합산 */
+    unsigned long long streamID = iter->first; /* [한국어] 현재 순회 중인 스트림 ID */
     for (unsigned type = 0; type < NUM_MEM_ACCESS_TYPE; ++type) {
+      /* [한국어] 모든 메모리 접근 타입 순회 (GLOBAL_ACC_R, GLOBAL_ACC_W, CONST_ACC_R 등) */
       for (unsigned status = 0; status < NUM_CACHE_REQUEST_STATUS; ++status) {
+        /* [한국어] 모든 캐시 요청 결과 상태 순회 */
         if (status == HIT || status == MISS || status == SECTOR_MISS ||
             status == HIT_RESERVED)
           t_css.accesses += m_stats_pw.at(streamID)[type][status];
+        /* [한국어] 실제 캐시 접근(HIT/MISS/SECTOR_MISS/HIT_RESERVED)의 총 횟수 누적
+         * RESERVATION_FAIL은 실제 접근이 아닌 스톨이므로 accesses에서 제외 */
 
         if (status == HIT) {
+          /* [한국어] 히트 상태인 경우: 읽기/쓰기 접근 타입별로 분리하여 누적 */
           if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
               type == INST_ACC_R) {
+            /* [한국어] 읽기 접근(글로벌/상수/명령어 캐시 읽기)의 히트 카운트 누적 */
             t_css.read_hits += m_stats_pw.at(streamID)[type][status];
           } else if (type == GLOBAL_ACC_W) {
+            /* [한국어] 쓰기 접근(글로벌 쓰기)의 히트 카운트 누적 */
             t_css.write_hits += m_stats_pw.at(streamID)[type][status];
           }
         }
 
         if (status == MISS || status == SECTOR_MISS) {
+          /* [한국어] 미스 상태(전체 라인 미스 또는 섹터 미스)인 경우: 읽기/쓰기별 분리
+           * SECTOR_MISS: 섹터 기반 캐시에서 라인은 할당됐지만 해당 섹터가 없는 경우 */
           if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
               type == INST_ACC_R) {
+            /* [한국어] 읽기 접근의 미스 카운트 누적 */
             t_css.read_misses += m_stats_pw.at(streamID)[type][status];
           } else if (type == GLOBAL_ACC_W) {
+            /* [한국어] 쓰기 접근의 미스 카운트 누적 */
             t_css.write_misses += m_stats_pw.at(streamID)[type][status];
           }
         }
 
         if (status == HIT_RESERVED) {
+          /* [한국어] HIT_RESERVED: 이미 MSHR에 대기 중인 라인에 hit — 실제 데이터 아직 미도착
+           * pending_hit로 분류하여 실제 미스와 구분 */
           if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
               type == INST_ACC_R) {
+            /* [한국어] 읽기 접근의 pending_hit(MSHR 대기 히트) 카운트 누적 */
             t_css.read_pending_hits += m_stats_pw.at(streamID)[type][status];
           } else if (type == GLOBAL_ACC_W) {
+            /* [한국어] 쓰기 접근의 pending_hit 카운트 누적 */
             t_css.write_pending_hits += m_stats_pw.at(streamID)[type][status];
           }
         }
 
         if (status == RESERVATION_FAIL) {
+          /* [한국어] RESERVATION_FAIL: MSHR/미스 큐/라인 할당 실패로 이 사이클에 처리 불가
+           * 읽기/쓰기별로 분리하여 병목 원인 분석에 사용 */
           if (type == GLOBAL_ACC_R || type == CONST_ACC_R ||
               type == INST_ACC_R) {
+            /* [한국어] 읽기 접근의 예약 실패 카운트 누적 */
             t_css.read_res_fails += m_stats_pw.at(streamID)[type][status];
           } else if (type == GLOBAL_ACC_W) {
+            /* [한국어] 쓰기 접근의 예약 실패 카운트 누적 */
             t_css.write_res_fails += m_stats_pw.at(streamID)[type][status];
           }
         }
@@ -2065,9 +2182,25 @@ void cache_stats::get_sub_stats_pw(struct cache_sub_stats_pw &css) const {
     }
   }
 
-  css = t_css;
+  css = t_css; /* [한국어] 모든 스트림 합산이 완료된 t_css를 출력 파라미터 css에 복사 */
 }
 
+/*
+ * [한국어]
+ * cache_stats::check_valid - (접근 타입, 요청 상태) 쌍의 유효성 검사
+ *
+ * @type: 검사할 메모리 접근 타입 (mem_access_type enum의 정수 값)
+ * @status: 검사할 캐시 요청 상태 (cache_request_status enum의 정수 값)
+ * @return: 유효한 경우 true, 범위 초과이면 false
+ *
+ * type이 [0, NUM_MEM_ACCESS_TYPE) 범위에 속하고
+ * status가 [0, NUM_CACHE_REQUEST_STATUS) 범위에 속하는지 확인한다.
+ * get_stats()에서 호출자가 전달한 배열 원소의 범위를 사전 검증할 때 사용된다.
+ * 검사 실패 시 get_stats()는 assert(0)으로 패닉하여 무효 접근을 조기에 탐지한다.
+ *
+ * 호출 체인:
+ *   cache_stats::get_stats() → [이 함수]
+ */
 bool cache_stats::check_valid(int type, int status) const {
   ///
   /// Verify a valid access_type/access_status
@@ -2079,6 +2212,23 @@ bool cache_stats::check_valid(int type, int status) const {
     return false;
 }
 
+/*
+ * [한국어]
+ * cache_stats::check_fail_valid - (접근 타입, 예약 실패 원인) 쌍의 유효성 검사
+ *
+ * @type: 검사할 메모리 접근 타입 (mem_access_type enum의 정수 값)
+ * @fail: 검사할 예약 실패 원인 (cache_reservation_fail_reason enum의 정수 값)
+ * @return: 유효한 경우 true, 범위 초과이면 false
+ *
+ * type이 [0, NUM_MEM_ACCESS_TYPE) 범위에 속하고
+ * fail이 [0, NUM_CACHE_RESERVATION_FAIL_STATUS) 범위에 속하는지 확인한다.
+ * 예약 실패 원인에는 LINE_ALLOC_FAIL, MISS_QUEUE_FULL, MSHR_ENRTY_FAIL,
+ * MSHR_MERGE_ENRTY_FAIL, MSHR_RW_PENDING 등이 있다.
+ * check_valid()와 달리 status 대신 fail_reason 인덱스를 검사하는 점이 다르다.
+ *
+ * 호출 체인:
+ *   inc_fail_stats() / 실패 통계 접근 코드 → [이 함수]
+ */
 bool cache_stats::check_fail_valid(int type, int fail) const {
   ///
   /// Verify a valid access_type/access_status
@@ -2854,41 +3004,77 @@ enum cache_request_status data_cache::wr_hit_global_we_local_wb(
 }
 
 /****** Write-miss functions (Set by config file) ******/
+/* [한국어] 쓰기 미스 처리 함수들 — 설정 파일의 캐시 정책에 따라 m_wr_miss 함수 포인터로 선택됨
+ * 정책 종류: naive(구 3.x 방식), fetch_on_write, lazy_fetch_on_read, no_write_allocate */
 
 /// Write-allocate miss: Send write request to lower level memory
 // and send a read request for the same block
+/*
+ * [한국어]
+ * data_cache::wr_miss_wa_naive - 쓰기 미스 시 write-allocate 처리 (구 GPGPU-Sim 3.x 방식)
+ *
+ * @addr: 쓰기 요청 주소
+ * @cache_index: 태그 배열에서 할당된 캐시 라인 인덱스
+ * @mf: 원본 쓰기 요청 mem_fetch 패킷
+ * @time: 현재 사이클
+ * @events: 이 사이클에 발생한 캐시 이벤트 리스트 (상위로 전달됨)
+ * @status: tag_array::access()가 반환한 상태 (MISS 또는 HIT_RESERVED)
+ * @return: MISS (성공적으로 처리됨) 또는 RESERVATION_FAIL (이 사이클에 처리 불가)
+ *
+ * write-allocate 정책의 naive 구현: 쓰기 미스 발생 시
+ *   1. miss_queue에 최대 2개 추가 슬롯(쓰기 요청 + writeback)이 확보되는지, MSHR이 가용한지 확인
+ *   2. 원본 쓰기 요청을 하위 메모리로 전송 (WRITE_REQUEST_SENT)
+ *   3. write-allocate용 읽기 요청(n_mf)을 새로 생성하여 send_read_request()로 전송
+ *   4. 교체된 블록이 MODIFIED 상태이고 write-through가 아니면 writeback 전송 (WRITE_BACK_REQUEST_SENT)
+ * fetch_on_write와 달리 쓰기 데이터를 캐시에 직접 반영하지 않고 읽기 요청만 보내는 단순 방식이다.
+ * 자원 부족(miss_queue full, MSHR full) 시 RESERVATION_FAIL을 반환하여 warp를 스톨시킨다.
+ *
+ * 호출 체인:
+ *   data_cache::send_write_request() / data_cache::access() → m_wr_miss 함수 포인터 → [이 함수]
+ *     → send_write_request() (원본 쓰기)
+ *     → send_read_request() (write-allocate 읽기)
+ *     → send_write_request() (writeback, 조건부)
+ */
 enum cache_request_status data_cache::wr_miss_wa_naive(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
-  new_addr_type block_addr = m_config.block_addr(addr);
-  new_addr_type mshr_addr = m_config.mshr_addr(mf->get_addr());
+  new_addr_type block_addr = m_config.block_addr(addr); /* [한국어] 캐시 라인 정렬 주소 추출 */
+  new_addr_type mshr_addr = m_config.mshr_addr(mf->get_addr()); /* [한국어] MSHR 룩업용 주소 (섹터 캐시는 섹터 단위, 일반은 블록 단위) */
 
   // Write allocate, maximum 3 requests (write miss, read request, write back
   // request) Conservatively ensure the worst-case request can be handled this
   // cycle
-  bool mshr_hit = m_mshrs.probe(mshr_addr);
-  bool mshr_avail = !m_mshrs.full(mshr_addr);
+  bool mshr_hit = m_mshrs.probe(mshr_addr); /* [한국어] 해당 주소가 MSHR에 이미 존재하는지 확인 (merge 가능 여부) */
+  bool mshr_avail = !m_mshrs.full(mshr_addr); /* [한국어] MSHR에 새 엔트리를 추가할 공간이 있는지 확인 */
   if (miss_queue_full(2) ||
       (!(mshr_hit && mshr_avail) &&
        !(!mshr_hit && mshr_avail &&
          (m_miss_queue.size() < m_config.m_miss_queue_size)))) {
+    /* [한국어] 자원 부족 조건 검사:
+     * miss_queue_full(2): 최악의 경우 2개 추가 슬롯(쓰기+writeback) 필요
+     * MSHR 조건: (hit이지만 merge 불가) OR (hit 없이 새 MSHR 엔트리 공간도 없음) */
     // check what is the exactly the failure reason
     if (miss_queue_full(2))
       m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                              mf->get_streamID());
+      /* [한국어] miss 큐가 가득 찬 경우 실패 원인 통계 기록 */
     else if (mshr_hit && !mshr_avail)
       m_stats.inc_fail_stats(mf->get_access_type(), MSHR_MERGE_ENRTY_FAIL,
                              mf->get_streamID());
+      /* [한국어] MSHR에 같은 주소가 있지만 merge 엔트리 한도 초과 — MSHR merge 실패 통계 */
     else if (!mshr_hit && !mshr_avail)
       m_stats.inc_fail_stats(mf->get_access_type(), MSHR_ENRTY_FAIL,
                              mf->get_streamID());
+      /* [한국어] MSHR에 주소도 없고 새 엔트리 공간도 없음 — MSHR 신규 할당 실패 통계 */
     else
-      assert(0);
+      assert(0); /* [한국어] 위 세 경우 외의 상황은 로직 버그 — 즉시 패닉 */
 
-    return RESERVATION_FAIL;
+    return RESERVATION_FAIL; /* [한국어] 자원 부족으로 이 사이클에 처리 불가, warp 스톨 */
   }
 
   send_write_request(mf, cache_event(WRITE_REQUEST_SENT), time, events);
+  /* [한국어] 원본 쓰기 요청을 하위 메모리(L2 또는 DRAM)로 전송
+   * WRITE_REQUEST_SENT 이벤트를 events에 추가하여 상위 파이프라인에 알림 */
   // Tries to send write allocate request, returns true on success and false on
   // failure
   // if(!send_write_allocate(mf, addr, block_addr, cache_index, time, events))
@@ -2899,118 +3085,199 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
                        false,  // Now performing a read
                        mf->get_access_warp_mask(), mf->get_access_byte_mask(),
                        mf->get_access_sector_mask(), m_gpu->gpgpu_ctx);
+  /* [한국어] write-allocate 읽기를 위한 새 메모리 접근 디스크립터 생성
+   * m_wr_alloc_type: 설정된 write-allocate 접근 타입 (예: GLOBAL_ACC_R)
+   * get_atom_sz(): 원자 접근 크기 — 캐시 라인 또는 섹터 크기
+   * false: 쓰기가 아닌 읽기로 수행 (캐시 라인 fetch) */
 
   mem_fetch *n_mf = new mem_fetch(
       *ma, NULL, mf->get_streamID(), mf->get_ctrl_size(), mf->get_wid(),
       mf->get_sid(), mf->get_tpc(), mf->get_mem_config(),
       m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
+  /* [한국어] write-allocate 읽기용 새 mem_fetch 패킷 생성
+   * 원본 mf의 wid/sid/tpc 등 컨텍스트 정보를 상속하여 SM 추적 가능하게 함
+   * NULL: 상위 inst 없음 (통계 목적의 요청) */
 
-  bool do_miss = false;
-  bool wb = false;
-  evicted_block_info evicted;
+  bool do_miss = false; /* [한국어] send_read_request()가 실제로 미스 큐에 추가했는지 여부 */
+  bool wb = false;       /* [한국어] 교체로 인해 writeback이 필요한지 여부 */
+  evicted_block_info evicted; /* [한국어] 교체된 블록의 주소/바이트마스크/크기 정보 */
 
   // Send read request resulting from write miss
   send_read_request(addr, block_addr, cache_index, n_mf, time, do_miss, wb,
                     evicted, events, false, true);
+  /* [한국어] write-allocate 읽기 요청을 MSHR 및 miss_queue에 추가
+   * do_miss: 미스 처리가 실제로 이루어졌으면 true
+   * wb: 교체된 블록이 dirty이면 true (writeback 필요)
+   * false: read_only 아님, true: write_allocate 요청임 */
 
   events.push_back(cache_event(WRITE_ALLOCATE_SENT));
+  /* [한국어] WRITE_ALLOCATE_SENT 이벤트를 기록하여 상위 파이프라인(shader)이 인지하게 함 */
 
   if (do_miss) {
+    /* [한국어] send_read_request()가 실제로 미스 처리를 수행한 경우 */
     // If evicted block is modified and not a write-through
     // (already modified lower level)
     if (wb && (m_config.m_write_policy != WRITE_THROUGH)) {
+      /* [한국어] 교체된 블록이 dirty이고 write-through가 아닌 경우: writeback 전송 필요
+       * write-through라면 이미 하위 메모리에 최신 데이터가 있으므로 writeback 불필요 */
       assert(status ==
              MISS);  // SECTOR_MISS and HIT_RESERVED should not send write back
+      /* [한국어] naive 방식에서 writeback은 완전 MISS일 때만 발생 — 안전성 검증 */
       mem_fetch *wb = m_memfetch_creator->alloc(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
           NULL, mf->get_streamID());
+      /* [한국어] 교체된 dirty 블록을 하위 메모리에 쓰기 위한 writeback mem_fetch 생성
+       * evicted.m_block_addr: 교체된 블록의 주소
+       * m_wrbk_type: writeback 접근 타입 (예: L1_WRBK_ACC)
+       * evicted.m_modified_size: dirty 바이트 수 — 실제 변경된 부분만 기록 */
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
+      /* [한국어] 고급 L2 해싱 사용 시 chip ID가 잘못 설정될 수 있으므로 원본 mf의 chip으로 보정 */
       wb->set_partition(mf->get_tlx_addr().sub_partition);
+      /* [한국어] 올바른 sub_partition(메모리 파티션)으로 설정하여 정확한 경로로 라우팅 */
       send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                          time, events);
+      /* [한국어] writeback 요청을 miss_queue에 추가하고 WRITE_BACK_REQUEST_SENT 이벤트 기록 */
     }
-    return MISS;
+    return MISS; /* [한국어] write-allocate 처리 성공 — 상위에 MISS 상태 반환 */
   }
 
-  return RESERVATION_FAIL;
+  return RESERVATION_FAIL; /* [한국어] send_read_request()가 처리 못한 경우 — 자원 부족 */
 }
 
+/*
+ * [한국어]
+ * data_cache::wr_miss_wa_fetch_on_write - 쓰기 미스 시 fetch-on-write write-allocate 처리
+ *
+ * @addr: 쓰기 요청 주소
+ * @cache_index: 태그 배열에서 할당된 캐시 라인 인덱스
+ * @mf: 원본 쓰기 요청 mem_fetch 패킷
+ * @time: 현재 사이클
+ * @events: 이 사이클에 발생한 캐시 이벤트 리스트
+ * @status: tag_array::access()가 반환한 상태 (MISS 또는 HIT_RESERVED)
+ * @return: MISS (성공) 또는 RESERVATION_FAIL (자원 부족)
+ *
+ * 쓰기가 전체 캐시 라인/섹터를 커버하는지(byte_mask.count() == atom_sz)에 따라 두 경로로 분기:
+ *
+ * [전체 라인 쓰기 경로]
+ *   - 하위 메모리에서 fetch 불필요 — 직접 tag_array::access()로 라인 할당
+ *   - 블록을 MODIFIED로 마킹하고 byte_mask 기록
+ *   - HIT_RESERVED이면 set_ignore_on_fill(true): 나중에 도착하는 fill이 우리 쓰기를 덮지 않도록
+ *   - 교체된 블록이 MODIFIED이고 write-through 아니면 writeback 전송
+ *
+ * [부분 라인 쓰기 경로]
+ *   - MSHR과 miss_queue 가용성 확인 (1개 슬롯 필요)
+ *   - Write-Read-Write 해저드 방지: MSHR에 이미 read_after_write pending이면 거부
+ *   - write-allocate 읽기 요청(n_mf) 생성 및 send_read_request()로 전송
+ *   - set_modified_on_fill(true): fill 도착 시 자동으로 MODIFIED 마킹
+ *   - set_byte_mask_on_fill(true): fill 도착 시 byte_mask 갱신
+ *   - 교체된 블록이 MODIFIED이면 writeback 전송
+ *
+ * 호출 체인:
+ *   data_cache::access() → m_wr_miss 함수 포인터 → [이 함수]
+ *     → m_tag_array->access() (전체 라인 경로)
+ *     → send_read_request() (부분 라인 경로)
+ *     → send_write_request() (writeback, 조건부)
+ */
 enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
-  new_addr_type block_addr = m_config.block_addr(addr);
-  new_addr_type mshr_addr = m_config.mshr_addr(mf->get_addr());
+  new_addr_type block_addr = m_config.block_addr(addr); /* [한국어] 캐시 라인 정렬 주소 */
+  new_addr_type mshr_addr = m_config.mshr_addr(mf->get_addr()); /* [한국어] MSHR 룩업용 주소 */
 
   if (mf->get_access_byte_mask().count() == m_config.get_atom_sz()) {
+    /* [한국어] 쓰기가 전체 캐시 라인/섹터를 커버하는 경우
+     * byte_mask.count()가 atom_sz(섹터 크기)와 같으면 모든 바이트를 덮어쓰므로
+     * 하위 메모리에서 fetch 없이 바로 MODIFIED로 마킹 가능 */
     // if the request writes to the whole cache line/sector, then, write and set
     // cache line Modified. and no need to send read request to memory or
     // reserve mshr
 
     if (miss_queue_full(0)) {
+      /* [한국어] writeback 가능성을 위한 miss_queue 슬롯 0개 추가 필요 — 기본 가용성 확인 */
       m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                              mf->get_streamID());
       return RESERVATION_FAIL;  // cannot handle request this cycle
+      /* [한국어] miss_queue 가득 찬 경우 이 사이클 처리 불가 */
     }
 
-    bool wb = false;
-    evicted_block_info evicted;
+    bool wb = false;            /* [한국어] 교체로 인한 writeback 필요 여부 */
+    evicted_block_info evicted; /* [한국어] 교체된 블록 정보 */
 
     cache_request_status status =
         m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
-    assert(status != HIT);
-    cache_block_t *block = m_tag_array->get_block(cache_index);
+    /* [한국어] 태그 배열에 접근하여 캐시 라인 할당 — 함수 파라미터 status를 지역 변수로 가림 */
+    assert(status != HIT); /* [한국어] 쓰기 미스 경로이므로 HIT은 불가 — 안전성 검증 */
+    cache_block_t *block = m_tag_array->get_block(cache_index); /* [한국어] 할당된 캐시 블록 포인터 획득 */
     if (!block->is_modified_line()) {
+      /* [한국어] 이전에 MODIFIED 상태가 아니었다면 dirty 카운터 증가
+       * is_modified_line()이 false = 이 섹터 중 어떤 섹터도 MODIFIED 아님 */
       m_tag_array->inc_dirty();
     }
     block->set_status(MODIFIED, mf->get_access_sector_mask());
+    /* [한국어] 해당 섹터를 MODIFIED 상태로 마킹 — 나중에 evict 시 writeback 필요함을 표시 */
     block->set_byte_mask(mf);
+    /* [한국어] mf의 byte_mask를 블록에 기록 — 어떤 바이트가 실제로 쓰였는지 추적 */
     if (status == HIT_RESERVED)
       block->set_ignore_on_fill(true, mf->get_access_sector_mask());
+    /* [한국어] HIT_RESERVED: 이 라인에 대한 읽기 요청이 이미 진행 중인 경우
+     * ignore_on_fill=true: fill(데이터 도착)이 와도 이 섹터는 우리 쓰기 값으로 덮지 않도록 보호 */
 
     if (status != RESERVATION_FAIL) {
+      /* [한국어] 라인 할당이 성공한 경우 — 교체 블록 writeback 처리 */
       // If evicted block is modified and not a write-through
       // (already modified lower level)
       if (wb && (m_config.m_write_policy != WRITE_THROUGH)) {
+        /* [한국어] 교체된 블록이 dirty이고 write-through 정책이 아니면 writeback 필요 */
         mem_fetch *wb = m_memfetch_creator->alloc(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
             NULL, mf->get_streamID());
+        /* [한국어] 교체된 dirty 블록의 writeback mem_fetch 생성 */
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
+        /* [한국어] 고급 L2 해싱 시 chip ID 보정 */
         wb->set_partition(mf->get_tlx_addr().sub_partition);
+        /* [한국어] 올바른 메모리 파티션으로 설정 */
         send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                            time, events);
+        /* [한국어] writeback 요청을 miss_queue에 추가 및 이벤트 기록 */
       }
-      return MISS;
+      return MISS; /* [한국어] 전체 라인 쓰기 성공 — MISS 반환 (write-allocate 완료) */
     }
-    return RESERVATION_FAIL;
+    return RESERVATION_FAIL; /* [한국어] 라인 할당 실패 (RESERVATION_FAIL) — warp 스톨 */
   } else {
-    bool mshr_hit = m_mshrs.probe(mshr_addr);
-    bool mshr_avail = !m_mshrs.full(mshr_addr);
+    /* [한국어] 부분 라인 쓰기 경로: 쓰기 데이터가 전체 섹터를 커버하지 않는 경우
+     * 나머지 바이트를 하위 메모리에서 fetch해야 하므로 읽기 요청이 필요 */
+    bool mshr_hit = m_mshrs.probe(mshr_addr); /* [한국어] MSHR에 같은 주소 이미 존재 여부 */
+    bool mshr_avail = !m_mshrs.full(mshr_addr); /* [한국어] MSHR에 추가 엔트리 공간 여부 */
     if (miss_queue_full(1) ||
         (!(mshr_hit && mshr_avail) &&
          !(!mshr_hit && mshr_avail &&
            (m_miss_queue.size() < m_config.m_miss_queue_size)))) {
+      /* [한국어] 자원 부족 검사: miss_queue 1개 슬롯 필요 + MSHR 가용성 확인 */
       // check what is the exactly the failure reason
       if (miss_queue_full(1))
         m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                                mf->get_streamID());
+        /* [한국어] miss 큐 가득 참 — 실패 통계 기록 */
       else if (mshr_hit && !mshr_avail)
         m_stats.inc_fail_stats(mf->get_access_type(), MSHR_MERGE_ENRTY_FAIL,
                                mf->get_streamID());
+        /* [한국어] MSHR merge 한도 초과 — 실패 통계 기록 */
       else if (!mshr_hit && !mshr_avail)
         m_stats.inc_fail_stats(mf->get_access_type(), MSHR_ENRTY_FAIL,
                                mf->get_streamID());
+        /* [한국어] MSHR 신규 할당 불가 — 실패 통계 기록 */
       else
-        assert(0);
+        assert(0); /* [한국어] 예상치 못한 경우 — 로직 버그 패닉 */
 
-      return RESERVATION_FAIL;
+      return RESERVATION_FAIL; /* [한국어] 자원 부족 — warp 스톨 */
     }
 
     // prevent Write - Read - Write in pending mshr
@@ -3018,10 +3285,14 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
     // the pending read request will read incorrect result from the second write
     if (m_mshrs.probe(mshr_addr) &&
         m_mshrs.is_read_after_write_pending(mshr_addr) && mf->is_write()) {
+      /* [한국어] Write-Read-Write 해저드 방지:
+       * 같은 주소에 대해 쓰기 요청 후 읽기가 MSHR에 pending 중인데 또 쓰기가 오면
+       * 첫 번째 쓰기 값이 두 번째 쓰기로 덮어씌워져 읽기 결과가 잘못됨 → 거부 */
       // assert(0);
       m_stats.inc_fail_stats(mf->get_access_type(), MSHR_RW_PENDING,
                              mf->get_streamID());
-      return RESERVATION_FAIL;
+      /* [한국어] MSHR_RW_PENDING 실패 통계 기록 */
+      return RESERVATION_FAIL; /* [한국어] 해저드 회피를 위해 이 사이클 처리 거부 */
     }
 
     const mem_access_t *ma = new mem_access_t(
@@ -3029,129 +3300,230 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
         false,  // Now performing a read
         mf->get_access_warp_mask(), mf->get_access_byte_mask(),
         mf->get_access_sector_mask(), m_gpu->gpgpu_ctx);
+    /* [한국어] write-allocate 읽기 디스크립터 생성 — 부분 쓰기를 완성하기 위한 fetch */
 
     mem_fetch *n_mf = new mem_fetch(
         *ma, NULL, mf->get_streamID(), mf->get_ctrl_size(), mf->get_wid(),
         mf->get_sid(), mf->get_tpc(), mf->get_mem_config(),
         m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, NULL, mf);
+    /* [한국어] write-allocate 읽기용 새 mem_fetch 생성
+     * 마지막 인자 mf: 원본 쓰기 요청을 상위 mf로 연결하여 MSHR merge 시 추적 가능 */
 
-    new_addr_type block_addr = m_config.block_addr(addr);
-    bool do_miss = false;
-    bool wb = false;
-    evicted_block_info evicted;
+    new_addr_type block_addr = m_config.block_addr(addr); /* [한국어] 캐시 라인 정렬 주소 (else 블록 내 재선언) */
+    bool do_miss = false; /* [한국어] 실제 미스 처리 수행 여부 */
+    bool wb = false;       /* [한국어] writeback 필요 여부 */
+    evicted_block_info evicted; /* [한국어] 교체된 블록 정보 */
     send_read_request(addr, block_addr, cache_index, n_mf, time, do_miss, wb,
                       evicted, events, false, true);
+    /* [한국어] write-allocate 읽기 요청을 MSHR 및 miss_queue에 추가 */
 
-    cache_block_t *block = m_tag_array->get_block(cache_index);
+    cache_block_t *block = m_tag_array->get_block(cache_index); /* [한국어] 할당된 캐시 블록 포인터 */
     block->set_modified_on_fill(true, mf->get_access_sector_mask());
+    /* [한국어] fill 도착 시 자동으로 MODIFIED 상태로 마킹 — 우리의 쓰기가 반영됨을 표시 */
     block->set_byte_mask_on_fill(true);
+    /* [한국어] fill 도착 시 byte_mask를 갱신하여 어느 바이트가 쓰였는지 추적 */
 
     events.push_back(cache_event(WRITE_ALLOCATE_SENT));
+    /* [한국어] WRITE_ALLOCATE_SENT 이벤트 기록 */
 
     if (do_miss) {
+      /* [한국어] 읽기 요청이 실제로 MSHR에 추가된 경우 */
       // If evicted block is modified and not a write-through
       // (already modified lower level)
       if (wb && (m_config.m_write_policy != WRITE_THROUGH)) {
+        /* [한국어] 교체된 블록이 dirty이고 write-through 정책이 아니면 writeback 필요 */
         mem_fetch *wb = m_memfetch_creator->alloc(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
             NULL, mf->get_streamID());
+        /* [한국어] 교체된 dirty 블록의 writeback mem_fetch 생성 */
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
+        /* [한국어] 고급 L2 해싱 시 chip ID 보정 */
         wb->set_partition(mf->get_tlx_addr().sub_partition);
+        /* [한국어] 올바른 메모리 파티션으로 설정 */
         send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                            time, events);
+        /* [한국어] writeback 요청 전송 및 이벤트 기록 */
       }
-      return MISS;
+      return MISS; /* [한국어] 부분 쓰기 write-allocate 처리 성공 */
     }
-    return RESERVATION_FAIL;
+    return RESERVATION_FAIL; /* [한국어] 읽기 요청 처리 실패 — warp 스톨 */
   }
 }
 
+/*
+ * [한국어]
+ * data_cache::wr_miss_wa_lazy_fetch_on_read - lazy fetch-on-read write-allocate 처리
+ *
+ * @addr: 쓰기 요청 주소
+ * @cache_index: 태그 배열에서 할당된 캐시 라인 인덱스
+ * @mf: 원본 쓰기 요청 mem_fetch 패킷
+ * @time: 현재 사이클
+ * @events: 이 사이클에 발생한 캐시 이벤트 리스트
+ * @status: tag_array::access()가 반환한 상태 (호출자가 이 함수 내에서는 m_status로 재명명)
+ * @return: MISS (성공) 또는 RESERVATION_FAIL (자원 부족)
+ *
+ * "Lazy fetch-on-read" 방식: 쓰기 미스 시 즉시 하위 메모리에서 라인을 fetch하지 않고,
+ * 캐시에 라인을 할당하고 MODIFIED로 마킹한 뒤, 나중에 읽기 미스가 발생할 때 fetch.
+ * 처리 단계:
+ *   1. miss_queue에 최소 1개 슬롯이 있는지 확인 (writeback 대비)
+ *   2. write-through 정책이면 즉시 하위 메모리로 쓰기 전송
+ *   3. tag_array::access()로 캐시 라인 할당 (MISS 또는 HIT_RESERVED)
+ *   4. 블록을 MODIFIED로 마킹, byte_mask 기록
+ *   5. HIT_RESERVED이면 fill 도착 시 우리 쓰기를 보존하는 플래그 설정
+ *      (ignore_on_fill, modified_on_fill, byte_mask_on_fill)
+ *   6. 전체 라인 쓰기: set_m_readable(true) → 나중에 읽어도 유효
+ *      부분 라인 쓰기: set_m_readable(false) → 나중에 읽기 시 SECTOR_MISS 발생하여 fetch
+ *   7. update_m_readable()로 dirty 바이트 마스크 기반 readable 상태 업데이트
+ *   8. 교체된 블록이 MODIFIED + write-through 아니면 writeback 전송
+ *
+ * 호출 체인:
+ *   data_cache::access() → m_wr_miss 함수 포인터 → [이 함수]
+ *     → m_tag_array->access() (라인 할당)
+ *     → update_m_readable() (readable 상태 갱신)
+ *     → send_write_request() (write-through 및 writeback, 조건부)
+ */
 enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
-  new_addr_type block_addr = m_config.block_addr(addr);
+  new_addr_type block_addr = m_config.block_addr(addr); /* [한국어] 캐시 라인 정렬 주소 */
 
   // if the request writes to the whole cache line/sector, then, write and set
   // cache line Modified. and no need to send read request to memory or reserve
   // mshr
 
   if (miss_queue_full(0)) {
+    /* [한국어] miss_queue 가용성 확인 (writeback을 위한 최소 슬롯 1개 필요) */
     m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                            mf->get_streamID());
     return RESERVATION_FAIL;  // cannot handle request this cycle
+    /* [한국어] miss_queue 가득 참 — 이 사이클 처리 불가, warp 스톨 */
   }
 
   if (m_config.m_write_policy == WRITE_THROUGH) {
+    /* [한국어] write-through 정책인 경우: 캐시와 동시에 하위 메모리에도 즉시 쓰기
+     * lazy_fetch_on_read는 주로 write-back 정책과 조합되지만 write-through도 지원 */
     send_write_request(mf, cache_event(WRITE_REQUEST_SENT), time, events);
+    /* [한국어] 원본 쓰기 요청을 하위 메모리로 전송 */
   }
 
-  bool wb = false;
-  evicted_block_info evicted;
+  bool wb = false;            /* [한국어] 교체로 인한 writeback 필요 여부 */
+  evicted_block_info evicted; /* [한국어] 교체된 블록 정보 */
 
   cache_request_status m_status =
       m_tag_array->access(block_addr, time, cache_index, wb, evicted, mf);
-  assert(m_status != HIT);
-  cache_block_t *block = m_tag_array->get_block(cache_index);
+  /* [한국어] 태그 배열에 접근하여 캐시 라인 할당 — MISS 또는 HIT_RESERVED 반환
+   * 파라미터 status와 구분하기 위해 m_status로 명명 */
+  assert(m_status != HIT); /* [한국어] 쓰기 미스 경로이므로 HIT 불가 — 안전성 검증 */
+  cache_block_t *block = m_tag_array->get_block(cache_index); /* [한국어] 할당된 캐시 블록 포인터 */
   if (!block->is_modified_line()) {
+    /* [한국어] 어떤 섹터도 MODIFIED 아니었다면 dirty 카운터 증가 */
     m_tag_array->inc_dirty();
   }
   block->set_status(MODIFIED, mf->get_access_sector_mask());
+  /* [한국어] 해당 섹터를 MODIFIED로 마킹 — 하위 메모리보다 새로운 데이터가 있음을 표시 */
   block->set_byte_mask(mf);
+  /* [한국어] mf의 byte_mask를 블록에 기록 — 어떤 바이트가 실제로 쓰였는지 추적 */
   if (m_status == HIT_RESERVED) {
+    /* [한국어] HIT_RESERVED: 이 라인에 대한 읽기 fetch가 이미 진행 중인 경우
+     * fill 도착 시 우리 쓰기 데이터를 보존하기 위한 플래그 설정 */
     block->set_ignore_on_fill(true, mf->get_access_sector_mask());
+    /* [한국어] fill이 와도 이 섹터의 데이터를 덮어쓰지 않도록 (우리 쓰기 보호) */
     block->set_modified_on_fill(true, mf->get_access_sector_mask());
+    /* [한국어] fill 도착 시에도 MODIFIED 상태 유지 (fill이 상태를 VALID로 바꾸지 않도록) */
     block->set_byte_mask_on_fill(true);
+    /* [한국어] fill 도착 시 byte_mask 갱신하여 어느 바이트가 쓰였는지 계속 추적 */
   }
 
   if (mf->get_access_byte_mask().count() == m_config.get_atom_sz()) {
+    /* [한국어] 전체 섹터를 쓰는 경우: 모든 바이트가 유효하므로 즉시 readable=true */
     block->set_m_readable(true, mf->get_access_sector_mask());
+    /* [한국어] 이 섹터는 fetch 없이도 읽기 가능 — 나중에 읽기 히트 처리 가능 */
   } else {
+    /* [한국어] 부분 섹터 쓰기: 나머지 바이트가 아직 유효하지 않으므로 readable=false
+     * 나중에 이 섹터를 읽으면 SECTOR_MISS → 하위 메모리에서 fetch 후 merge */
     block->set_m_readable(false, mf->get_access_sector_mask());
     if (m_status == HIT_RESERVED)
       block->set_readable_on_fill(true, mf->get_access_sector_mask());
+    /* [한국어] HIT_RESERVED인 경우: fill 도착 시 readable=true로 자동 갱신
+     * fill이 오면 나머지 바이트가 채워지므로 그때부터 읽기 가능 */
   }
   update_m_readable(mf, cache_index);
+  /* [한국어] dirty byte_mask를 기반으로 블록 전체의 readable 상태를 재계산
+   * 섹터별 readable 비트를 종합하여 블록 수준의 readable 상태 결정 */
 
   if (m_status != RESERVATION_FAIL) {
+    /* [한국어] 라인 할당 성공 시 교체 블록 writeback 처리 */
     // If evicted block is modified and not a write-through
     // (already modified lower level)
     if (wb && (m_config.m_write_policy != WRITE_THROUGH)) {
+      /* [한국어] 교체된 블록이 dirty이고 write-through 아닌 경우 writeback 전송 */
       mem_fetch *wb = m_memfetch_creator->alloc(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
           NULL, mf->get_streamID());
+      /* [한국어] 교체된 dirty 블록의 writeback mem_fetch 생성 */
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
+      /* [한국어] 고급 L2 해싱 시 chip ID 보정 */
       wb->set_partition(mf->get_tlx_addr().sub_partition);
+      /* [한국어] 올바른 메모리 파티션으로 설정 */
       send_write_request(wb, cache_event(WRITE_BACK_REQUEST_SENT, evicted),
                          time, events);
+      /* [한국어] writeback 요청 전송 및 이벤트 기록 */
     }
-    return MISS;
+    return MISS; /* [한국어] lazy fetch-on-read 쓰기 미스 처리 성공 */
   }
-  return RESERVATION_FAIL;
+  return RESERVATION_FAIL; /* [한국어] 라인 할당 실패 (RESERVATION_FAIL) — warp 스톨 */
 }
 
 /// No write-allocate miss: Simply send write request to lower level memory
+/*
+ * [한국어]
+ * data_cache::wr_miss_no_wa - 쓰기 미스 시 no-write-allocate 처리
+ *
+ * @addr: 쓰기 요청 주소 (이 함수에서는 직접 사용하지 않음)
+ * @cache_index: 태그 배열에서의 인덱스 (이 함수에서는 사용하지 않음)
+ * @mf: 원본 쓰기 요청 mem_fetch 패킷
+ * @time: 현재 사이클
+ * @events: 이 사이클에 발생한 캐시 이벤트 리스트
+ * @status: tag_array::access()가 반환한 상태 (이 함수에서는 사용하지 않음)
+ * @return: MISS (성공) 또는 RESERVATION_FAIL (miss_queue 가득 참)
+ *
+ * No-write-allocate 정책: 쓰기 미스 발생 시 캐시에 라인을 할당하지 않고
+ * 단순히 하위 메모리(L2/DRAM)로 쓰기 요청만 전송한다.
+ * GPU에서는 스레드 수가 매우 많아 write buffer를 유지하기 어려우므로 write-through 방식으로 처리.
+ * 캐시 라인을 할당하지 않으므로 eviction이나 MSHR 관리가 불필요하여 가장 단순한 쓰기 미스 처리.
+ * write-miss가 빈번한 워크로드에서 캐시 오염(pollution)을 방지하는 효과가 있다.
+ *
+ * 호출 체인:
+ *   data_cache::access() → m_wr_miss 함수 포인터 → [이 함수]
+ *     → send_write_request() (하위 메모리로 즉시 전송)
+ */
 enum cache_request_status data_cache::wr_miss_no_wa(
     new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
     std::list<cache_event> &events, enum cache_request_status status) {
   if (miss_queue_full(0)) {
+    /* [한국어] miss_queue 가용성 확인 — 쓰기 요청을 위한 슬롯 필요 */
     m_stats.inc_fail_stats(mf->get_access_type(), MISS_QUEUE_FULL,
                            mf->get_streamID());
+    /* [한국어] MISS_QUEUE_FULL 실패 통계 기록 */
     return RESERVATION_FAIL;  // cannot handle request this cycle
+    /* [한국어] miss_queue 가득 참 — 이 사이클 처리 불가, warp 스톨 */
   }
 
   // on miss, generate write through (no write buffering -- too many threads for
   // that)
   send_write_request(mf, cache_event(WRITE_REQUEST_SENT), time, events);
+  /* [한국어] 캐시 라인 할당 없이 원본 쓰기 요청을 하위 메모리로 바로 전송
+   * WRITE_REQUEST_SENT 이벤트를 events에 추가하여 상위 파이프라인에 알림 */
 
-  return MISS;
+  return MISS; /* [한국어] no-write-allocate 처리 완료 — MISS 반환 (캐시에는 라인 없음) */
 }
 
 /****** Read hit functions (Set by config file) ******/
@@ -3695,65 +4067,137 @@ void tex_cache::cycle() {
 }
 
 /// Place returning cache block into reorder buffer
+/*
+ * [한국어]
+ * tex_cache::fill - 하위 메모리에서 반환된 텍스처 캐시 데이터를 ROB에 배치
+ *
+ * @mf: 하위 메모리에서 fill 응답으로 반환된 mem_fetch 패킷
+ * @time: 현재 사이클
+ *
+ * 텍스처 캐시 미스로 발송된 읽기 요청에 대한 응답이 하위 메모리에서 도착했을 때 호출된다.
+ * ROB(Reorder Buffer)는 텍스처 접근의 순서를 보장하기 위한 구조로,
+ * cycle()에서 ROB 선두 엔트리가 ready 상태가 되면 result_fifo로 이동한다.
+ *
+ * 처리 단계:
+ *   1. SECTOR_TEX_FIFO 모드: 섹터 단위 응답을 처리 — pending_read를 감소시키고
+ *      모든 섹터가 도착하면 원본 mf로 교체 (아직 대기 중이면 이 mf 삭제 후 즉시 반환)
+ *   2. m_extra_mf_fields에서 이 mf의 ROB 인덱스(rob_index)를 조회
+ *   3. mf 상태를 m_rob_status로 설정 (텍스처 fill 완료 상태)
+ *   4. ROB에서 해당 엔트리를 찾아 m_ready=true, m_time=time으로 마킹
+ *   5. cycle()이 다음 사이클에 ROB 선두를 체크하여 result_fifo로 이동
+ *
+ * 호출 체인:
+ *   memory_sub_partition::push() (하위 메모리 응답 수신) → [이 함수]
+ *   tex_cache::cycle() (ROB에서 ready 엔트리 처리)
+ */
 void tex_cache::fill(mem_fetch *mf, unsigned time) {
   if (m_config.m_mshr_type == SECTOR_TEX_FIFO) {
-    assert(mf->get_original_mf());
+    /* [한국어] SECTOR_TEX_FIFO 모드: 섹터 기반 텍스처 캐시에서 섹터별 응답 처리
+     * 하나의 캐시 라인이 여러 섹터로 나뉘어 요청될 수 있으므로 모든 섹터 응답 대기 */
+    assert(mf->get_original_mf()); /* [한국어] 섹터 응답은 반드시 원본 mf를 가져야 함 */
     extra_mf_fields_lookup::iterator e =
         m_extra_mf_fields.find(mf->get_original_mf());
-    assert(e != m_extra_mf_fields.end());
+    /* [한국어] 원본 mf로 extra_mf_fields 조회 — ROB 인덱스 및 pending_read 카운터 위치 */
+    assert(e != m_extra_mf_fields.end()); /* [한국어] 등록되지 않은 mf는 버그 */
     e->second.pending_read--;
+    /* [한국어] 이 섹터가 도착했으므로 대기 중인 섹터 수 감소 */
 
     if (e->second.pending_read > 0) {
+      /* [한국어] 아직 다른 섹터 응답이 남아 있는 경우 — 모든 섹터 도착까지 대기 */
       // wait for the other requests to come back
-      delete mf;
-      return;
+      delete mf; /* [한국어] 이 섹터 패킷은 더 이상 필요 없으므로 해제 */
+      return;     /* [한국어] 모든 섹터 도착 전까지 ROB 처리를 건너뜀 */
     } else {
-      mem_fetch *temp = mf;
-      mf = mf->get_original_mf();
-      delete temp;
+      /* [한국어] 모든 섹터 응답이 도착한 경우 — 원본 mf로 교체하여 이후 처리 진행 */
+      mem_fetch *temp = mf;          /* [한국어] 마지막 섹터 패킷을 임시 보관 */
+      mf = mf->get_original_mf();   /* [한국어] 이후 처리는 원본 mf 기준으로 진행 */
+      delete temp;                   /* [한국어] 마지막 섹터 패킷 해제 */
     }
   }
 
   extra_mf_fields_lookup::iterator e = m_extra_mf_fields.find(mf);
-  assert(e != m_extra_mf_fields.end());
-  assert(e->second.m_valid);
-  assert(!m_rob.empty());
+  /* [한국어] 원본 mf로 extra_mf_fields 조회 — ROB 인덱스 및 유효성 정보 */
+  assert(e != m_extra_mf_fields.end()); /* [한국어] 등록되지 않은 mf는 버그 */
+  assert(e->second.m_valid);            /* [한국어] 유효하지 않은 엔트리는 버그 */
+  assert(!m_rob.empty());               /* [한국어] ROB가 비어 있으면 대응하는 엔트리가 없는 버그 */
   mf->set_status(m_rob_status, time);
+  /* [한국어] mf 상태를 m_rob_status(텍스처 fill 완료 상태)로 업데이트
+   * m_rob_status는 tex_cache 초기화 시 설정된 상수 (예: IN_SHADER_FETCHED) */
 
-  unsigned rob_index = e->second.m_rob_index;
-  rob_entry &r = m_rob.peek(rob_index);
-  assert(!r.m_ready);
-  r.m_ready = true;
-  r.m_time = time;
+  unsigned rob_index = e->second.m_rob_index; /* [한국어] 이 mf에 해당하는 ROB 엔트리 인덱스 */
+  rob_entry &r = m_rob.peek(rob_index);       /* [한국어] ROB에서 해당 인덱스의 엔트리 참조 */
+  assert(!r.m_ready); /* [한국어] 아직 ready가 아닌 상태여야 함 (중복 fill 방지) */
+  r.m_ready = true;   /* [한국어] ROB 엔트리를 ready 상태로 마킹 — cycle()에서 처리 가능 */
+  r.m_time = time;    /* [한국어] fill 완료 시각 기록 — 지연 시간 추적에 사용 */
   assert(r.m_block_addr == m_config.block_addr(mf->get_addr()));
+  /* [한국어] ROB 엔트리의 블록 주소와 도착한 mf의 블록 주소가 일치하는지 검증 */
 }
 
+/*
+ * [한국어]
+ * tex_cache::display_state - 텍스처 캐시 내부 상태를 파일로 출력 (디버그용)
+ *
+ * @fp: 출력 대상 파일 포인터
+ *
+ * 텍스처 캐시의 현재 내부 상태를 사람이 읽을 수 있는 형식으로 출력한다.
+ * 시뮬레이터 디버깅, 교착 상태 탐지, 상태 검증 등의 목적으로 사용된다.
+ * 출력 내용:
+ *   - fragment_fifo: 텍스처 프래그먼트(접근 요청) 대기 큐의 현재 사용량/최대 용량
+ *   - ROB(Reorder Buffer): 미스 응답 대기 버퍼의 사용량/최대 용량 및 각 엔트리 상태
+ *     (ready/pending, 완료 시각, 캐시 라인 인덱스, 요청 정보)
+ *   - request_fifo: 하위 메모리로 전송 대기 중인 요청 큐의 사용량/최대 용량
+ *   - fragment_fifo의 최선두(가장 오래된) 엔트리의 히트/미스 상태 및 요청 정보
+ * const 함수이므로 내부 상태를 변경하지 않는다.
+ *
+ * 호출 체인:
+ *   shader.cc (디버그 출력) 또는 시뮬레이터 진단 코드 → [이 함수]
+ */
 void tex_cache::display_state(FILE *fp) const {
   fprintf(fp, "%s (texture cache) state:\n", m_name.c_str());
+  /* [한국어] 텍스처 캐시 이름과 함께 상태 출력 헤더 */
   fprintf(fp, "fragment fifo entries  = %u / %u\n", m_fragment_fifo.size(),
           m_fragment_fifo.capacity());
+  /* [한국어] fragment_fifo 현재 사용량 / 최대 용량 출력
+   * fragment_fifo: cycle()에서 접근 요청을 단계별로 처리하는 FIFO 큐 */
   fprintf(fp, "reorder buffer entries = %u / %u\n", m_rob.size(),
           m_rob.capacity());
+  /* [한국어] ROB 현재 사용량 / 최대 용량 출력
+   * ROB: 하위 메모리에서 데이터가 도착하기를 기다리는 엔트리들의 버퍼 */
   fprintf(fp, "request fifo entries   = %u / %u\n", m_request_fifo.size(),
           m_request_fifo.capacity());
+  /* [한국어] request_fifo 현재 사용량 / 최대 용량 출력
+   * request_fifo: 하위 메모리로 전송 대기 중인 읽기 요청 FIFO */
   if (!m_rob.empty()) fprintf(fp, "reorder buffer contents:\n");
+  /* [한국어] ROB가 비어 있지 않은 경우에만 엔트리 상세 출력 */
   for (int n = m_rob.size() - 1; n >= 0; n--) {
+    /* [한국어] ROB 엔트리를 오래된 순서(최선두)부터 최신 순으로 순회
+     * n=size-1이 가장 최근에 추가된 엔트리, n=0이 가장 오래된 엔트리 */
     unsigned index = (m_rob.next_pop_index() + n) % m_rob.capacity();
-    const rob_entry &r = m_rob.peek(index);
+    /* [한국어] 순환 버퍼에서 실제 배열 인덱스를 계산
+     * next_pop_index(): 다음에 pop될 위치(선두), +n으로 n번째 뒤 엔트리 접근 */
+    const rob_entry &r = m_rob.peek(index); /* [한국어] 해당 인덱스의 ROB 엔트리 참조 */
     fprintf(fp, "tex rob[%3d] : %s ", index,
             (r.m_ready ? "ready  " : "pending"));
+    /* [한국어] ROB 인덱스와 ready/pending 상태 출력 */
     if (r.m_ready)
       fprintf(fp, "@%6u", r.m_time);
+    /* [한국어] ready 상태이면 완료된 사이클 시각 출력 */
     else
-      fprintf(fp, "       ");
+      fprintf(fp, "       "); /* [한국어] pending 상태이면 공백으로 정렬 유지 */
     fprintf(fp, "[idx=%4u]", r.m_index);
+    /* [한국어] 이 ROB 엔트리가 가리키는 캐시 라인 인덱스 출력 */
     r.m_request->print(fp, false);
+    /* [한국어] 이 엔트리에 연결된 mem_fetch 요청 정보 출력 (false: 축약 형식) */
   }
   if (!m_fragment_fifo.empty()) {
+    /* [한국어] fragment_fifo가 비어 있지 않은 경우 선두 엔트리 출력 */
     fprintf(fp, "fragment fifo (oldest) :");
     fragment_entry &f = m_fragment_fifo.peek();
+    /* [한국어] fragment_fifo의 선두(가장 오래된) 엔트리 참조 */
     fprintf(fp, "%s:          ", f.m_miss ? "miss" : "hit ");
+    /* [한국어] 선두 엔트리가 미스 처리 중인지 히트인지 출력 */
     f.m_request->print(fp, false);
+    /* [한국어] 선두 엔트리에 연결된 요청 정보 출력 */
   }
 }
 /******************************************************************************************************************************************/

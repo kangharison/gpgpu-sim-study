@@ -1112,131 +1112,208 @@ struct sector_cache_block : public cache_block_t {
   }
 };
 
-enum replacement_policy_t { LRU, FIFO };
+/* [한국어] 캐시 라인 교체 정책 열거형.
+ * tag_array::access()에서 교체 후보 라인 선택 시 m_replacement_policy 필드로 적용.
+ * LRU: 가장 오래전에 접근된 라인 교체 — 시간적 지역성 활용에 유리하나 연산 오버헤드 존재.
+ * FIFO: 가장 먼저 할당된 라인 교체 — 할당 순서만 기록하면 되어 구현이 단순함. */
+enum replacement_policy_t {
+  LRU,  /* [한국어] Least Recently Used — 마지막 접근 시각 기준으로 가장 오래된 라인 교체 */
+  FIFO  /* [한국어] First In First Out — 할당 시각 기준으로 가장 먼저 들어온 라인 교체 */
+};
 
+/* [한국어] 캐시 쓰기 정책 열거형.
+ * gpgpusim.config 문자열의 'wp' 필드로 지정되며 cache_config::init()에서 m_write_policy에 저장.
+ * data_cache::init()에서 m_wr_hit 함수 포인터를 이 정책에 따라 선택한다.
+ * 설정 문자 매핑: R=READ_ONLY, B=WRITE_BACK, T=WRITE_THROUGH, E=WRITE_EVICT, L=LOCAL_WB_GLOBAL_WT */
 enum write_policy_t {
-  READ_ONLY,
-  WRITE_BACK,
-  WRITE_THROUGH,
-  WRITE_EVICT,
-  LOCAL_WB_GLOBAL_WT
+  READ_ONLY,        /* [한국어] 쓰기 불가 읽기 전용 캐시 — 텍스처/상수 캐시에 사용. 현재는 별도 read_only_cache 클래스로 대체됨 */
+  WRITE_BACK,       /* [한국어] 더티 라인 축출 시에만 하위 메모리 갱신 — L1/L2 데이터 캐시 주요 정책 */
+  WRITE_THROUGH,    /* [한국어] 매 쓰기마다 캐시와 하위 메모리를 동시 갱신 — 쓰기 대역폭 증가 */
+  WRITE_EVICT,      /* [한국어] 쓰기 히트 시 해당 라인 무효화 후 하위 메모리로 직접 쓰기 — L1 전역 메모리 정책 */
+  LOCAL_WB_GLOBAL_WT /* [한국어] 로컬 메모리는 WRITE_BACK, 전역 메모리는 WRITE_THROUGH (Fermi 혼합 정책) */
 };
 
-enum allocation_policy_t { ON_MISS, ON_FILL, STREAMING };
+/* [한국어] 캐시 라인 할당 시점 정책 열거형.
+ * gpgpusim.config 'ap' 필드로 지정되며 cache_config::init()에서 m_alloc_policy에 저장.
+ * ON_MISS와 STREAMING의 핵심 차이: STREAMING은 내부적으로 ON_FILL로 변환되어
+ * 라인 할당 실패(LINE_ALLOC_FAIL) 스톨을 제거한다. 설정 문자: m=ON_MISS, f=ON_FILL, s=STREAMING */
+enum allocation_policy_t {
+  ON_MISS,    /* [한국어] 캐시 미스 탐지 즉시 RESERVED 라인 할당 — 전통적인 방식, MSHR와 라인 수 일치 */
+  ON_FILL,    /* [한국어] 하위 메모리 응답(fill) 도착 시 라인 할당 — RESERVED 상태 없음, 교체 시 dirty 라인 evict 불가 */
+  STREAMING   /* [한국어] 스트리밍 워크로드용 특수 정책 — 내부적으로 ON_FILL로 변환, MSHR=라인 수로 설정 (Pascal/Volta 스타일) */
+};
 
+/* [한국어] 쓰기 미스 시 캐시 라인 할당 방식 열거형.
+ * gpgpusim.config 'wap' 필드로 지정되며 cache_config::init()에서 m_write_alloc_policy에 저장.
+ * data_cache::init()에서 m_wr_miss 함수 포인터를 이 정책에 따라 선택한다.
+ * 참고: Jouppi, "Cache write policies and performance", ISCA 1993.
+ * 설정 문자 매핑: N=NO_WRITE_ALLOCATE, W=WRITE_ALLOCATE, F=FETCH_ON_WRITE, L=LAZY_FETCH_ON_READ */
 enum write_allocate_policy_t {
-  NO_WRITE_ALLOCATE,
-  WRITE_ALLOCATE,
-  FETCH_ON_WRITE,
-  LAZY_FETCH_ON_READ
+  NO_WRITE_ALLOCATE,    /* [한국어] 쓰기 미스 시 라인 할당 없이 하위 메모리로 직접 전달 — wr_miss_no_wa() 사용 */
+  WRITE_ALLOCATE,       /* [한국어] 쓰기 미스 시 WRITE+READ 동시 발행 후 라인 할당 — GPGPU-Sim 3.x 레거시 방식, wr_miss_wa_naive() 사용 */
+  FETCH_ON_WRITE,       /* [한국어] 쓰기 미스 시 먼저 라인 fetch 후 쓰기 적용 — Volta L1 방식, wr_miss_wa_fetch_on_write() 사용 */
+  LAZY_FETCH_ON_READ    /* [한국어] 쓰기 시 MODIFIED 표시만 하고 읽기 미스 시에만 fetch — 메모리 트래픽 최소화, wr_miss_wa_lazy_fetch_on_read() 사용 */
 };
 
+/* [한국어] MSHR(Miss Status Holding Register) 구현 방식 열거형.
+ * gpgpusim.config 'mshr_type' 필드로 지정되며 cache_config::init()에서 m_mshr_type에 저장.
+ * tex_cache는 TEX_FIFO/SECTOR_TEX_FIFO, baseline_cache 파생 클래스는 ASSOC/SECTOR_ASSOC 사용.
+ * 설정 문자 매핑: F=TEX_FIFO, T=SECTOR_TEX_FIFO, A=ASSOC, S=SECTOR_ASSOC */
 enum mshr_config_t {
-  TEX_FIFO,         // Tex cache
-  ASSOC,            // normal cache
-  SECTOR_TEX_FIFO,  // Tex cache sends requests to high-level sector cache
-  SECTOR_ASSOC      // normal cache sends requests to high-level sector cache
+  TEX_FIFO,         /* [한국어] 텍스처 캐시용 FIFO MSHR — 요청 순서 보장, mshr_table 아닌 tex_cache 내부 ROB로 구현 */
+  ASSOC,            /* [한국어] 일반 데이터 캐시용 완전 연상 MSHR — mshr_table 클래스로 구현, 같은 블록 요청 병합 */
+  SECTOR_TEX_FIFO,  /* [한국어] 섹터 캐시(L2)에 요청하는 텍스처 캐시용 FIFO MSHR — 섹터 단위 pending_read 추적 */
+  SECTOR_ASSOC      /* [한국어] 섹터 캐시에 요청하는 일반 캐시용 연상 MSHR — pending_read로 섹터 응답 카운트 관리 */
 };
 
+/* [한국어] 캐시 세트 인덱스 계산 함수 선택 열거형.
+ * gpgpusim.config 'sif' 필드로 지정되며 cache_config::init()에서 m_set_index_function에 저장.
+ * cache_config::set_index()가 이 값에 따라 hash_function() 또는 직접 계산을 선택.
+ * hashing.cc의 ipoly_hash_function()/bitwise_hash_function() 등이 실제 구현체.
+ * 설정 문자 매핑: L=LINEAR, X=BITWISE_XORING, P=HASH_IPOLY, H=FERMI_HASH, C=CUSTOM */
 enum set_index_function {
-  LINEAR_SET_FUNCTION = 0,
-  BITWISE_XORING_FUNCTION,
-  HASH_IPOLY_FUNCTION,
-  FERMI_HASH_SET_FUNCTION,
-  CUSTOM_SET_FUNCTION
+  LINEAR_SET_FUNCTION = 0,  /* [한국어] 주소 하위 nset_log2 비트를 그대로 세트 인덱스로 사용 — 단순하나 스트라이드 패턴에 충돌 취약 */
+  BITWISE_XORING_FUNCTION,  /* [한국어] 주소 상위/하위 비트 XOR — 세트 분산 향상, bitwise_hash_function() 구현 */
+  HASH_IPOLY_FUNCTION,      /* [한국어] GF(2) 위의 기약다항식 기반 해시 — 가장 균등한 분산, ipoly_hash_function() 구현 */
+  FERMI_HASH_SET_FUNCTION,  /* [한국어] Fermi GPU 실제 하드웨어 해시 재현 (Nugteren et al., HPCA 2014) — 실제 GPU와 동일한 매핑 */
+  CUSTOM_SET_FUNCTION       /* [한국어] 사용자 정의 해시 함수 — 현재 미구현, 확장성을 위한 플레이스홀더 */
 };
 
-enum cache_type { NORMAL = 0, SECTOR };
+/* [한국어] 캐시 블록 관리 단위를 선택하는 열거형.
+ * gpgpusim.config 'ct' 필드로 지정되며 cache_config::init()에서 m_cache_type에 저장.
+ * NORMAL: line_cache_block 사용 (128B 라인 전체를 단일 상태로 관리).
+ * SECTOR: sector_cache_block 사용 (128B 라인을 4개×32B 섹터로 분할 관리 — Volta L2 스타일).
+ * 설정 문자 매핑: N=NORMAL, S=SECTOR */
+enum cache_type {
+  NORMAL = 0, /* [한국어] 라인 전체(128B)를 단일 상태로 관리 — line_cache_block 인스턴스화, 단순하나 섹터 선택적 fetch 불가 */
+  SECTOR      /* [한국어] 라인을 4개 32B 섹터로 분할 관리 — sector_cache_block 인스턴스화, 필요한 섹터만 fetch하여 대역폭 절감 */
+};
 
-#define MAX_WARP_PER_SHADER 64
-#define INCT_TOTAL_BUFFER 64
-#define L2_TOTAL 64
-#define MAX_WARP_PER_SHADER 64
-#define MAX_WARP_PER_SHADER 64
+#define MAX_WARP_PER_SHADER 64  /* [한국어] SM(Streaming Multiprocessor) 하나가 동시에 수용할 수 있는 최대 warp 수 (Fermi/Kepler 기준 64) */
+#define INCT_TOTAL_BUFFER 64    /* [한국어] ICNT(인터커넥트 네트워크) 입출력 버퍼의 총 슬롯 수 — 인터커넥트 포화 여부 판단에 사용 */
+#define L2_TOTAL 64             /* [한국어] L2 캐시 파티션의 총 버퍼 슬롯 수 — L2 포화 판단 기준 */
+#define MAX_WARP_PER_SHADER 64  /* [한국어] MAX_WARP_PER_SHADER 재정의 (중복 — 포함 순서 보호용) */
+#define MAX_WARP_PER_SHADER 64  /* [한국어] MAX_WARP_PER_SHADER 재정의 (중복 — 포함 순서 보호용) */
 
 class cache_config {
  public:
+  /* [한국어] cache_config 기본 생성자 — 모든 파라미터를 미초기화 상태로 설정.
+   * option_parser에 의해 m_config_string 등이 채워진 후 init()가 호출되어야 실제로 사용 가능해진다.
+   * m_valid=false이므로 init() 전에 get_line_sz() 등 accessor 호출 시 assert로 차단된다.
+   * 호출 체인: 시뮬레이터 초기화 → cache_config 생성자 → option_parser 파싱 → init() */
   cache_config() {
-    m_valid = false;
-    m_disabled = false;
-    m_config_string = NULL;  // set by option parser
-    m_config_stringPrefL1 = NULL;
-    m_config_stringPrefShared = NULL;
-    m_data_port_width = 0;
-    m_set_index_function = LINEAR_SET_FUNCTION;
-    m_is_streaming = false;
-    m_wr_percent = 0;
+    m_valid = false;              /* [한국어] 초기화 미완료 플래그 — init() 호출 전까지 accessor 사용 차단 */
+    m_disabled = false;           /* [한국어] 캐시 비활성화 플래그 초기화 — "none" 설정 문자열 시 true로 변경 */
+    m_config_string = NULL;       // set by option parser
+    /* [한국어] 설정 문자열 포인터 — option_parser가 gpgpusim.config 문자열을 가리키도록 설정함 */
+    m_config_stringPrefL1 = NULL; /* [한국어] L1 캐시 prefetch 설정 문자열 포인터 초기화 */
+    m_config_stringPrefShared = NULL; /* [한국어] Shared memory prefetch 설정 문자열 포인터 초기화 */
+    m_data_port_width = 0;        /* [한국어] 데이터 포트 폭 0으로 초기화 — init()에서 미지정 시 m_line_sz로 설정됨 */
+    m_set_index_function = LINEAR_SET_FUNCTION; /* [한국어] 기본 세트 인덱싱 = LINEAR (하위 비트 직접 추출) */
+    m_is_streaming = false;       /* [한국어] 스트리밍 캐시 모드 비활성화로 초기화 */
+    m_wr_percent = 0;             /* [한국어] 더티 라인 비율 임계값 0으로 초기화 */
   }
+  /*
+   * [한국어]
+   * cache_config::init - gpgpusim.config 설정 문자열을 파싱하여 캐시 파라미터 초기화
+   *
+   * @config: gpgpusim.config에서 읽은 캐시 설정 문자열
+   *   형식: "ct:m_nset:m_line_sz:m_assoc,rp:wp:ap:wap:sif,mshr_type:m_mshr_entries:m_mshr_max_merge,
+   *          miss_queue_size:result_fifo_entries,data_port_width"
+   *   예시: "N:32:128:4,L:B:m:W:L,A:32:10,32:4,128"
+   *   ct: N=NORMAL, S=SECTOR
+   *   rp: L=LRU, F=FIFO
+   *   wp: R=READ_ONLY, B=WRITE_BACK, T=WRITE_THROUGH, E=WRITE_EVICT, L=LOCAL_WB_GLOBAL_WT
+   *   ap: m=ON_MISS, f=ON_FILL, s=STREAMING
+   *   wap: N=NO_WRITE_ALLOCATE, W=WRITE_ALLOCATE, F=FETCH_ON_WRITE, L=LAZY_FETCH_ON_READ
+   *   sif: H=FERMI_HASH, P=HASH_IPOLY, C=CUSTOM, L=LINEAR, X=BITWISE_XORING
+   *   mshr_type: F=TEX_FIFO, T=SECTOR_TEX_FIFO, A=ASSOC, S=SECTOR_ASSOC
+   * @status: FuncCache 상태 (gpgpu_func_cache_prefer 등) — cache_status 필드에 저장
+   *
+   * STREAMING 정책은 내부적으로 ON_FILL로 변환되고 m_is_streaming=true 플래그가 설정된다.
+   * 파싱 후 여러 무효 설정 조합(ON_FILL+WRITE_BACK 등)을 assert로 차단한다.
+   * 호출 체인: option_parser 파싱 완료 후 → cache_config::init()
+   */
   void init(char *config, FuncCache status) {
-    cache_status = status;
-    assert(config);
+    cache_status = status; /* [한국어] FuncCache 상태 저장 — get_cache_status()로 조회 가능 */
+    assert(config);        /* [한국어] 설정 문자열이 NULL이면 즉시 종료 */
     char ct, rp, wp, ap, mshr_type, wap, sif;
+    /* [한국어] 설정 문자열에서 파싱할 단일 문자 변수들:
+     *   ct=캐시 유형, rp=교체 정책, wp=쓰기 정책, ap=할당 정책,
+     *   wap=쓰기 미스 할당 정책, sif=세트 인덱스 함수, mshr_type=MSHR 유형 */
 
     int ntok =
         sscanf(config, "%c:%u:%u:%u,%c:%c:%c:%c:%c,%c:%u:%u,%u:%u,%u", &ct,
                &m_nset, &m_line_sz, &m_assoc, &rp, &wp, &ap, &wap, &sif,
                &mshr_type, &m_mshr_entries, &m_mshr_max_merge,
                &m_miss_queue_size, &m_result_fifo_entries, &m_data_port_width);
+    /* [한국어] 설정 문자열에서 최대 15개 토큰을 파싱:
+     *   ct, m_nset(세트 수), m_line_sz(라인 크기), m_assoc(연상도),
+     *   rp, wp, ap, wap, sif, mshr_type, m_mshr_entries(MSHR 엔트리 수),
+     *   m_mshr_max_merge(최대 병합 수), m_miss_queue_size, m_result_fifo_entries, m_data_port_width
+     *   ntok < 12이면 파싱 실패 (최소 필수 토큰 수 = 12) */
 
     if (ntok < 12) {
+      /* [한국어] 파싱 성공 토큰 수 12 미만 — 유효하지 않은 설정 */
       if (!strcmp(config, "none")) {
-        m_disabled = true;
+        /* [한국어] "none" 문자열이면 캐시 비활성화 처리 후 즉시 반환 */
+        m_disabled = true; /* [한국어] 비활성화 플래그 설정 — disabled() 조회 시 true 반환 */
         return;
       }
-      exit_parse_error();
+      exit_parse_error(); /* [한국어] "none"도 아니고 파싱도 실패 — 에러 출력 후 abort() */
     }
 
-    switch (ct) {
+    switch (ct) { /* [한국어] 캐시 유형(ct) 설정: N=NORMAL, S=SECTOR */
       case 'N':
-        m_cache_type = NORMAL;
+        m_cache_type = NORMAL; /* [한국어] line_cache_block 사용 — 라인 전체 단위 관리 */
         break;
       case 'S':
-        m_cache_type = SECTOR;
+        m_cache_type = SECTOR; /* [한국어] sector_cache_block 사용 — 32B 섹터 단위 분할 관리 */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 캐시 유형 — abort() */
     }
-    switch (rp) {
+    switch (rp) { /* [한국어] 교체 정책(rp) 설정: L=LRU, F=FIFO */
       case 'L':
-        m_replacement_policy = LRU;
+        m_replacement_policy = LRU;  /* [한국어] Least Recently Used 교체 정책 */
         break;
       case 'F':
-        m_replacement_policy = FIFO;
+        m_replacement_policy = FIFO; /* [한국어] First In First Out 교체 정책 */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 교체 정책 — abort() */
     }
-    switch (wp) {
+    switch (wp) { /* [한국어] 쓰기 정책(wp) 설정: R/B/T/E/L */
       case 'R':
-        m_write_policy = READ_ONLY;
+        m_write_policy = READ_ONLY;         /* [한국어] 읽기 전용 — 현재는 deprecated, read_only_cache 클래스 사용 권장 */
         break;
       case 'B':
-        m_write_policy = WRITE_BACK;
+        m_write_policy = WRITE_BACK;        /* [한국어] 쓰기 되돌림 — dirty 라인 축출 시에만 하위 메모리 갱신 */
         break;
       case 'T':
-        m_write_policy = WRITE_THROUGH;
+        m_write_policy = WRITE_THROUGH;     /* [한국어] 즉시 쓰기 — 매 쓰기마다 캐시+하위 메모리 동시 갱신 */
         break;
       case 'E':
-        m_write_policy = WRITE_EVICT;
+        m_write_policy = WRITE_EVICT;       /* [한국어] 쓰기 축출 — 쓰기 히트 시 라인 무효화 후 하위로 전달 */
         break;
       case 'L':
-        m_write_policy = LOCAL_WB_GLOBAL_WT;
+        m_write_policy = LOCAL_WB_GLOBAL_WT; /* [한국어] 로컬=WRITE_BACK, 전역=WRITE_THROUGH 혼합 정책 */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 쓰기 정책 — abort() */
     }
-    switch (ap) {
+    switch (ap) { /* [한국어] 라인 할당 정책(ap) 설정: m=ON_MISS, f=ON_FILL, s=STREAMING */
       case 'm':
-        m_alloc_policy = ON_MISS;
+        m_alloc_policy = ON_MISS;    /* [한국어] 미스 즉시 라인 RESERVED 할당 */
         break;
       case 'f':
-        m_alloc_policy = ON_FILL;
+        m_alloc_policy = ON_FILL;    /* [한국어] fill 응답 도착 시 라인 할당 */
         break;
       case 's':
-        m_alloc_policy = STREAMING;
+        m_alloc_policy = STREAMING;  /* [한국어] 스트리밍 모드 — 아래에서 ON_FILL로 변환됨 */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 할당 정책 — abort() */
     }
     if (m_alloc_policy == STREAMING) {
       /*
@@ -1258,53 +1335,60 @@ class cache_config {
       http://on-demand.gputechconf.com/gtc/2017/presentation/s7798-luke-durant-inside-volta.pdf
       https://ieeexplore.ieee.org/document/8344474/
       */
-      m_is_streaming = true;
-      m_alloc_policy = ON_FILL;
+      /* [한국어] STREAMING → ON_FILL 변환:
+       *   (1) LINE_ALLOC_FAIL 스톨 제거: fill 시 할당하므로 미스 시점에 빈 슬롯 필요 없음.
+       *       단, L1 전체가 캐시에 할당된 경우 shader.cc max_cta()에서 다시 ON_MISS로 조정.
+       *   (2) MSHR 수 = 최대 캐시 라인 수: 각 캐시 라인에 MSHR 엔트리가 1:1 대응.
+       *       이를 통해 Pascal/Volta의 L1 스트리밍 캐시 동작을 모델링. */
+      m_is_streaming = true;     /* [한국어] 스트리밍 모드 플래그 활성화 */
+      m_alloc_policy = ON_FILL;  /* [한국어] 실제 동작은 ON_FILL — STREAMING은 설정상 별칭 */
     }
-    switch (mshr_type) {
+    switch (mshr_type) { /* [한국어] MSHR 유형(mshr_type) 설정: F/T/A/S */
       case 'F':
-        m_mshr_type = TEX_FIFO;
-        assert(ntok == 14);
+        m_mshr_type = TEX_FIFO;      /* [한국어] 텍스처 캐시용 FIFO MSHR */
+        assert(ntok == 14);          /* [한국어] TEX_FIFO는 15번째 토큰(data_port_width) 없음 — 14개만 파싱 */
         break;
       case 'T':
-        m_mshr_type = SECTOR_TEX_FIFO;
-        assert(ntok == 14);
+        m_mshr_type = SECTOR_TEX_FIFO; /* [한국어] 섹터 캐시로 요청하는 텍스처 FIFO MSHR */
+        assert(ntok == 14);            /* [한국어] SECTOR_TEX_FIFO도 14개 토큰 */
         break;
       case 'A':
-        m_mshr_type = ASSOC;
+        m_mshr_type = ASSOC;         /* [한국어] 일반 데이터 캐시용 완전 연상 MSHR */
         break;
       case 'S':
-        m_mshr_type = SECTOR_ASSOC;
+        m_mshr_type = SECTOR_ASSOC;  /* [한국어] 섹터 캐시용 완전 연상 MSHR */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 MSHR 유형 — abort() */
     }
-    m_line_sz_log2 = LOGB2(m_line_sz);
-    m_nset_log2 = LOGB2(m_nset);
-    m_valid = true;
+    m_line_sz_log2 = LOGB2(m_line_sz); /* [한국어] 캐시라인 크기의 log2 계산 — 비트 추출에 사용 */
+    m_nset_log2 = LOGB2(m_nset);       /* [한국어] 세트 수의 log2 계산 — 세트 인덱스 비트 수 */
+    m_valid = true;                     /* [한국어] 파싱 완료 — accessor 사용 허용 */
     m_atom_sz = (m_cache_type == SECTOR) ? SECTOR_SIZE : m_line_sz;
-    m_sector_sz_log2 = LOGB2(SECTOR_SIZE);
-    original_m_assoc = m_assoc;
+    /* [한국어] 원자적 접근 단위 크기: SECTOR 캐시이면 32B(SECTOR_SIZE), NORMAL이면 라인 전체.
+     *   mshr_addr() 계산 시 이 크기로 정렬하여 같은 원자 단위 요청을 MSHR에 병합. */
+    m_sector_sz_log2 = LOGB2(SECTOR_SIZE); /* [한국어] 섹터 크기(32B)의 log2 = 5 — 섹터 오프셋 비트 수 */
+    original_m_assoc = m_assoc;             /* [한국어] 원본 연상도 저장 — Volta 동적 크기 조정 후 복원에 사용 */
 
     // For more details about difference between FETCH_ON_WRITE and WRITE
     // VALIDAE policies Read: Jouppi, Norman P. "Cache write policies and
     // performance". ISCA 93. WRITE_ALLOCATE is the old write policy in
     // GPGPU-sim 3.x, that send WRITE and READ for every write request
-    switch (wap) {
+    switch (wap) { /* [한국어] 쓰기 미스 할당 정책(wap) 설정: N/W/F/L */
       case 'N':
-        m_write_alloc_policy = NO_WRITE_ALLOCATE;
+        m_write_alloc_policy = NO_WRITE_ALLOCATE; /* [한국어] 쓰기 미스 시 라인 할당 없이 바로 하위 메모리로 */
         break;
       case 'W':
-        m_write_alloc_policy = WRITE_ALLOCATE;
+        m_write_alloc_policy = WRITE_ALLOCATE;    /* [한국어] 쓰기 미스 시 WRITE+READ 동시 발행 (구식 방식) */
         break;
       case 'F':
-        m_write_alloc_policy = FETCH_ON_WRITE;
+        m_write_alloc_policy = FETCH_ON_WRITE;    /* [한국어] 쓰기 미스 시 fetch 먼저, Volta L1 방식 */
         break;
       case 'L':
-        m_write_alloc_policy = LAZY_FETCH_ON_READ;
+        m_write_alloc_policy = LAZY_FETCH_ON_READ; /* [한국어] 쓰기 시 MODIFIED만 표시, 읽기 시에만 fetch */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 쓰기 미스 할당 정책 — abort() */
     }
 
     // detect invalid configuration
@@ -1318,6 +1402,10 @@ class cache_config {
       // stall may propagate through the memory subsystem back to the output
       // port of the same core, creating a deadlock where the wrtieback request
       // and the incoming cache-fill are stalling each other.
+      /* [한국어] ON_FILL + WRITE_BACK 조합은 교착 상태(deadlock) 발생 가능:
+       *   fill 시 dirty 라인이 축출되며 write-back 요청이 생성되는데,
+       *   ICNT 버퍼가 꽉 찬 상태에서 write-back 요청을 보낼 수 없으면
+       *   fill 자체가 블록되고 이 stall이 전파되어 교착 상태가 된다. */
       assert(0 &&
              "Invalid cache configuration: Writeback cache cannot allocate new "
              "line on fill. ");
@@ -1326,6 +1414,8 @@ class cache_config {
     if ((m_write_alloc_policy == FETCH_ON_WRITE ||
          m_write_alloc_policy == LAZY_FETCH_ON_READ) &&
         m_alloc_policy == ON_FILL) {
+      /* [한국어] FETCH_ON_WRITE/LAZY_FETCH_ON_READ는 ON_FILL 할당 정책과 함께 작동 불가:
+       *   미스 탐지 시점에 라인 RESERVED가 필요한데 ON_FILL은 fill 시점에 할당하므로 충돌. */
       assert(
           0 &&
           "Invalid cache configuration: FETCH_ON_WRITE and LAZY_FETCH_ON_READ "
@@ -1333,78 +1423,112 @@ class cache_config {
     }
 
     if (m_cache_type == SECTOR) {
+      /* [한국어] SECTOR 캐시 유효성 검증: 라인 크기 = SECTOR_SIZE × SECTOR_CHUNCK_SIZE 여야 함
+       *   (기본값: 128B = 32B × 4) — 하드코딩된 상수와 맞지 않으면 시뮬레이션 불가 */
       bool cond = m_line_sz / SECTOR_SIZE == SECTOR_CHUNCK_SIZE &&
                   m_line_sz % SECTOR_SIZE == 0;
       if (!cond) {
         std::cerr << "error: For sector cache, the simulator uses hard-coded "
                      "SECTOR_SIZE and SECTOR_CHUNCK_SIZE. The line size "
                      "must be product of both values.\n";
-        assert(0);
+        assert(0); /* [한국어] 라인 크기 조건 불충족 — abort() */
       }
     }
 
     // default: port to data array width and granularity = line size
     if (m_data_port_width == 0) {
-      m_data_port_width = m_line_sz;
+      /* [한국어] data_port_width가 설정 문자열에 없거나 0이면 기본값 = 라인 크기(128B) */
+      m_data_port_width = m_line_sz; /* [한국어] 포트 폭 = 라인 크기로 설정 (한 사이클에 라인 전체 접근 가능) */
     }
     assert(m_line_sz % m_data_port_width == 0);
+    /* [한국어] 라인 크기가 포트 폭의 배수여야 함 — 라인을 정수 사이클 수로 전송 가능해야 함 */
 
-    switch (sif) {
+    switch (sif) { /* [한국어] 세트 인덱스 함수(sif) 설정: H/P/C/L/X */
       case 'H':
-        m_set_index_function = FERMI_HASH_SET_FUNCTION;
+        m_set_index_function = FERMI_HASH_SET_FUNCTION; /* [한국어] Fermi GPU 실제 하드웨어 해시 */
         break;
       case 'P':
-        m_set_index_function = HASH_IPOLY_FUNCTION;
+        m_set_index_function = HASH_IPOLY_FUNCTION;     /* [한국어] GF(2) 기약다항식 해시 */
         break;
       case 'C':
-        m_set_index_function = CUSTOM_SET_FUNCTION;
+        m_set_index_function = CUSTOM_SET_FUNCTION;     /* [한국어] 사용자 정의 해시 (미구현) */
         break;
       case 'L':
-        m_set_index_function = LINEAR_SET_FUNCTION;
+        m_set_index_function = LINEAR_SET_FUNCTION;     /* [한국어] 하위 비트 직접 추출 (기본값) */
         break;
       case 'X':
-        m_set_index_function = BITWISE_XORING_FUNCTION;
+        m_set_index_function = BITWISE_XORING_FUNCTION; /* [한국어] 비트 XOR 해시 */
         break;
       default:
-        exit_parse_error();
+        exit_parse_error(); /* [한국어] 알 수 없는 세트 인덱스 함수 — abort() */
     }
   }
+  /* [한국어] disabled - 캐시가 "none"으로 비활성화됐는지 확인 (true이면 이 캐시는 존재하지 않음) */
   bool disabled() const { return m_disabled; }
+  /* [한국어] get_line_sz - 캐시라인 크기(바이트) 반환 (일반적으로 128B).
+   * init() 완료 후에만 유효 — assert(m_valid)로 보호. */
   unsigned get_line_sz() const {
-    assert(m_valid);
-    return m_line_sz;
+    assert(m_valid); /* [한국어] 초기화 완료 검증 */
+    return m_line_sz; /* [한국어] 캐시라인 크기 반환 */
   }
+  /* [한국어] get_atom_sz - 원자적 접근 단위 크기(바이트) 반환.
+   * SECTOR 캐시: SECTOR_SIZE(32B), NORMAL 캐시: m_line_sz(128B).
+   * mshr_addr() 계산의 정렬 단위로 사용. */
   unsigned get_atom_sz() const {
-    assert(m_valid);
-    return m_atom_sz;
+    assert(m_valid); /* [한국어] 초기화 완료 검증 */
+    return m_atom_sz; /* [한국어] 원자 단위 크기 반환 */
   }
+  /* [한국어] get_num_lines - 현재 캐시의 총 라인 수 반환 (m_nset × m_assoc).
+   * tag_array의 m_lines 배열 크기와 동일. Volta 동적 리사이징 후 현재 크기 반영. */
   unsigned get_num_lines() const {
-    assert(m_valid);
-    return m_nset * m_assoc;
+    assert(m_valid);          /* [한국어] 초기화 완료 검증 */
+    return m_nset * m_assoc;  /* [한국어] 세트 수 × 연상도 = 총 캐시 라인 수 */
   }
+  /* [한국어] get_max_num_lines - 이 캐시가 가질 수 있는 최대 라인 수 반환.
+   * Volta 동적 리사이징: get_max_cache_multiplier() × m_nset × original_m_assoc.
+   * l1d_cache_config에서 오버라이드되어 통합 캐시 크기 기반으로 계산. */
   unsigned get_max_num_lines() const {
-    assert(m_valid);
+    assert(m_valid); /* [한국어] 초기화 완료 검증 */
     return get_max_cache_multiplier() * m_nset * original_m_assoc;
+    /* [한국어] 최대 배율 × 세트 수 × 원본 연상도 = 최대 라인 수 */
   }
+  /* [한국어] get_max_assoc - 동적 리사이징 시 최대 연상도 반환.
+   * Volta 통합 캐시에서 L1이 최대로 확장됐을 때의 연상도. */
   unsigned get_max_assoc() const {
-    assert(m_valid);
+    assert(m_valid); /* [한국어] 초기화 완료 검증 */
     return get_max_cache_multiplier() * original_m_assoc;
+    /* [한국어] 최대 배율 × 원본 연상도 = 최대 연상도 */
   }
+  /* [한국어] print - 캐시 설정 요약을 파일에 출력 (Size, Set수, Way수, 라인 크기) */
   void print(FILE *fp) const {
     fprintf(fp, "Size = %d B (%d Set x %d-way x %d byte line)\n",
             m_line_sz * m_nset * m_assoc, m_nset, m_assoc, m_line_sz);
+    /* [한국어] 총 바이트 크기, 세트 수, 연상도, 라인 크기를 사람이 읽을 수 있는 형태로 출력 */
   }
 
+  /* [한국어] set_index - 주소에서 캐시 세트 인덱스를 계산 (virtual — l2_cache_config에서 오버라이드).
+   * m_set_index_function에 따라 LINEAR/BITWISE_XOR/IPOLY/FERMI_HASH 중 하나를 선택.
+   * 구현은 gpu-cache.cc에 있음. */
   virtual unsigned set_index(new_addr_type addr) const;
 
+  /* [한국어] get_max_cache_multiplier - 동적 리사이징 최대 배율 반환 (기본값=4).
+   * l1d_cache_config에서 오버라이드: 통합 캐시 크기 / 원본 캐시 크기로 계산.
+   * Volta 아키텍처에서 L1/Shared 메모리 비율을 동적으로 조정할 때 사용. */
   virtual unsigned get_max_cache_multiplier() const {
-    return MAX_DEFAULT_CACHE_SIZE_MULTIBLIER;
+    return MAX_DEFAULT_CACHE_SIZE_MULTIBLIER; /* [한국어] 기본 최대 배율 = 4 */
   }
 
+  /* [한국어] hash_function - 세트 인덱스 해시 계산 헬퍼.
+   * m_index_function에 따라 FERMI_HASH/IPOLY/BITWISE_XOR 해시를 hashing.cc 함수로 계산.
+   * set_index()가 LINEAR가 아닌 경우 이 함수를 호출. */
   unsigned hash_function(new_addr_type addr, unsigned m_nset,
                          unsigned m_line_sz_log2, unsigned m_nset_log2,
                          unsigned m_index_function) const;
 
+  /* [한국어] tag - 주소에서 캐시 태그를 계산 (태그 = 블록 주소 = 라인 정렬 주소).
+   * 일반적인 태그 추출(상위 비트만)과 달리 풀 블록 주소를 태그로 사용.
+   * 이유: 복잡한 세트 인덱스 함수를 쓸 때 인덱스+태그 전체 비교가 필요함 — 히트 판별 정확도 보장.
+   * 구현: addr의 하위 m_line_sz 비트를 0으로 마스킹 → 라인 정렬 주소 반환. */
   new_addr_type tag(new_addr_type addr) const {
     // For generality, the tag includes both index and tag. This allows for more
     // complex set index calculations that can result in different indexes
@@ -1413,39 +1537,84 @@ class cache_config {
 
     // return addr >> (m_line_sz_log2+m_nset_log2);
     return addr & ~(new_addr_type)(m_line_sz - 1);
+    /* [한국어] 하위 m_line_sz 비트 마스킹 → 캐시라인 정렬 주소(= 태그) 반환 */
   }
+  /* [한국어] block_addr - 주소를 캐시라인 경계로 정렬 (tag()와 동일 결과, 의미 명확화용 별칭) */
   new_addr_type block_addr(new_addr_type addr) const {
     return addr & ~(new_addr_type)(m_line_sz - 1);
+    /* [한국어] 하위 m_line_sz 비트 마스킹 → 라인 베이스 주소 반환 */
   }
+  /* [한국어] mshr_addr - MSHR 엔트리 키로 사용할 원자 단위 정렬 주소 반환.
+   * NORMAL 캐시: 라인 정렬(= block_addr), SECTOR 캐시: 32B 섹터 정렬.
+   * 같은 원자 단위로 정렬된 요청들이 동일 MSHR 엔트리에 병합된다. */
   new_addr_type mshr_addr(new_addr_type addr) const {
     return addr & ~(new_addr_type)(m_atom_sz - 1);
+    /* [한국어] 하위 m_atom_sz 비트 마스킹 → 원자 단위 정렬 주소 반환 */
   }
+  /* [한국어] get_mshr_type - MSHR 구현 유형 반환 (TEX_FIFO/ASSOC/SECTOR_TEX_FIFO/SECTOR_ASSOC) */
   enum mshr_config_t get_mshr_type() const { return m_mshr_type; }
+  /* [한국어] set_assoc - 연상도(way 수)를 동적으로 변경 (Volta 통합 캐시 크기 조정에 사용).
+   * shader.cc max_cta() 함수가 커널별로 L1/Shared 메모리 분할 비율에 따라 호출. */
   void set_assoc(unsigned n) {
     // set new assoc. L1 cache dynamically resized in Volta
-    m_assoc = n;
+    m_assoc = n; /* [한국어] 연상도 변경 — tag_array의 get_num_lines()에 즉시 반영 */
   }
+  /* [한국어] get_nset - 캐시 세트 수 반환. tag_array 인덱싱의 기준. */
   unsigned get_nset() const {
-    assert(m_valid);
-    return m_nset;
+    assert(m_valid);  /* [한국어] 초기화 완료 검증 */
+    return m_nset;    /* [한국어] 세트 수 반환 */
   }
+  /* [한국어] get_total_size_inKB - 현재 캐시 총 크기를 KB 단위로 반환 (m_assoc × m_nset × m_line_sz / 1024) */
   unsigned get_total_size_inKB() const {
-    assert(m_valid);
-    return (m_assoc * m_nset * m_line_sz) / 1024;
+    assert(m_valid); /* [한국어] 초기화 완료 검증 */
+    return (m_assoc * m_nset * m_line_sz) / 1024; /* [한국어] 연상도 × 세트 수 × 라인 크기(B) → KB */
   }
+  /* [한국어] is_streaming - 스트리밍 캐시 모드(STREAMING 설정)인지 반환.
+   * shader.cc max_cta()에서 ON_MISS↔ON_FILL 재조정 여부 결정에 사용. */
   bool is_streaming() { return m_is_streaming; }
+  /* [한국어] get_cache_status - FuncCache 상태(gpgpu_func_cache_prefer 설정값) 반환.
+   * 어떤 캐시 구성(L1이 shared memory 우선인지 data cache 우선인지)이 활성화됐는지 나타냄. */
   FuncCache get_cache_status() { return cache_status; }
+  /* [한국어] set_allocation_policy - 라인 할당 정책 동적 변경 (ON_MISS ↔ ON_FILL 전환).
+   * shader.cc max_cta()에서 스트리밍 캐시의 전체 사용 여부에 따라 정책을 런타임에 전환. */
   void set_allocation_policy(enum allocation_policy_t alloc) {
-    m_alloc_policy = alloc;
+    m_alloc_policy = alloc; /* [한국어] 할당 정책 변경 — 다음 사이클부터 새 정책 적용 */
   }
   char *m_config_string;
+  /* [한국어] gpgpusim.config에서 읽은 캐시 설정 문자열 포인터.
+   * 설정자: option_parser가 파싱 시 이 포인터를 설정 문자열로 지정.
+   * 읽는 자: cache_config::init()에서 sscanf 파싱 입력으로 사용; exit_parse_error()에서 에러 메시지 출력.
+   * 값 범위: "none" 또는 "ct:nset:line_sz:assoc,..." 형식의 문자열; NULL은 option_parser 설정 전.
+   * 동기화: 단일 스레드(시뮬레이터 초기화 단계)에서만 설정, 이후 읽기 전용. */
   char *m_config_stringPrefL1;
+  /* [한국어] L1 캐시 prefetch 전용 설정 문자열 포인터.
+   * 설정자: option_parser가 prefetch L1 옵션 파싱 시 설정.
+   * 읽는 자: l1d_cache_config::init() 또는 관련 prefetch 초기화 코드.
+   * 값 범위: NULL(미설정) 또는 설정 문자열 포인터.
+   * 동기화: 단일 스레드(초기화 단계), 이후 읽기 전용. */
   char *m_config_stringPrefShared;
+  /* [한국어] Shared memory prefetch 전용 설정 문자열 포인터.
+   * 설정자: option_parser가 prefetch shared 옵션 파싱 시 설정.
+   * 읽는 자: 관련 prefetch 초기화 코드.
+   * 값 범위: NULL(미설정) 또는 설정 문자열 포인터.
+   * 동기화: 단일 스레드(초기화 단계), 이후 읽기 전용. */
   FuncCache cache_status;
+  /* [한국어] FuncCache 상태 — gpgpu_func_cache_prefer 설정에서 온 캐시 구성 우선순위.
+   * 설정자: cache_config::init()에서 status 인자로 저장.
+   * 읽는 자: get_cache_status() — shader.cc에서 캐시 구성 결정에 사용.
+   * 값 범위: FuncCache enum 값(abstract_hardware_model.h 정의).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_wr_percent;
+  /* [한국어] 더티(수정) 라인이 전체 캐시에서 차지할 최대 비율 임계값 (현재 직접 사용되지 않음).
+   * 설정자: cache_config 생성자에서 0으로 초기화, 필요 시 option_parser가 설정.
+   * 읽는 자: 더티 라인 조기 축출 정책 구현 시 참조 예정.
+   * 값 범위: 0~100 (퍼센트).
+   * 동기화: 단일 스레드(초기화 단계). */
+  /* [한국어] get_write_allocate_policy - 쓰기 미스 할당 정책 반환 (data_cache::process_tag_probe에서 사용) */
   write_allocate_policy_t get_write_allocate_policy() {
-    return m_write_alloc_policy;
+    return m_write_alloc_policy; /* [한국어] 쓰기 미스 할당 정책 반환 */
   }
+  /* [한국어] get_write_policy - 쓰기 정책 반환 (data_cache::init에서 m_wr_hit 함수 포인터 선택에 사용) */
   write_policy_t get_write_policy() { return m_write_policy; }
 
  protected:
@@ -1456,44 +1625,165 @@ class cache_config {
   }
 
   bool m_valid;
+  /* [한국어] 설정 파싱 완료 여부 플래그.
+   * 설정자: cache_config() 생성자에서 false, init() 완료 시 true.
+   * 읽는 자: get_line_sz() 등 accessor 함수의 assert(m_valid) 보호.
+   * 값 범위: true(init 완료) / false(미초기화).
+   * 동기화: 단일 스레드(초기화 단계). */
   bool m_disabled;
+  /* [한국어] 캐시 비활성화 플래그 ("none" 설정 시 true).
+   * 설정자: init()에서 config=="none"이면 true로 설정.
+   * 읽는 자: disabled() — 상위 코드가 이 캐시를 스킵할지 결정.
+   * 값 범위: true(비활성화) / false(활성).
+   * 동기화: 단일 스레드(초기화 단계). */
   unsigned m_line_sz;
+  /* [한국어] 캐시라인 크기(바이트), 일반적으로 128B.
+   * 설정자: init()에서 sscanf 파싱으로 설정.
+   * 읽는 자: tag(), block_addr(), get_line_sz(), m_data_port_width 기본값 등.
+   * 값 범위: 2의 거듭제곱 값 (32, 64, 128 등).
+   * 동기화: 초기화 후 읽기 전용(set_assoc 제외). */
   unsigned m_line_sz_log2;
+  /* [한국어] m_line_sz의 log2 값 (비트 추출 연산에 사용).
+   * 설정자: init()에서 LOGB2(m_line_sz)로 계산.
+   * 읽는 자: set_index(), hash_function() — 주소에서 인덱스 비트 추출 시.
+   * 값 범위: 5(32B) ~ 7(128B) 등.
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_nset;
+  /* [한국어] 캐시 세트 수.
+   * 설정자: init()에서 sscanf 파싱으로 설정.
+   * 읽는 자: set_index(), get_nset(), get_num_lines(), get_total_size_inKB().
+   * 값 범위: 2의 거듭제곱 (예: 4, 8, 32, 64 등).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_nset_log2;
+  /* [한국어] m_nset의 log2 값 (세트 인덱스 추출에 필요한 비트 수).
+   * 설정자: init()에서 LOGB2(m_nset)로 계산.
+   * 읽는 자: hash_function() — 세트 인덱스 비트 수 계산.
+   * 값 범위: 2(nset=4) ~ 6(nset=64) 등.
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_assoc;
+  /* [한국어] 현재 연상도(way 수). Volta 동적 리사이징으로 runtime에 변경될 수 있음.
+   * 설정자: init()에서 sscanf 파싱으로 초기 설정; set_assoc()으로 동적 변경 가능.
+   * 읽는 자: get_num_lines(), get_total_size_inKB() — 현재 유효 캐시 크기 계산.
+   * 값 범위: 2 이상의 정수 (예: 4, 8, 16, 32).
+   * 동기화: shader.cc max_cta()에서 변경하므로 커널 실행 전/후에만 변경. */
   unsigned m_atom_sz;
+  /* [한국어] 원자적 접근 단위 크기(바이트).
+   * 설정자: init()에서 SECTOR 캐시이면 SECTOR_SIZE(32B), NORMAL이면 m_line_sz로 설정.
+   * 읽는 자: mshr_addr() — MSHR 엔트리 키 정렬에 사용.
+   * 값 범위: 32(SECTOR) 또는 m_line_sz(128B, NORMAL).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_sector_sz_log2;
+  /* [한국어] SECTOR_SIZE(32B)의 log2 = 5 (고정값).
+   * 설정자: init()에서 LOGB2(SECTOR_SIZE)로 계산.
+   * 읽는 자: 섹터 인덱스 계산 등 섹터 캐시 관련 비트 연산.
+   * 값 범위: 5 (고정).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned original_m_assoc;
+  /* [한국어] 설정 파일에서 파싱된 원본 연상도 (동적 리사이징 전 값 보존용).
+   * 설정자: init()에서 m_assoc와 동일 값으로 초기화; set_assoc()은 m_assoc만 변경.
+   * 읽는 자: get_max_num_lines(), get_max_assoc(), l1d_cache_config::get_max_cache_multiplier().
+   * 값 범위: init() 시점의 m_assoc 값.
+   * 동기화: 초기화 후 읽기 전용. */
   bool m_is_streaming;
+  /* [한국어] 스트리밍 캐시 모드 플래그 (STREAMING 설정 시 true).
+   * 설정자: init()에서 ap=='s'이면 true로 설정.
+   * 읽는 자: is_streaming() — shader.cc max_cta()에서 ON_MISS↔ON_FILL 재조정 여부 결정.
+   * 값 범위: true/false.
+   * 동기화: 초기화 후 읽기 전용. */
 
   enum replacement_policy_t m_replacement_policy;  // 'L' = LRU, 'F' = FIFO
+  /* [한국어] 교체 정책 (LRU 또는 FIFO).
+   * 설정자: init()에서 rp 문자로 설정.
+   * 읽는 자: tag_array::access()에서 교체 후보 선택 시 사용.
+   * 값 범위: LRU / FIFO.
+   * 동기화: 초기화 후 읽기 전용. */
   enum write_policy_t
       m_write_policy;  // 'T' = write through, 'B' = write back, 'R' = read only
+  /* [한국어] 쓰기 정책 (READ_ONLY/WRITE_BACK/WRITE_THROUGH/WRITE_EVICT/LOCAL_WB_GLOBAL_WT).
+   * 설정자: init()에서 wp 문자로 설정.
+   * 읽는 자: data_cache::init()에서 m_wr_hit 함수 포인터 선택; get_write_policy().
+   * 값 범위: write_policy_t enum 5가지 값.
+   * 동기화: 초기화 후 읽기 전용. */
   enum allocation_policy_t
       m_alloc_policy;  // 'm' = allocate on miss, 'f' = allocate on fill
+  /* [한국어] 라인 할당 정책 (ON_MISS / ON_FILL).
+   * 설정자: init()에서 ap 문자로 설정; set_allocation_policy()로 동적 변경 가능.
+   * 읽는 자: tag_array::access() 및 baseline_cache::fill() — 할당 시점 결정.
+   * 값 범위: ON_MISS / ON_FILL (STREAMING은 init()에서 ON_FILL로 변환됨).
+   * 동기화: shader.cc max_cta()에서 커널 실행 전 변경 가능. */
   enum mshr_config_t m_mshr_type;
+  /* [한국어] MSHR 구현 유형 (TEX_FIFO / ASSOC / SECTOR_TEX_FIFO / SECTOR_ASSOC).
+   * 설정자: init()에서 mshr_type 문자로 설정.
+   * 읽는 자: get_mshr_type() — baseline_cache::init()에서 ASSOC/SECTOR_ASSOC 여부 assert.
+   * 값 범위: mshr_config_t enum 4가지 값.
+   * 동기화: 초기화 후 읽기 전용. */
   enum cache_type m_cache_type;
+  /* [한국어] 캐시 블록 관리 단위 (NORMAL=라인 전체 / SECTOR=32B 섹터).
+   * 설정자: init()에서 ct 문자로 설정.
+   * 읽는 자: tag_array 생성자에서 line_cache_block/sector_cache_block 선택; m_atom_sz 계산.
+   * 값 범위: NORMAL(0) / SECTOR.
+   * 동기화: 초기화 후 읽기 전용. */
 
   write_allocate_policy_t
       m_write_alloc_policy;  // 'W' = Write allocate, 'N' = No write allocate
+  /* [한국어] 쓰기 미스 시 라인 할당 정책.
+   * 설정자: init()에서 wap 문자로 설정.
+   * 읽는 자: data_cache::init()에서 m_wr_miss 함수 포인터 선택; get_write_allocate_policy().
+   * 값 범위: NO_WRITE_ALLOCATE / WRITE_ALLOCATE / FETCH_ON_WRITE / LAZY_FETCH_ON_READ.
+   * 동기화: 초기화 후 읽기 전용. */
 
   union {
     unsigned m_mshr_entries;
+    /* [한국어] MSHR 엔트리 수 (ASSOC/SECTOR_ASSOC 캐시용).
+     * 설정자: init()에서 sscanf 파싱으로 설정 (11번째 토큰).
+     * 읽는 자: baseline_cache 생성자의 m_mshrs(config.m_mshr_entries, ...) 초기화.
+     * 값 범위: 양의 정수 (예: 32, 64, 128).
+     * 동기화: 초기화 후 읽기 전용. */
     unsigned m_fragment_fifo_entries;
+    /* [한국어] 텍스처 캐시 fragment FIFO 크기 (TEX_FIFO/SECTOR_TEX_FIFO용 별칭).
+     * tex_cache 생성자의 m_fragment_fifo(config.m_fragment_fifo_entries) 초기화에 사용. */
   };
   union {
     unsigned m_mshr_max_merge;
+    /* [한국어] MSHR 엔트리 하나에 병합할 수 있는 최대 요청 수.
+     * 설정자: init()에서 sscanf 파싱 (12번째 토큰).
+     * 읽는 자: baseline_cache 생성자의 m_mshrs(..., config.m_mshr_max_merge) 초기화.
+     * 값 범위: 양의 정수 (예: 8, 10, 16).
+     * 동기화: 초기화 후 읽기 전용. */
     unsigned m_request_fifo_entries;
+    /* [한국어] 텍스처 캐시 request FIFO 크기 (TEX_FIFO용 별칭).
+     * tex_cache 생성자의 m_request_fifo(config.m_request_fifo_entries) 초기화에 사용. */
   };
   union {
     unsigned m_miss_queue_size;
+    /* [한국어] miss_queue(ICNT 방향 미스 요청 대기열) 최대 크기.
+     * 설정자: init()에서 sscanf 파싱 (13번째 토큰).
+     * 읽는 자: baseline_cache::miss_queue_full() — 새 미스 요청 수용 여부 판단.
+     * 값 범위: 양의 정수 (예: 32, 64).
+     * 동기화: 초기화 후 읽기 전용. */
     unsigned m_rob_entries;
+    /* [한국어] 텍스처 캐시 Reorder Buffer 크기 (tex_cache용 별칭).
+     * tex_cache 생성자의 m_rob(config.m_rob_entries) 초기화에 사용. */
   };
   unsigned m_result_fifo_entries;
+  /* [한국어] 결과 FIFO 크기 (텍스처 캐시 m_result_fifo 또는 읽기 완료 결과 버퍼).
+   * 설정자: init()에서 sscanf 파싱 (14번째 토큰).
+   * 읽는 자: tex_cache 생성자의 m_result_fifo(config.m_result_fifo_entries) 초기화.
+   * 값 범위: 양의 정수 (예: 4, 8).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_data_port_width;  //< number of byte the cache can access per cycle
+  /* [한국어] 한 사이클에 캐시 데이터 배열에 접근할 수 있는 바이트 수.
+   * 설정자: init()에서 15번째 토큰; 미지정(==0)이면 m_line_sz로 기본 설정.
+   * 읽는 자: bandwidth_management — 데이터 포트 사용 사이클 계산.
+   * 값 범위: m_line_sz의 약수 (assert 보장).
+   * 동기화: 초기화 후 읽기 전용. */
   enum set_index_function
       m_set_index_function;  // Hash, linear, or custom set index function
+  /* [한국어] 세트 인덱스 계산 함수 선택.
+   * 설정자: init()에서 sif 문자로 설정; 생성자에서 LINEAR_SET_FUNCTION으로 초기화.
+   * 읽는 자: cache_config::set_index() — 주소에서 세트 인덱스 계산 시 분기.
+   * 값 범위: set_index_function enum 5가지 값.
+   * 동기화: 초기화 후 읽기 전용. */
 
   friend class tag_array;
   friend class baseline_cache;
@@ -1505,179 +1795,485 @@ class cache_config {
   friend class memory_sub_partition;
 };
 
+/* [한국어] L1 데이터 캐시 전용 설정 클래스 (cache_config 파생).
+ * SM(Streaming Multiprocessor) 내부의 L1 데이터 캐시에 특화된 추가 파라미터를 보유한다.
+ * 주요 추가 사항:
+ *   - l1_banks: L1 캐시 뱅크 수 (뱅크 인터리빙으로 동시 접근 처리량 향상)
+ *   - m_unified_cache_size: Volta 통합 캐시 크기(KB) — L1/Shared 메모리 동적 분할 지원
+ * get_max_cache_multiplier()가 오버라이드되어 통합 캐시 크기에 따른 최대 배율을 계산.
+ * 전체 흐름: gpgpusim.config 파싱 → l1d_cache_config::init() → cache_config::init() */
 class l1d_cache_config : public cache_config {
  public:
+  /* [한국어] l1d_cache_config 기본 생성자 — cache_config() 위임, L1 전용 필드는 별도 초기화 필요 */
   l1d_cache_config() : cache_config() {}
+  /* [한국어] set_bank - 주소에서 L1 캐시 뱅크 인덱스를 계산 (뱅크 인터리빙 기반).
+   * l1_banks_hashing_function에 따라 LINEAR/BITWISE_XOR 해시로 뱅크를 선택.
+   * shader.cc의 ldst_unit이 같은 뱅크로의 충돌(bank conflict) 여부를 이 함수로 판단. */
   unsigned set_bank(new_addr_type addr) const;
+  /* [한국어] l1d_cache_config::init - L1 전용 필드(뱅크 로그값) 선계산 후 부모 init() 호출.
+   * @config: gpgpusim.config L1 캐시 설정 문자열
+   * @status: FuncCache 상태
+   * l1_banks_byte_interleaving_log2 = LOGB2(l1_banks_byte_interleaving) 선계산으로
+   * set_bank() 호출 시 log2 연산 없이 시프트만 수행. */
   void init(char *config, FuncCache status) {
     l1_banks_byte_interleaving_log2 = LOGB2(l1_banks_byte_interleaving);
-    l1_banks_log2 = LOGB2(l1_banks);
-    cache_config::init(config, status);
+    /* [한국어] 바이트 인터리빙 크기의 log2 계산 — set_bank()에서 인터리빙 오프셋 추출에 사용 */
+    l1_banks_log2 = LOGB2(l1_banks); /* [한국어] 뱅크 수의 log2 — set_bank()에서 뱅크 인덱스 비트 수 */
+    cache_config::init(config, status); /* [한국어] 공통 캐시 파라미터 파싱 — 부모 클래스 init() 위임 */
   }
   unsigned l1_latency;
+  /* [한국어] L1 캐시 히트 레이턴시 (사이클 수).
+   * 설정자: option_parser가 -gpgpu_l1_latency 옵션으로 설정.
+   * 읽는 자: shader.cc ldst_unit — 히트 시 이 사이클 후 워프에 결과 공급.
+   * 값 범위: 1~수십 사이클 (Pascal/Volta: 28~32 사이클 등).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned l1_banks;
+  /* [한국어] L1 캐시 뱅크 수 (동시 접근 처리량 제어).
+   * 설정자: option_parser가 -gpgpu_cache:dl1_banks 등으로 설정.
+   * 읽는 자: set_bank() — 주소에서 뱅크 인덱스 계산; shader.cc bank conflict 감지.
+   * 값 범위: 2의 거듭제곱 (1, 2, 4, 8 등).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned l1_banks_log2;
+  /* [한국어] l1_banks의 log2 — set_bank()에서 비트 시프트 연산에 사용.
+   * 설정자: l1d_cache_config::init()에서 LOGB2(l1_banks)로 계산.
+   * 읽는 자: set_bank() 내부.
+   * 값 범위: 0(banks=1) ~ 3(banks=8) 등.
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned l1_banks_byte_interleaving;
+  /* [한국어] L1 뱅크 인터리빙 단위(바이트) — 연속 주소가 어떤 단위로 다른 뱅크에 분산되는지.
+   * 설정자: option_parser가 설정.
+   * 읽는 자: set_bank() — 인터리빙 오프셋으로 뱅크 인덱스 계산.
+   * 값 범위: 2의 거듭제곱 (4, 8, 16, 32 등).
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned l1_banks_byte_interleaving_log2;
+  /* [한국어] l1_banks_byte_interleaving의 log2.
+   * 설정자: l1d_cache_config::init()에서 LOGB2(l1_banks_byte_interleaving)로 계산.
+   * 읽는 자: set_bank() 내부 인터리빙 비트 추출.
+   * 값 범위: 2(4B) ~ 5(32B) 등.
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned l1_banks_hashing_function;
+  /* [한국어] L1 뱅크 선택에 사용할 해시 함수 종류 (set_bank()에서 분기 기준).
+   * 설정자: option_parser가 설정.
+   * 읽는 자: set_bank() — 0이면 LINEAR, 그 외 BITWISE_XOR 등 선택.
+   * 값 범위: 0(LINEAR) 또는 기타 정수.
+   * 동기화: 초기화 후 읽기 전용. */
   unsigned m_unified_cache_size;
+  /* [한국어] Volta 통합 캐시 총 크기(KB) — L1 데이터 캐시와 Shared 메모리가 공유하는 SRAM 용량.
+   * 설정자: option_parser가 -gpgpu_unified_cache_size로 설정.
+   * 읽는 자: get_max_cache_multiplier() — L1 최대 크기 배율 계산에 사용.
+   * 값 범위: 0(미사용, 기본 배율 4 적용) 또는 KB 단위 양의 정수.
+   * 동기화: 초기화 후 읽기 전용. */
+  /*
+   * [한국어]
+   * l1d_cache_config::get_max_cache_multiplier - Volta 통합 캐시 기반 최대 크기 배율 반환
+   *
+   * @return: m_unified_cache_size가 설정됐으면 통합 캐시 크기 / 원본 L1 크기, 아니면 4
+   *
+   * Volta 아키텍처에서 L1 데이터 캐시와 Shared 메모리는 동일한 SRAM을 공유한다.
+   * shader.cc max_cta()가 커널별 Shared 메모리 사용량을 파악하여 L1에 남은 용량을 계산하고,
+   * set_assoc()로 연상도를 조정한 후 이 함수로 최대 배율을 확인한다.
+   * 예시: 통합 캐시=128KB, 원본 L1=32KB → 배율=4 (최대 4배로 확장 가능).
+   *
+   * 호출 체인: get_max_num_lines() / get_max_assoc() → get_max_cache_multiplier()
+   */
   virtual unsigned get_max_cache_multiplier() const {
     // set * assoc * cacheline size. Then convert Byte to KB
     // gpgpu_unified_cache_size is in KB while original_sz is in B
     if (m_unified_cache_size > 0) {
+      /* [한국어] 통합 캐시 크기가 설정된 경우: 원본 L1 크기 계산 후 배율 반환 */
       unsigned original_size = m_nset * original_m_assoc * m_line_sz / 1024;
+      /* [한국어] 원본 L1 크기(KB) = 세트 수 × 원본 연상도 × 라인 크기(B) / 1024 */
       assert(m_unified_cache_size % original_size == 0);
-      return m_unified_cache_size / original_size;
+      /* [한국어] 통합 캐시가 원본 크기의 정수 배여야 함 — 정수 연상도 조정 가능하도록 */
+      return m_unified_cache_size / original_size; /* [한국어] 최대 배율 반환 */
     } else {
-      return MAX_DEFAULT_CACHE_SIZE_MULTIBLIER;
+      return MAX_DEFAULT_CACHE_SIZE_MULTIBLIER; /* [한국어] 통합 캐시 미설정 시 기본 배율 4 반환 */
     }
   }
 };
 
+/* [한국어] L2 캐시 전용 설정 클래스 (cache_config 파생).
+ * 메모리 서브파티션(memory_sub_partition)의 L2 캐시에 특화된 설정을 보유한다.
+ * 주요 추가 사항:
+ *   - m_address_mapping: 선형 주소를 실제 DRAM 물리 주소로 변환하는 매핑 객체
+ * set_index()가 오버라이드되어 L2 파티션 주소 공간을 고려한 세트 인덱스를 계산한다.
+ * 전체 흐름: memory_sub_partition 초기화 → l2_cache_config::init(address_mapping) → set_index() */
 class l2_cache_config : public cache_config {
  public:
+  /* [한국어] l2_cache_config 기본 생성자 — cache_config() 위임 */
   l2_cache_config() : cache_config() {}
+  /* [한국어] l2_cache_config::init - 주소 매핑 객체를 저장하고 L2용 설정 초기화.
+   * @address_mapping: 선형→물리 주소 변환 객체 (addrdec.h의 linear_to_raw_address_translation).
+   *   L2 세트 인덱스 계산 시 파티션 경계를 고려한 주소 변환에 사용됨. */
   void init(linear_to_raw_address_translation *address_mapping);
+  /* [한국어] l2_cache_config::set_index - L2용 오버라이드 세트 인덱스 계산.
+   * 주소 매핑(m_address_mapping)으로 변환된 물리 주소를 기반으로 세트 인덱스를 계산.
+   * 여러 L2 파티션이 존재하므로 파티션 내 오프셋을 고려하여 계산. */
   virtual unsigned set_index(new_addr_type addr) const;
 
  private:
   linear_to_raw_address_translation *m_address_mapping;
+  /* [한국어] 선형 주소 → DRAM 물리 주소 변환 객체 포인터.
+   * 설정자: l2_cache_config::init()에서 인자로 받아 저장.
+   * 읽는 자: set_index()에서 주소 변환 후 세트 인덱스 계산.
+   * 값 범위: 유효한 linear_to_raw_address_translation 포인터 (NULL 불가).
+   * 동기화: 초기화 후 읽기 전용. */
 };
 
+/* [한국어] 세트-연상(set-associative) 태그 배열 — 캐시의 핵심 자료구조.
+ * probe()/access()/fill()을 통해 캐시 히트/미스 판별과 라인 상태 전이를 수행한다.
+ * 내부적으로 cache_block_t* 배열(m_lines)을 관리하며, 설정에 따라
+ * line_cache_block(NORMAL) 또는 sector_cache_block(SECTOR) 객체를 생성한다.
+ * baseline_cache가 tag_array를 소유하고(new로 생성), fill()/cycle()에서 접근한다.
+ * 사이클-레벨 타이밍 모델의 캐시 상태를 정확히 추적하는 핵심 모듈.
+ * 호출 체인: baseline_cache::access() → tag_array::probe() → (miss) → tag_array::access()
+ *            → (응답 도착) → tag_array::fill() */
 class tag_array {
  public:
+  /* [한국어] tag_array 주 생성자 — m_lines 배열을 동적으로 할당하고 init() 호출.
+   * @config: 캐시 설정 (m_nset, m_assoc, m_cache_type 등)
+   * @core_id: 이 캐시를 소유한 SM 인덱스 (통계 구분용)
+   * @type_id: 캐시 유형 인덱스 (normal/texture/constant 구분) */
   // Use this constructor
   tag_array(cache_config &config, int core_id, int type_id);
+  /* [한국어] tag_array 소멸자 — m_lines 배열과 각 cache_block_t 객체 메모리 해제 */
   ~tag_array();
 
+  /* [한국어] probe (mem_fetch 오버로드) - 읽기/쓰기 접근 전 태그 배열 탐색 (부작용 없음).
+   * @addr: 접근할 주소
+   * @idx: [출력] 히트 또는 교체 후보 라인 인덱스
+   * @mf: 접근 요청 mem_fetch (sector_mask, is_write 정보 포함)
+   * @is_write: 쓰기 접근 여부
+   * @probe_mode: true이면 통계 업데이트 없이 순수 탐색만 수행 (예비 확인용)
+   * @return: HIT/HIT_RESERVED/MISS/RESERVATION_FAIL/SECTOR_MISS */
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_fetch *mf, bool is_write,
                                   bool probe_mode = false) const;
+  /* [한국어] probe (sector_mask 오버로드) - 섹터 마스크를 직접 지정하는 탐색.
+   * data_cache가 특정 섹터에 대한 탐색을 요청할 때 사용.
+   * @mask: 탐색할 섹터 마스크 (4비트 bitset)
+   * 나머지 인자는 위 오버로드와 동일. */
   enum cache_request_status probe(new_addr_type addr, unsigned &idx,
                                   mem_access_sector_mask_t mask, bool is_write,
                                   bool probe_mode = false,
                                   mem_fetch *mf = NULL) const;
+  /* [한국어] access (2출력 오버로드) - 태그 탐색 + 히트/미스 통계 업데이트만 수행 (write-back 없음).
+   * @addr: 접근 주소, @time: 현재 사이클 (LRU 갱신), @idx: [출력] 라인 인덱스, @mf: 요청
+   * read_only_cache에서 사용 — dirty 라인 축출 불필요 */
   enum cache_request_status access(new_addr_type addr, unsigned time,
                                    unsigned &idx, mem_fetch *mf);
+  /* [한국어] access (4출력 오버로드) - 태그 탐색 + dirty 라인 축출 정보까지 반환.
+   * @wb: [출력] true이면 교체된 라인이 dirty — write-back 요청 발행 필요
+   * @evicted: [출력] 축출된 블록의 주소/크기/마스크 정보
+   * data_cache에서 write-back이 필요할 수 있을 때 사용. */
   enum cache_request_status access(new_addr_type addr, unsigned time,
                                    unsigned &idx, bool &wb,
                                    evicted_block_info &evicted, mem_fetch *mf);
 
+  /* [한국어] fill (mem_fetch 오버로드) - 하위 메모리 응답 도착 시 라인 상태 VALID/MODIFIED로 전이.
+   * @addr: fill할 블록 주소, @time: 현재 사이클, @mf: fill을 트리거한 원본 요청, @is_write: 쓰기 fill 여부 */
   void fill(new_addr_type addr, unsigned time, mem_fetch *mf, bool is_write);
+  /* [한국어] fill (인덱스 오버로드) - 이미 알려진 캐시 라인 인덱스로 직접 fill.
+   * extra_mf_fields_lookup에서 m_cache_index를 찾아 직접 전달할 때 사용. */
   void fill(unsigned idx, unsigned time, mem_fetch *mf);
+  /* [한국어] fill (sector_mask 오버로드) - 특정 섹터만 fill (SECTOR 캐시용).
+   * @mask: fill할 섹터 마스크, @byte_mask: 더티 바이트 마스크, @is_write: 쓰기 여부 */
   void fill(new_addr_type addr, unsigned time, mem_access_sector_mask_t mask,
             mem_access_byte_mask_t byte_mask, bool is_write);
 
+  /* [한국어] size - 총 캐시 라인 수 반환 (m_config.get_num_lines() = m_nset × m_assoc) */
   unsigned size() const { return m_config.get_num_lines(); }
+  /* [한국어] get_block - 인덱스로 특정 캐시 블록 포인터 반환 (force_tag_access 등에서 직접 접근) */
   cache_block_t *get_block(unsigned idx) { return m_lines[idx]; }
 
+  /* [한국어] flush - MODIFIED 상태인 모든 라인을 INVALID로 초기화 (커널 종료 시 dirty 제거) */
   void flush();       // flush all written entries
+  /* [한국어] invalidate - 모든 라인을 INVALID로 강제 전환 (캐시 전체 무효화, flush보다 강력) */
   void invalidate();  // invalidate all entries
+  /* [한국어] new_window - AerialVision 통계 윈도우 갱신: m_prev_snapshot_* 필드를 현재 값으로 스냅샷 */
   void new_window();
 
+  /* [한국어] print - 캐시 접근/미스 통계를 stream에 출력하고 total_access/total_misses에 누계 */
   void print(FILE *stream, unsigned &total_access,
              unsigned &total_misses) const;
+  /* [한국어] windowed_miss_rate - 마지막 new_window() 이후의 미스율 반환 (AerialVision용) */
   float windowed_miss_rate() const;
+  /* [한국어] get_stats - 누적 접근/미스/pending_hit/RESERVATION_FAIL 통계를 출력 인자로 반환 */
   void get_stats(unsigned &total_access, unsigned &total_misses,
                  unsigned &total_hit_res, unsigned &total_res_fail) const;
 
+  /* [한국어] update_cache_parameters - 동적 리사이징(Volta L1) 후 설정 갱신 (m_config 참조 업데이트) */
   void update_cache_parameters(cache_config &config);
+  /* [한국어] add_pending_line - 이 블록 주소에 대한 pending 요청 카운터 증가 (sector 캐시용) */
   void add_pending_line(mem_fetch *mf);
+  /* [한국어] remove_pending_line - pending 요청 카운터 감소 및 완료 시 제거 */
   void remove_pending_line(mem_fetch *mf);
+  /* [한국어] inc_dirty - 더티 라인 카운터 증가 (write hit 시 호출) */
   void inc_dirty() { m_dirty++; }
 
  protected:
   // This constructor is intended for use only from derived classes that wish to
   // avoid unnecessary memory allocation that takes place in the
   // other tag_array constructor
+  /* [한국어] tag_array 파생 클래스용 생성자 — 외부에서 할당된 new_lines 배열을 받아 사용.
+   * tex_cache처럼 tag_array를 직접 소유하는 클래스에서 m_lines 메모리를 직접 관리할 때 사용.
+   * @new_lines: 외부에서 생성된 cache_block_t* 배열 (이 생성자는 메모리 할당 안 함) */
   tag_array(cache_config &config, int core_id, int type_id,
             cache_block_t **new_lines);
+  /* [한국어] init - 통계 카운터 초기화 및 m_core_id/m_type_id 설정 (두 생성자 공통 로직) */
   void init(int core_id, int type_id);
 
  protected:
   cache_config &m_config;
+  /* [한국어] 이 태그 배열의 캐시 설정 참조.
+   * 설정자: 생성자에서 config 인자로 바인딩 (참조이므로 동적 변경이 m_config에 반영됨).
+   * 읽는 자: probe()/access()/fill() 전반 — m_nset, m_assoc, m_line_sz 등 참조.
+   * 값 범위: 유효한 cache_config 인스턴스 참조.
+   * 동기화: 단일 SM 컨텍스트에서만 접근. */
 
   cache_block_t **m_lines; /* nbanks x nset x assoc lines in total */
+  /* [한국어] 세트-연상 캐시 라인 배열 (크기: m_nset × m_assoc = get_num_lines()).
+   * 설정자: 주 생성자에서 new line_cache_block[] 또는 new sector_cache_block[]로 동적 할당.
+   * 읽는 자: probe()/access()/fill()/flush()/invalidate() — 모든 캐시 라인 접근.
+   * 값 범위: 유효한 cache_block_t* 포인터 배열; 소멸자에서 해제.
+   * 동기화: 단일 SM 컨텍스트에서만 접근, 별도 락 불필요. */
 
   unsigned m_access;
+  /* [한국어] 이 태그 배열에 대한 총 접근 횟수 (probe/access 호출 수).
+   * 설정자: access()가 호출될 때마다 증가.
+   * 읽는 자: get_stats(), print(), windowed_miss_rate() 계산.
+   * 값 범위: 0 ~ 전체 시뮬레이션 사이클 수.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_miss;
+  /* [한국어] 캐시 미스 횟수 (MISS 또는 RESERVATION_FAIL 반환 횟수).
+   * 설정자: access()에서 MISS 결과 시 증가.
+   * 읽는 자: get_stats(), print(), windowed_miss_rate().
+   * 값 범위: 0 ~ m_access.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_pending_hit;  // number of cache miss that hit a line that is
                            // allocated but not filled
+  /* [한국어] HIT_RESERVED 횟수 — 라인이 RESERVED 상태일 때의 히트 수 (pending hit).
+   * 설정자: access()에서 HIT_RESERVED 결과 시 증가.
+   * 읽는 자: get_stats() — 전체 미스 처리 통계에서 MSHR 병합 효율 분석.
+   * 값 범위: 0 ~ m_access.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_res_fail;
+  /* [한국어] RESERVATION_FAIL 횟수 — MSHR/miss_queue 포화로 요청 거부된 횟수.
+   * 설정자: access()에서 RESERVATION_FAIL 결과 시 증가.
+   * 읽는 자: get_stats() — 캐시 병목 분석.
+   * 값 범위: 0 ~ m_access.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_sector_miss;
+  /* [한국어] SECTOR_MISS 횟수 — 라인은 히트이지만 섹터가 없는 경우.
+   * 설정자: access()에서 SECTOR_MISS 결과 시 증가.
+   * 읽는 자: get_stats() — 섹터 캐시의 부분 히트 효율 분석.
+   * 값 범위: 0 ~ m_access (SECTOR 캐시에서만 의미 있음).
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_dirty;
+  /* [한국어] 현재 MODIFIED 상태(더티)인 캐시 라인 수.
+   * 설정자: inc_dirty()로 쓰기 히트 시 증가; flush()/fill() 등에서 감소.
+   * 읽는 자: 통계 수집 — 더티 라인 비율 모니터링.
+   * 값 범위: 0 ~ get_num_lines().
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 
   // performance counters for calculating the amount of misses within a time
   // window
   unsigned m_prev_snapshot_access;
+  /* [한국어] 마지막 new_window() 호출 시점의 m_access 스냅샷.
+   * 설정자: new_window()에서 현재 m_access 값으로 업데이트.
+   * 읽는 자: windowed_miss_rate()에서 윈도우 내 증분 계산.
+   * 값 범위: 0 ~ m_access.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_prev_snapshot_miss;
+  /* [한국어] 마지막 new_window() 시점의 m_miss 스냅샷.
+   * 설정자: new_window()에서 업데이트.
+   * 읽는 자: windowed_miss_rate() — 윈도우 미스율 분자.
+   * 값 범위: 0 ~ m_miss.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned m_prev_snapshot_pending_hit;
+  /* [한국어] 마지막 new_window() 시점의 m_pending_hit 스냅샷.
+   * 설정자: new_window()에서 업데이트.
+   * 읽는 자: windowed_miss_rate() — 윈도우 내 pending hit 증분.
+   * 값 범위: 0 ~ m_pending_hit.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 
   int m_core_id;  // which shader core is using this
+  /* [한국어] 이 태그 배열을 소유한 SM(Shader Core) 인덱스.
+   * 설정자: init()에서 생성자 인자 core_id로 설정.
+   * 읽는 자: 통계 출력 시 어느 SM의 캐시 통계인지 구분.
+   * 값 범위: 0 ~ (SM 수 - 1). -1이면 L2 등 SM 비귀속 캐시.
+   * 동기화: 초기화 후 읽기 전용. */
   int m_type_id;  // what kind of cache is this (normal, texture, constant)
+  /* [한국어] 캐시 유형 구분자 (0=일반 데이터, 1=텍스처, 2=상수 등).
+   * 설정자: init()에서 생성자 인자 type_id로 설정.
+   * 읽는 자: 통계 출력 시 캐시 유형 구분.
+   * 값 범위: 정수 (유형별 convention은 shader.cc 참조).
+   * 동기화: 초기화 후 읽기 전용. */
 
   bool is_used;  // a flag if the whole cache has ever been accessed before
+  /* [한국어] 이 캐시가 시뮬레이션 시작 후 한 번이라도 접근됐는지 여부.
+   * 설정자: access()에서 첫 접근 시 true로 설정.
+   * 읽는 자: 통계 출력 시 사용 여부 확인 (미사용 캐시 통계 스킵).
+   * 값 범위: true/false.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 
   typedef tr1_hash_map<new_addr_type, unsigned> line_table;
+  /* [한국어] 블록 주소 → pending 요청 수 매핑 타입 (SECTOR 캐시용 섹터 응답 추적).
+   * 같은 블록 주소의 여러 섹터 요청이 독립적으로 발행될 때 모든 섹터가 도착했는지 추적. */
   line_table pending_lines;
+  /* [한국어] 블록 주소별 아직 도착하지 않은 섹터 요청 수를 추적하는 테이블.
+   * 설정자: add_pending_line() — 섹터 요청 발행 시 카운터 증가.
+   * 읽는 자: remove_pending_line() — 섹터 응답 도착 시 감소, 0이 되면 엔트리 제거.
+   * 값 범위: 블록 주소 → (1 ~ SECTOR_CHUNCK_SIZE).
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 };
 
+/* [한국어] MSHR (Miss Status Holding Register) 테이블.
+ * 캐시 미스 발생 시 같은 캐시라인에 대한 중복 요청을 하나의 엔트리에 병합(merge)하여
+ * 하위 메모리로의 중복 요청을 방지하고, fill 완료 시 병합된 모든 요청을 함께 처리한다.
+ * 완전 연상(fully associative) 구조로, 최대 m_num_entries개의 서로 다른 블록 주소를 추적한다.
+ * fill 응답이 도착하면 mark_ready()로 엔트리를 준비 완료 표시하고,
+ * next_access()로 병합된 요청들을 순서대로 꺼내 처리한다.
+ * 호출 체인: baseline_cache::send_read_request() → mshr_table::add()
+ *            → (fill 도착) → mark_ready() → next_access() */
 class mshr_table {
  public:
+  /*
+   * [한국어]
+   * mshr_table 생성자 — MSHR 엔트리 수와 최대 병합 수 초기화
+   *
+   * @num_entries: MSHR 최대 엔트리 수 (서로 다른 블록 주소 추적 한계)
+   * @max_merged: 엔트리 하나에 병합할 수 있는 최대 요청 수
+   *
+   * tr1_hash_map이 std::map이 아닌 경우 해시맵 버킷을 2*num_entries로 초기화하여
+   * 해시 충돌을 최소화한다.
+   * 호출 체인: baseline_cache 생성자 → m_mshrs(config.m_mshr_entries, config.m_mshr_max_merge)
+   */
   mshr_table(unsigned num_entries, unsigned max_merged)
       : m_num_entries(num_entries),
         m_max_merged(max_merged)
 #if (tr1_hash_map_ismap == 0)
         ,
-        m_data(2 * num_entries)
+        m_data(2 * num_entries) /* [한국어] 해시맵 버킷 수를 엔트리 수의 2배로 설정 — 충돌 최소화 */
 #endif
   {
   }
 
+  /* [한국어] probe - 이 블록 주소에 대한 진행 중인 MSHR 엔트리가 있는지 확인.
+   * @block_addr: 확인할 캐시라인 베이스 주소
+   * @return: true이면 이미 동일 블록에 대한 요청이 MSHR에 등록되어 있음 (MSHR_HIT 가능)
+   * 호출: baseline_cache::send_read_request() — MSHR_HIT 처리 전 확인 */
   /// Checks if there is a pending request to the lower memory level already
   bool probe(new_addr_type block_addr) const;
+  /* [한국어] full - MSHR에 새 엔트리 추가 또는 기존 엔트리에 병합이 가능한지 확인.
+   * @block_addr: 추가하려는 블록 주소
+   * @return: true이면 MSHR 포화 (MSHR_ENRTY_FAIL 또는 MSHR_MERGE_ENRTY_FAIL 발생)
+   * 이미 이 블록의 엔트리가 있으면 m_max_merged 미만인지, 없으면 m_num_entries 미만인지 검사 */
   /// Checks if there is space for tracking a new memory access
   bool full(new_addr_type block_addr) const;
+  /* [한국어] add - 새 요청을 MSHR에 추가하거나 기존 엔트리에 병합.
+   * @block_addr: 캐시라인 베이스 주소
+   * @mf: 추가할 mem_fetch (원자 연산 여부 m_has_atomic 업데이트에도 사용)
+   * full() 확인 후 호출해야 함 — full() 상태에서 호출 시 assert 실패 */
   /// Add or merge this access
   void add(new_addr_type block_addr, mem_fetch *mf);
+  /* [한국어] busy - MSHR이 새 fill 응답을 받을 수 없는 상태인지 반환.
+   * 현재 구현은 항상 false를 반환 — 실제 바쁨 판정은 미구현 */
   /// Returns true if cannot accept new fill responses
   bool busy() const { return false; }
+  /* [한국어] mark_ready - fill 응답 도착 시 해당 블록 주소 엔트리를 처리 준비 완료로 표시.
+   * @block_addr: fill이 완료된 블록 주소
+   * @has_atomic: [출력] 이 엔트리에 원자 연산이 포함됐는지 여부
+   * m_current_response 리스트에 block_addr를 추가하여 next_access()가 꺼낼 수 있게 함 */
   /// Accept a new cache fill response: mark entry ready for processing
   void mark_ready(new_addr_type block_addr, bool &has_atomic);
+  /* [한국어] access_ready - 처리 준비된 완료 요청이 있는지 반환.
+   * m_current_response 리스트가 비어있지 않으면 true — baseline_cache::cycle()에서 확인 */
   /// Returns true if ready accesses exist
   bool access_ready() const { return !m_current_response.empty(); }
+  /* [한국어] next_access - 처리 준비된 다음 mem_fetch를 반환하고 MSHR에서 제거.
+   * m_current_response에서 block_addr를 꺼내고, m_data에서 해당 엔트리의 첫 mem_fetch를 pop.
+   * 엔트리의 모든 요청이 처리되면 m_data에서 엔트리 완전 제거 */
   /// Returns next ready access
   mem_fetch *next_access();
+  /* [한국어] display - 현재 MSHR 상태를 fp에 출력 (디버그/dump용) */
   void display(FILE *fp) const;
+  /* [한국어] is_read_after_write_pending - 이 블록에 쓰기 요청 후 읽기 요청이 대기 중인지 확인.
+   * @block_addr: 확인할 블록 주소
+   * @return: true이면 RAW(Read-After-Write) 위험이 있음 — 쓰기 완료 전 읽기 차단 필요
+   * LAZY_FETCH_ON_READ 정책에서 쓰기 후 읽기 시 교착 방지에 사용 */
   // Returns true if there is a pending read after write
   bool is_read_after_write_pending(new_addr_type block_addr);
 
+  /* [한국어] check_mshr_parameters - 커널 간 MSHR 파라미터 변경 여부 검증.
+   * @num_entries: 확인할 MSHR 엔트리 수
+   * @max_merged: 확인할 최대 병합 수
+   * GPGPU-Sim은 커널 간 MSHR 설정 변경을 허용하지 않음 (assert로 강제) */
   void check_mshr_parameters(unsigned num_entries, unsigned max_merged) {
     assert(m_num_entries == num_entries &&
            "Change of MSHR parameters between kernels is not allowed");
+    /* [한국어] MSHR 엔트리 수 변경 시도 감지 — 허용되지 않음 */
     assert(m_max_merged == max_merged &&
            "Change of MSHR parameters between kernels is not allowed");
+    /* [한국어] 최대 병합 수 변경 시도 감지 — 허용되지 않음 */
   }
 
  private:
   // finite sized, fully associative table, with a finite maximum number of
   // merged requests
+  /* [한국어] MSHR 구현: 유한 크기 완전 연상 테이블, 병합 수 제한 있음 */
   const unsigned m_num_entries;
+  /* [한국어] MSHR 최대 엔트리 수 (서로 다른 블록 주소 동시 추적 한계).
+   * 설정자: 생성자에서 config.m_mshr_entries로 초기화; const이므로 이후 변경 불가.
+   * 읽는 자: full() — 새 엔트리 추가 가능 여부 판단.
+   * 값 범위: 양의 정수 (예: 32, 64, 128).
+   * 동기화: 생성자 이후 불변. */
   const unsigned m_max_merged;
+  /* [한국어] 하나의 MSHR 엔트리에 병합할 수 있는 최대 요청 수.
+   * 설정자: 생성자에서 config.m_mshr_max_merge로 초기화; const이므로 이후 변경 불가.
+   * 읽는 자: full() — 기존 엔트리 병합 한계 초과 여부 판단.
+   * 값 범위: 양의 정수 (예: 8, 10, 16).
+   * 동기화: 생성자 이후 불변. */
 
   struct mshr_entry {
-    std::list<mem_fetch *> m_list;
-    bool m_has_atomic;
-    mshr_entry() : m_has_atomic(false) {}
+    /* [한국어] MSHR 엔트리 하나를 표현하는 내부 구조체.
+     * 같은 블록 주소로 향하는 요청들의 리스트와 원자 연산 포함 여부를 보유한다.
+     * m_list: 동일 블록 주소에 병합된 mem_fetch 포인터 리스트.
+     *   설정자: add()에서 mf를 push_back; next_access()에서 pop_front.
+     *   읽는 자: next_access(), mark_ready() — 처리 순서 보장을 위한 FIFO.
+     * m_has_atomic: 이 엔트리에 원자 연산(LD/ST atomic) 요청이 포함됐는지.
+     *   설정자: add()에서 mf->is_atomic() 확인 후 true로 설정.
+     *   읽는 자: mark_ready()에서 has_atomic 출력 인자로 반환 → shader.cc에서 원자 연산 완료 처리. */
+    std::list<mem_fetch *> m_list;  /* [한국어] 병합된 mem_fetch 요청 리스트 (FIFO 순서) */
+    bool m_has_atomic;              /* [한국어] 원자 연산 포함 여부 — fill 완료 시 원자 처리 경로 분기 */
+    mshr_entry() : m_has_atomic(false) {} /* [한국어] 기본 생성자 — 원자 연산 없음으로 초기화 */
   };
-  typedef tr1_hash_map<new_addr_type, mshr_entry> table;
-  typedef tr1_hash_map<new_addr_type, mshr_entry> line_table;
+  typedef tr1_hash_map<new_addr_type, mshr_entry> table;      /* [한국어] 블록 주소 → mshr_entry 해시맵 타입 */
+  typedef tr1_hash_map<new_addr_type, mshr_entry> line_table; /* [한국어] 라인 단위 pending 추적용 해시맵 타입 (sector 캐시용) */
   table m_data;
+  /* [한국어] MSHR 엔트리 해시맵: 블록 주소 → mshr_entry.
+   * 설정자: add()에서 새 엔트리 삽입 또는 기존 엔트리 m_list에 append.
+   * 읽는 자: probe()/full() — 엔트리 존재 및 크기 확인; next_access() — 요청 꺼내기.
+   * 값 범위: 최대 m_num_entries개 엔트리; 각 엔트리는 최대 m_max_merged개 요청.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   line_table pending_lines;
+  /* [한국어] sector 캐시에서 라인 단위 pending 요청 추적 (현재 활용 미확인, 확장 목적).
+   * 설정자/읽는 자: 현재 mshr_table 내부에서 직접 사용되지 않을 수 있음.
+   * 동기화: 단일 SM 컨텍스트. */
 
   // it may take several cycles to process the merged requests
   bool m_current_response_ready;
+  /* [한국어] 현재 처리 준비된 응답이 있는지 플래그 (access_ready()의 보조).
+   * 설정자: mark_ready()에서 true로 설정.
+   * 읽는 자: 현재 access_ready()는 m_current_response.empty()를 사용하므로 이 필드는 보조.
+   * 값 범위: true/false.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   std::list<new_addr_type> m_current_response;
+  /* [한국어] fill 완료 후 처리 대기 중인 블록 주소 리스트.
+   * 설정자: mark_ready()에서 block_addr를 push_back.
+   * 읽는 자: access_ready() — 비어있지 않으면 처리 준비 완료; next_access() — front를 pop하여 처리.
+   * 값 범위: 처리 대기 중인 블록 주소 0~N개.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 };
 
 /***************************************************************** Caches
@@ -1686,113 +2282,254 @@ class mshr_table {
 /// Simple struct to maintain cache accesses, misses, pending hits, and
 /// reservation fails.
 ///
+/* [한국어] 캐시 접근 통계를 집계하는 간단한 구조체.
+ * cache_stats::get_sub_stats()가 이 구조체에 통계를 채우고,
+ * gpu-sim.cc의 통계 출력 함수들이 이 값을 참조하여 캐시 효율을 보고한다.
+ * cache_sub_stats_pw와 달리 read/write 구분 없이 통합 집계한다.
+ * 사용 패턴: cache_sub_stats css; cache.get_sub_stats(css); // css에 통계 채움 */
 struct cache_sub_stats {
   unsigned long long accesses;
+  /* [한국어] 총 캐시 접근 횟수 (HIT + HIT_RESERVED + MISS + RESERVATION_FAIL).
+   * 설정자: cache_stats::get_sub_stats()에서 m_stats 배열을 합산하여 채움.
+   * 읽는 자: gpu-sim.cc 통계 출력, 미스율 계산 (misses / accesses).
+   * 값 범위: 0 ~ 전체 시뮬레이션 접근 수.
+   * 동기화: 통계 출력 단계에서만 읽음. */
   unsigned long long misses;
+  /* [한국어] 총 캐시 미스 횟수 (실제 메모리 요청을 발생시킨 접근 수).
+   * 설정자: cache_stats::get_sub_stats()에서 MISS 상태 통계 합산.
+   * 읽는 자: 미스율 계산 (misses / accesses), 성능 분석 보고.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 통계 출력 단계에서만 읽음. */
   unsigned long long pending_hits;
+  /* [한국어] HIT_RESERVED(pending hit) 횟수 — MSHR에 진행 중인 요청과 같은 라인 hit.
+   * 설정자: cache_stats::get_sub_stats()에서 HIT_RESERVED 상태 통계 합산.
+   * 읽는 자: MSHR 효율(병합 히트율) 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 통계 출력 단계에서만 읽음. */
   unsigned long long res_fails;
+  /* [한국어] RESERVATION_FAIL 횟수 — MSHR/miss_queue 포화로 요청이 거부된 횟수.
+   * 설정자: cache_stats::get_sub_stats()에서 RESERVATION_FAIL 상태 통계 합산.
+   * 읽는 자: 캐시 병목(backpressure) 분석 — 이 값이 크면 MSHR 확장 필요.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 통계 출력 단계에서만 읽음. */
 
   unsigned long long port_available_cycles;
+  /* [한국어] 데이터 포트가 사용 가능했던 총 사이클 수 (포트 활용률 분모).
+   * 설정자: bandwidth_management::replenish_port_bandwidth()에서 사이클마다 증가.
+   * 읽는 자: print_port_stats() — 포트 활용률 = data_port_busy_cycles / port_available_cycles.
+   * 값 범위: 0 ~ 전체 시뮬레이션 사이클 수.
+   * 동기화: 통계 출력 단계에서만 읽음. */
   unsigned long long data_port_busy_cycles;
+  /* [한국어] 데이터 포트(캐시 배열 읽기/쓰기 포트)가 사용 중이었던 사이클 수.
+   * 설정자: bandwidth_management::use_data_port()에서 접근 시 업데이트.
+   * 읽는 자: print_port_stats() — 데이터 포트 포화도 계산.
+   * 값 범위: 0 ~ port_available_cycles.
+   * 동기화: 통계 출력 단계에서만 읽음. */
   unsigned long long fill_port_busy_cycles;
+  /* [한국어] fill 포트(하위 메모리 응답 수신 포트)가 사용 중이었던 사이클 수.
+   * 설정자: bandwidth_management::use_fill_port()에서 fill 처리 시 업데이트.
+   * 읽는 자: print_port_stats() — fill 포트 포화도 계산.
+   * 값 범위: 0 ~ port_available_cycles.
+   * 동기화: 통계 출력 단계에서만 읽음. */
 
+  /* [한국어] cache_sub_stats 기본 생성자 — clear()로 모든 카운터 0 초기화 */
   cache_sub_stats() { clear(); }
+  /*
+   * [한국어]
+   * clear - 모든 통계 카운터를 0으로 초기화
+   *
+   * AerialVision 윈도우 초기화 또는 통계 집계 전 클리어에 사용.
+   * 호출 체인: cache_sub_stats() → clear() / clear_pw()에서 직접 호출
+   */
   void clear() {
-    accesses = 0;
-    misses = 0;
-    pending_hits = 0;
-    res_fails = 0;
-    port_available_cycles = 0;
-    data_port_busy_cycles = 0;
-    fill_port_busy_cycles = 0;
+    accesses = 0;            /* [한국어] 총 접근 수 초기화 */
+    misses = 0;              /* [한국어] 총 미스 수 초기화 */
+    pending_hits = 0;        /* [한국어] HIT_RESERVED 수 초기화 */
+    res_fails = 0;           /* [한국어] RESERVATION_FAIL 수 초기화 */
+    port_available_cycles = 0;  /* [한국어] 포트 사용 가능 사이클 초기화 */
+    data_port_busy_cycles = 0;  /* [한국어] 데이터 포트 사용 사이클 초기화 */
+    fill_port_busy_cycles = 0;  /* [한국어] fill 포트 사용 사이클 초기화 */
   }
+  /*
+   * [한국어]
+   * operator+= - 다른 cache_sub_stats를 현재 통계에 누적 합산
+   *
+   * @css: 합산할 통계 구조체
+   * @return: 누적된 this 참조
+   *
+   * 여러 캐시 인스턴스(SM별 L1, L2 파티션 등)의 통계를 단일 구조체에 누계할 때 사용.
+   * 호출 체인: gpu-sim.cc 통계 집계 루프에서 각 SM/파티션 통계 합산
+   */
   cache_sub_stats &operator+=(const cache_sub_stats &css) {
     ///
     /// Overloading += operator to easily accumulate stats
     ///
-    accesses += css.accesses;
-    misses += css.misses;
-    pending_hits += css.pending_hits;
-    res_fails += css.res_fails;
-    port_available_cycles += css.port_available_cycles;
-    data_port_busy_cycles += css.data_port_busy_cycles;
-    fill_port_busy_cycles += css.fill_port_busy_cycles;
-    return *this;
+    accesses += css.accesses;                         /* [한국어] 접근 수 누적 */
+    misses += css.misses;                             /* [한국어] 미스 수 누적 */
+    pending_hits += css.pending_hits;                 /* [한국어] pending hit 수 누적 */
+    res_fails += css.res_fails;                       /* [한국어] RESERVATION_FAIL 수 누적 */
+    port_available_cycles += css.port_available_cycles; /* [한국어] 포트 사용 가능 사이클 누적 */
+    data_port_busy_cycles += css.data_port_busy_cycles; /* [한국어] 데이터 포트 사용 사이클 누적 */
+    fill_port_busy_cycles += css.fill_port_busy_cycles; /* [한국어] fill 포트 사용 사이클 누적 */
+    return *this; /* [한국어] 누적된 자신 반환 */
   }
 
+  /*
+   * [한국어]
+   * operator+ - 두 cache_sub_stats의 합을 새 객체로 반환
+   *
+   * @cs: 합산할 통계 구조체
+   * @return: 두 통계의 합을 담은 새 cache_sub_stats 객체
+   *
+   * 두 캐시의 통계를 새 변수에 합산할 때 사용 (예: L1 + L2 통계 결합).
+   */
   cache_sub_stats operator+(const cache_sub_stats &cs) {
     ///
     /// Overloading + operator to easily accumulate stats
     ///
-    cache_sub_stats ret;
-    ret.accesses = accesses + cs.accesses;
-    ret.misses = misses + cs.misses;
-    ret.pending_hits = pending_hits + cs.pending_hits;
-    ret.res_fails = res_fails + cs.res_fails;
+    cache_sub_stats ret;                               /* [한국어] 결과를 담을 새 통계 구조체 생성 */
+    ret.accesses = accesses + cs.accesses;             /* [한국어] 접근 수 합산 */
+    ret.misses = misses + cs.misses;                   /* [한국어] 미스 수 합산 */
+    ret.pending_hits = pending_hits + cs.pending_hits; /* [한국어] pending hit 합산 */
+    ret.res_fails = res_fails + cs.res_fails;          /* [한국어] RESERVATION_FAIL 합산 */
     ret.port_available_cycles =
-        port_available_cycles + cs.port_available_cycles;
+        port_available_cycles + cs.port_available_cycles; /* [한국어] 포트 사용 가능 사이클 합산 */
     ret.data_port_busy_cycles =
-        data_port_busy_cycles + cs.data_port_busy_cycles;
+        data_port_busy_cycles + cs.data_port_busy_cycles; /* [한국어] 데이터 포트 사용 사이클 합산 */
     ret.fill_port_busy_cycles =
-        fill_port_busy_cycles + cs.fill_port_busy_cycles;
-    return ret;
+        fill_port_busy_cycles + cs.fill_port_busy_cycles; /* [한국어] fill 포트 사용 사이클 합산 */
+    return ret; /* [한국어] 합산 결과 반환 */
   }
 
+  /* [한국어] print_port_stats - 포트 활용률 통계를 fout에 출력.
+   * data_port_busy_cycles / port_available_cycles 비율로 포트 포화도를 보고한다.
+   * 구현은 gpu-cache.cc에 있음. */
   void print_port_stats(FILE *fout, const char *cache_name) const;
 };
 
 // Used for collecting AerialVision per-window statistics
+/* [한국어] AerialVision 성능 가시화 도구용 시간 윈도우(per-window) 캐시 통계 구조체.
+ * cache_sub_stats와 달리 읽기/쓰기를 구분하여 집계한다.
+ * new_window() 호출마다 clear()로 초기화되어 윈도우 단위 성능 추이를 추적한다.
+ * 사용 패턴: 주기적으로 get_sub_stats_pw()로 읽고 clear_pw()로 초기화 반복. */
 struct cache_sub_stats_pw {
   unsigned accesses;
+  /* [한국어] 윈도우 내 총 캐시 접근 횟수 (읽기+쓰기 통합).
+   * 설정자: inc_stats_pw()에서 접근 시마다 증가.
+   * 읽는 자: AerialVision 가시화 도구 — 시간대별 접근 패턴 표시.
+   * 값 범위: 0 ~ 윈도우 기간 내 접근 수.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned write_misses;
+  /* [한국어] 윈도우 내 쓰기 미스 횟수.
+   * 설정자: inc_stats_pw()에서 쓰기+MISS 조합 시 증가.
+   * 읽는 자: AerialVision — 쓰기 효율 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned write_hits;
+  /* [한국어] 윈도우 내 쓰기 히트 횟수.
+   * 설정자: inc_stats_pw()에서 쓰기+HIT 조합 시 증가.
+   * 읽는 자: AerialVision — 쓰기 히트율 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned write_pending_hits;
+  /* [한국어] 윈도우 내 쓰기 HIT_RESERVED 횟수 (쓰기 pending hit).
+   * 설정자: inc_stats_pw()에서 쓰기+HIT_RESERVED 조합 시 증가.
+   * 읽는 자: AerialVision — 쓰기 MSHR 병합 효율.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned write_res_fails;
+  /* [한국어] 윈도우 내 쓰기 RESERVATION_FAIL 횟수.
+   * 설정자: inc_stats_pw()에서 쓰기+RESERVATION_FAIL 시 증가.
+   * 읽는 자: AerialVision — 쓰기 캐시 병목 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 
   unsigned read_misses;
+  /* [한국어] 윈도우 내 읽기 미스 횟수.
+   * 설정자: inc_stats_pw()에서 읽기+MISS 조합 시 증가.
+   * 읽는 자: AerialVision — 읽기 효율 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned read_hits;
+  /* [한국어] 윈도우 내 읽기 히트 횟수.
+   * 설정자: inc_stats_pw()에서 읽기+HIT 조합 시 증가.
+   * 읽는 자: AerialVision — 읽기 히트율 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned read_pending_hits;
+  /* [한국어] 윈도우 내 읽기 HIT_RESERVED 횟수.
+   * 설정자: inc_stats_pw()에서 읽기+HIT_RESERVED 조합 시 증가.
+   * 읽는 자: AerialVision — 읽기 MSHR 병합 효율.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
   unsigned read_res_fails;
+  /* [한국어] 윈도우 내 읽기 RESERVATION_FAIL 횟수.
+   * 설정자: inc_stats_pw()에서 읽기+RESERVATION_FAIL 시 증가.
+   * 읽는 자: AerialVision — 읽기 캐시 병목 분석.
+   * 값 범위: 0 ~ accesses.
+   * 동기화: 단일 SM 컨텍스트, 락 불필요. */
 
+  /* [한국어] cache_sub_stats_pw 기본 생성자 — clear()로 모든 카운터 0 초기화 */
   cache_sub_stats_pw() { clear(); }
+  /*
+   * [한국어]
+   * clear - 윈도우 통계 카운터 전체 초기화
+   *
+   * AerialVision 윈도우 전환 시 호출되어 새 윈도우의 통계를 깨끗이 시작한다.
+   * 호출 체인: cache_stats::clear_pw() → cache_sub_stats_pw::clear()
+   */
   void clear() {
-    accesses = 0;
-    write_misses = 0;
-    write_hits = 0;
-    write_pending_hits = 0;
-    write_res_fails = 0;
-    read_misses = 0;
-    read_hits = 0;
-    read_pending_hits = 0;
-    read_res_fails = 0;
+    accesses = 0;              /* [한국어] 총 접근 수 초기화 */
+    write_misses = 0;          /* [한국어] 쓰기 미스 수 초기화 */
+    write_hits = 0;            /* [한국어] 쓰기 히트 수 초기화 */
+    write_pending_hits = 0;    /* [한국어] 쓰기 pending hit 수 초기화 */
+    write_res_fails = 0;       /* [한국어] 쓰기 RESERVATION_FAIL 수 초기화 */
+    read_misses = 0;           /* [한국어] 읽기 미스 수 초기화 */
+    read_hits = 0;             /* [한국어] 읽기 히트 수 초기화 */
+    read_pending_hits = 0;     /* [한국어] 읽기 pending hit 수 초기화 */
+    read_res_fails = 0;        /* [한국어] 읽기 RESERVATION_FAIL 수 초기화 */
   }
+  /*
+   * [한국어]
+   * operator+= - 다른 cache_sub_stats_pw를 현재 윈도우 통계에 누적
+   *
+   * @css: 합산할 윈도우 통계 구조체
+   * @return: 누적된 this 참조
+   */
   cache_sub_stats_pw &operator+=(const cache_sub_stats_pw &css) {
     ///
     /// Overloading += operator to easily accumulate stats
     ///
-    accesses += css.accesses;
-    write_misses += css.write_misses;
-    read_misses += css.read_misses;
-    write_pending_hits += css.write_pending_hits;
-    read_pending_hits += css.read_pending_hits;
-    write_res_fails += css.write_res_fails;
-    read_res_fails += css.read_res_fails;
-    return *this;
+    accesses += css.accesses;                       /* [한국어] 총 접근 수 누적 */
+    write_misses += css.write_misses;               /* [한국어] 쓰기 미스 수 누적 */
+    read_misses += css.read_misses;                 /* [한국어] 읽기 미스 수 누적 */
+    write_pending_hits += css.write_pending_hits;   /* [한국어] 쓰기 pending hit 수 누적 */
+    read_pending_hits += css.read_pending_hits;     /* [한국어] 읽기 pending hit 수 누적 */
+    write_res_fails += css.write_res_fails;         /* [한국어] 쓰기 RESERVATION_FAIL 누적 */
+    read_res_fails += css.read_res_fails;           /* [한국어] 읽기 RESERVATION_FAIL 누적 */
+    return *this; /* [한국어] 누적된 자신 반환 */
   }
 
+  /*
+   * [한국어]
+   * operator+ - 두 윈도우 통계의 합을 새 객체로 반환
+   *
+   * @cs: 합산할 윈도우 통계 구조체
+   * @return: 합산 결과를 담은 새 cache_sub_stats_pw 객체
+   */
   cache_sub_stats_pw operator+(const cache_sub_stats_pw &cs) {
     ///
     /// Overloading + operator to easily accumulate stats
     ///
-    cache_sub_stats_pw ret;
-    ret.accesses = accesses + cs.accesses;
-    ret.write_misses = write_misses + cs.write_misses;
-    ret.read_misses = read_misses + cs.read_misses;
-    ret.write_pending_hits = write_pending_hits + cs.write_pending_hits;
-    ret.read_pending_hits = read_pending_hits + cs.read_pending_hits;
-    ret.write_res_fails = write_res_fails + cs.write_res_fails;
-    ret.read_res_fails = read_res_fails + cs.read_res_fails;
-    return ret;
+    cache_sub_stats_pw ret;                                 /* [한국어] 결과 구조체 생성 */
+    ret.accesses = accesses + cs.accesses;                  /* [한국어] 총 접근 수 합산 */
+    ret.write_misses = write_misses + cs.write_misses;      /* [한국어] 쓰기 미스 합산 */
+    ret.read_misses = read_misses + cs.read_misses;         /* [한국어] 읽기 미스 합산 */
+    ret.write_pending_hits = write_pending_hits + cs.write_pending_hits; /* [한국어] 쓰기 pending hit 합산 */
+    ret.read_pending_hits = read_pending_hits + cs.read_pending_hits;    /* [한국어] 읽기 pending hit 합산 */
+    ret.write_res_fails = write_res_fails + cs.write_res_fails;          /* [한국어] 쓰기 RESERVATION_FAIL 합산 */
+    ret.read_res_fails = read_res_fails + cs.read_res_fails;             /* [한국어] 읽기 RESERVATION_FAIL 합산 */
+    return ret; /* [한국어] 합산 결과 반환 */
   }
 };
 
