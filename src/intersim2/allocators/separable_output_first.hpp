@@ -1,6 +1,25 @@
 // $Id: separable_output_first.hpp 5188 2012-08-30 00:31:31Z dub $
 
 /*
+ * [한국어 설명] 출력 먼저 분리 할당기 선언 (separable_output_first.hpp)
+ *
+ * === 파일의 역할 ===
+ * SeparableOutputFirstAllocator를 선언한다. "출력 먼저(Output-First)"는 1단계에서 각 출력
+ * 중재기가 먼저 담당할 입력을 하나 선택하고, 2단계에서 선택된 입력 중재기가 최종 출력을
+ * 결정하는 순서를 의미한다. 이 방식은 출력 측 공정성을 우선한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * Allocator::NewAllocator("separable_output_first")로 생성. IQRouter VC/스위치 할당기.
+ *
+ * === 타 모듈과의 연결 ===
+ * - SeparableAllocator: 상속
+ * - Arbiter: 1단계 출력 중재, 2단계 입력 중재에 사용
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - Allocate(): 1단계(출력 중재) → 2단계(입력 중재) 순서로 매칭 결정
+ */
+
+/*
  Copyright (c) 2007-2012, Trustees of The Leland Stanford Junior University
  All rights reserved.
 

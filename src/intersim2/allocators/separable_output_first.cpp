@@ -1,6 +1,26 @@
 // $Id: separable_output_first.cpp 5188 2012-08-30 00:31:31Z dub $
 
 /*
+ * [한국어 설명] 출력 먼저 분리 할당기 구현 (separable_output_first.cpp)
+ *
+ * === 파일의 역할 ===
+ * SeparableOutputFirstAllocator::Allocate()를 구현한다.
+ * 1단계: 각 활성 출력(_out_occ)의 요청을 _output_arb[output]에 등록하고 입력 하나를 선택.
+ * 2단계: 선택된 (input, output) 쌍을 _input_arb[input]에 등록하고 최종 출력을 선택.
+ * SeparableInputFirst의 역순 — 출력이 먼저 수락할 입력을 결정한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * IQRouter → SeparableOutputFirstAllocator::Allocate()
+ *
+ * === 타 모듈과의 연결 ===
+ * - SeparableAllocator: 상속
+ * - Arbiter: 1단계 출력 중재, 2단계 입력 중재
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - Allocate(): 출력 먼저 → 입력 최종 결정 2단계 분리 매칭 알고리즘
+ */
+
+/*
  Copyright (c) 2007-2012, Trustees of The Leland Stanford Junior University
  All rights reserved.
 
@@ -46,58 +66,72 @@ SeparableOutputFirstAllocator( Module* parent, const string& name, int inputs,
   : SeparableAllocator( parent, name, inputs, outputs, arb_type )
 {}
 
+/*
+ * [한국어] SeparableOutputFirstAllocator::Allocate - 출력 먼저 분리 매칭 알고리즘 실행
+ *
+ * 1단계: 활성 출력(_out_occ) 순회 → _output_arb[output]에 요청 등록 → Arbitrate()로 입력 선택
+ *        → 선택된 입력의 _input_arb[input]에 이 쌍을 등록.
+ * 2단계: 활성 입력(_in_occ) 순회 → _input_arb[input]->Arbitrate()로 최종 출력 선택
+ *        → _inmatch/_outmatch 기록 + UpdateState()로 중재기 상태 갱신.
+ *
+ * SeparableInputFirst와 역순으로 동작 — 출력이 먼저 원하는 입력을 결정.
+ */
 void SeparableOutputFirstAllocator::Allocate() {
-  
-  set<int>::const_iterator port_iter = _out_occ.begin();
+
+  // [한국어] 1단계: 출력 중재 — 각 활성 출력이 원하는 입력 하나를 선택
+  set<int>::const_iterator port_iter = _out_occ.begin(); // [한국어] 활성 출력 집합 순회 시작
   while(port_iter != _out_occ.end()) {
-    
-    const int & output = *port_iter;
+
+    const int & output = *port_iter; // [한국어] 현재 처리 중인 출력 포트
 
     // add requests to the output arbiter
-
+    // [한국어] 이 출력을 요청하는 모든 입력을 _output_arb[output]에 등록
     map<int, sRequest>::const_iterator req_iter = _out_req[output].begin();
-    while(req_iter != _out_req[output].end()) {
-      
-      const sRequest & req = req_iter->second;
+    while(req_iter != _out_req[output].end()) { // [한국어] 이 출력을 원하는 모든 입력 열거
+
+      const sRequest & req = req_iter->second; // [한국어] 요청 메타데이터
 
       _output_arb[output]->AddRequest(req.port, req.label, req.out_pri);
+      // [한국어] 출력 중재기에 (입력 포트, 레이블, 출력측 우선순위) 등록
 
       ++req_iter;
     }
-    
+
     // Execute the output arbiter and propagate the grants to the
     // input arbiters.
+    // [한국어] 출력 중재기 실행 — 이 출력이 선택할 입력을 결정
+    int label = -1;  // [한국어] 선택된 요청의 레이블
+    const int input = _output_arb[output]->Arbitrate(&label, NULL); // [한국어] 최우선 입력 선택
+    assert(input > -1); // [한국어] 활성 출력이므로 반드시 요청이 존재해야 함
 
-    int label = -1;
-    const int input = _output_arb[output]->Arbitrate(&label, NULL);
-    assert(input > -1);
-
-    const sRequest & req = _in_req[input][output];
-    assert((req.port == output) && (req.label == label));
+    const sRequest & req = _in_req[input][output]; // [한국어] 역방향 맵에서 in_pri 조회
+    assert((req.port == output) && (req.label == label)); // [한국어] 일관성 검사
 
     _input_arb[input]->AddRequest(req.port, req.label, req.in_pri);
+    // [한국어] 입력 중재기에 (출력 포트, 레이블, 입력측 우선순위) 전달
 
-    ++port_iter;
+    ++port_iter; // [한국어] 다음 활성 출력으로
   }
-  
-  port_iter = _in_occ.begin();
+
+  // [한국어] 2단계: 입력 중재 — 각 활성 입력이 최종 수락할 출력을 선택
+  port_iter = _in_occ.begin(); // [한국어] 활성 입력 집합 순회 시작
   while(port_iter != _in_occ.end()) {
-    
-    const int & input = *port_iter;
+
+    const int & input = *port_iter; // [한국어] 현재 처리 중인 입력 포트
 
     // Execute the input arbiters.
-    
+    // [한국어] 입력 중재기 실행 — 1단계에서 이 입력을 선택한 출력 중 최우선 하나를 선택
     const int output = _input_arb[input]->Arbitrate(NULL, NULL);
-  
-    if(output > -1) {
-      assert((_inmatch[input] == -1) && (_outmatch[output] == -1));
 
-      _inmatch[input] = output;
-      _outmatch[output] = input;
-      _input_arb[input]->UpdateState() ;
-      _output_arb[output]->UpdateState() ;
+    if(output > -1) { // [한국어] 선택된 출력이 있으면 매칭 기록
+      assert((_inmatch[input] == -1) && (_outmatch[output] == -1)); // [한국어] 중복 매칭 방지
+
+      _inmatch[input] = output;          // [한국어] 입력 측 매칭 결과 기록
+      _outmatch[output] = input;         // [한국어] 출력 측 매칭 결과 기록
+      _input_arb[input]->UpdateState() ; // [한국어] 입력 중재기 포인터 갱신 (공정성)
+      _output_arb[output]->UpdateState() ; // [한국어] 출력 중재기 포인터 갱신 (공정성)
     }
-    
-    ++port_iter;
+
+    ++port_iter; // [한국어] 다음 활성 입력으로
   }
 }

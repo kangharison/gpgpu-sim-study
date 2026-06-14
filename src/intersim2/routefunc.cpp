@@ -7,7 +7,7 @@
  Redistribution and use in source and binary forms, with or without
  modification, are permitted provided that the following conditions are met:
 
- Redistributions of source code must retain the above copyright notice, this 
+ Redistributions of source code must retain the above copyright notice, this
  list of conditions and the following disclaimer.
  Redistributions in binary form must reproduce the above copyright notice, this
  list of conditions and the following disclaimer in the documentation and/or
@@ -15,7 +15,7 @@
 
  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
@@ -29,34 +29,70 @@
  *
  *This is where most of the routing functions reside. Some of the topologies
  *has their own "register routing functions" which must be called to access
- *those routing functions. 
+ *those routing functions.
  *
- *After writing a routing function, don't forget to register it. The reg 
- *format is rfname_topologyname. 
+ *After writing a routing function, don't forget to register it. The reg
+ *format is rfname_topologyname.
  *
  */
 
-#include <map>
-#include <cstdlib>
-#include <cassert>
+/*
+ * [한국어 설명] NoC 라우팅 알고리즘 구현 (routefunc.cpp)
+ *
+ * === 파일의 역할 ===
+ * BookSim2에서 지원하는 다양한 NoC 라우팅 알고리즘을 구현하고 gRoutingFunctionMap에 등록한다.
+ * 각 라우팅 함수는 현재 라우터 위치와 Flit의 목적지를 입력으로 받아,
+ * 사용 가능한 출구 포트와 VC 범위를 OutputSet에 추가한다.
+ * GPGPU-Sim에서는 주로 "dor_mesh" (Dimension-Order Routing)나
+ * "valiant_mesh" (Valiant 부하 분산 라우팅)을 사용한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 초기화: CreateInterconnect() → InitializeRoutingMap() → gRoutingFunctionMap 채움
+ * 사용:   VC::Route(rf, router, flit, in_ch) → rf() (매 라우팅 단계마다 호출)
+ *         GPUTrafficManager::_Step() → _rf() (주입 단계 VC 결정)
+ *
+ * === 타 모듈과의 연결 ===
+ * - vc.cpp: Route()에서 함수 포인터로 호출
+ * - gputrafficmanager.cpp: _rf를 주입 단계 VC 결정에 사용
+ * - flit.hpp: Flit::type, dest, ph, intm 필드 읽기/쓰기
+ * - router.hpp: Router::GetID(), GetUsedCredit() 참조
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - InitializeRoutingMap(): VC 범위 설정 + 모든 알고리즘 등록
+ * - dor_next_mesh(): 메시에서 DOR 다음 출구 포트 계산 (보조 함수)
+ * - dim_order_mesh(): DOR 라우팅 (결정론적, 데드락 없음)
+ * - valiant_mesh(): Valiant 라우팅 (2단계: 랜덤 중간→목적지)
+ * - min_adapt_mesh(): 최소 경로 적응형 + DOR 이탈 채널
+ * - fattree_nca/anca(): Fat-tree NCA 라우팅 (상향/하향)
+ */
 
-#include "booksim.hpp"
-#include "routefunc.hpp"
-#include "kncube.hpp"
-#include "random_utils.hpp"
-#include "misc_utils.hpp"
-#include "fattree.hpp"
-#include "tree4.hpp"
-#include "qtree.hpp"
-#include "cmesh.hpp"
+#include <map>      // [한국어] gRoutingFunctionMap의 map<string, tRoutingFunction> 타입
+#include <cstdlib>  // [한국어] rand(), abs() 등 표준 라이브러리
+#include <cassert>  // [한국어] assert() 매크로
+
+#include "booksim.hpp"       // [한국어] BookSim 공통 정의 (gN, gK, gNodes 등 글로벌 변수)
+#include "routefunc.hpp"     // [한국어] tRoutingFunction, gRoutingFunctionMap 선언
+#include "kncube.hpp"        // [한국어] k-ary n-cube 토폴로지 라우팅 등록용
+#include "random_utils.hpp"  // [한국어] RandomInt(): 랜덤 중간 노드 선택에 사용
+#include "misc_utils.hpp"    // [한국어] powi(): 지수 계산 (fat-tree 라우팅에서 사용)
+#include "fattree.hpp"       // [한국어] Fat-tree 토폴로지 라우팅 등록용
+#include "tree4.hpp"         // [한국어] Tree4 토폴로지 라우팅 등록용
+#include "qtree.hpp"         // [한국어] QTree 토폴로지 라우팅 등록용
+#include "cmesh.hpp"         // [한국어] Concentrated mesh 토폴로지 라우팅 등록용
 
 
 
 map<string, tRoutingFunction> gRoutingFunctionMap;
+/* [한국어] 라우팅 알고리즘 이름 → 함수 포인터 맵.
+ * InitializeRoutingMap()에서 채워지며, Router 생성자가 설정 파일의
+ * "routing_function" 문자열로 함수를 조회한다.
+ * 예: gRoutingFunctionMap["dor_mesh"] = &dim_order_mesh */
 
 /* Global information used by routing functions */
 
 int gNumVCs;
+/* [한국어] 라우터당 전체 VC 수. 라우팅 함수에서 VC 범위 계산의 상한.
+ * InitializeRoutingMap()에서 설정 파일의 num_vcs로 초기화. */
 
 /* Add more functions here
  *
@@ -64,14 +100,33 @@ int gNumVCs;
 
 // ============================================================
 //  Balfour-Schultz
-int gReadReqBeginVC, gReadReqEndVC;
-int gWriteReqBeginVC, gWriteReqEndVC;
-int gReadReplyBeginVC, gReadReplyEndVC;
-int gWriteReplyBeginVC, gWriteReplyEndVC;
+// [한국어] Balfour-Schultz 방식의 타입별 VC 분리 변수.
+// 요청(0..gNumVCs/2-1)과 응답(gNumVCs/2..gNumVCs-1)으로 VC를 분리하여
+// 요청-응답 순환 의존에 의한 데드락을 방지한다.
+int gReadReqBeginVC, gReadReqEndVC;    // [한국어] 읽기 요청 VC 범위 [Begin, End]
+int gWriteReqBeginVC, gWriteReqEndVC;  // [한국어] 쓰기 요청 VC 범위 [Begin, End]
+int gReadReplyBeginVC, gReadReplyEndVC;   // [한국어] 읽기 응답 VC 범위 [Begin, End]
+int gWriteReplyBeginVC, gWriteReplyEndVC; // [한국어] 쓰기 응답 VC 범위 [Begin, End]
 
 // ============================================================
 //  QTree: Nearest Common Ancestor
 // ===
+/*
+ * [한국어]
+ * qtree_nca() - QTree 토폴로지에서 NCA(Nearest Common Ancestor) 라우팅
+ *
+ * @r: 현재 라우터 (위치 = 트리 높이와 위치로 표현)
+ * @f: 라우팅 대상 Flit
+ * @in_channel: 입구 채널 번호
+ * @outputs: 라우팅 결과 출구 포트 집합 (AddRange로 채움)
+ * @inject: true이면 주입 단계 (out_port = -1)
+ *
+ * QTree의 NCA 라우팅: 현재 라우터가 목적지의 NCA이면 아래로 라우팅,
+ * 아니면 부모 방향(위)으로 라우팅한다.
+ * VC 범위는 패킷 타입(요청/응답)에 따라 분리된다.
+ *
+ * 호출 체인: gRoutingFunctionMap["nca_qtree"] → [이 함수]
+ */
 void qtree_nca( const Router *r, const Flit *f,
 		int in_channel, OutputSet* outputs, bool inject)
 {
@@ -537,6 +592,30 @@ void xy_yx_mesh( const Router *r, const Flit *f,
 
 //=============================================================
 
+/*
+ * [한국어]
+ * dor_next_mesh() - 메시에서 DOR 방식의 다음 출구 포트를 계산하는 보조 함수
+ *
+ * @cur: 현재 라우터의 선형화 ID (좌표: x + y*gK + z*gK^2 + ...)
+ * @dest: 목적지 라우터의 선형화 ID
+ * @descending: false=XY 방향(낮은 차원 우선), true=YX 방향(높은 차원 우선)
+ * @return: 다음 홉 출구 포트 (짝수=+방향, 홀수=-방향, 2*gN=이젝션)
+ *
+ * 동작:
+ *   1. cur==dest이면 이젝션 포트(2*gN) 반환
+ *   2. descending=false: 낮은 차원(x)부터 불일치 차원 탐색
+ *      descending=true:  높은 차원(y,z...)부터 불일치 차원 탐색
+ *   3. 불일치 차원 dim_left에서:
+ *      cur%gK < dest%gK → 오른쪽(+방향): 2*dim_left 반환
+ *      cur%gK > dest%gK → 왼쪽(-방향): 2*dim_left+1 반환
+ *
+ * 메시 포트 번호 규칙:
+ *   dim 0: 포트 0(+x), 포트 1(-x)
+ *   dim 1: 포트 2(+y), 포트 3(-y)
+ *   이젝션: 포트 2*gN
+ *
+ * 호출 체인: dim_order_mesh(), xy_yx_mesh(), valiant_mesh() 등 → [이 함수]
+ */
 int dor_next_mesh( int cur, int dest, bool descending )
 {
   if ( cur == dest ) {
@@ -640,6 +719,24 @@ void dor_next_torus( int cur, int dest, int in_port,
 
 //=============================================================
 
+/*
+ * [한국어]
+ * dim_order_mesh() - 메시 토폴로지의 Dimension-Order Routing (DOR)
+ *
+ * @r: 현재 라우터
+ * @f: 라우팅 대상 Flit
+ * @in_channel: 입구 채널 (DOR에서는 사용하지 않음)
+ * @outputs: 라우팅 결과 출구 포트 집합
+ * @inject: true이면 주입 단계 (out_port = -1)
+ *
+ * 결정론적 DOR: 항상 X→Y→Z 순서로 목적지 방향으로 이동.
+ * 교착 없음(Deadlock-free): 채널 의존 그래프에 사이클이 없음.
+ * 패킷 타입에 따른 VC 분리: 요청(하위 VC)과 응답(상위 VC) 분리.
+ *
+ * GPGPU-Sim에서 가장 많이 사용되는 기본 라우팅 알고리즘.
+ *
+ * 호출 체인: gRoutingFunctionMap["dor_mesh"/"dim_order_mesh"] → [이 함수]
+ */
 void dim_order_mesh( const Router *r, const Flit *f, int in_channel, OutputSet *outputs, bool inject )
 {
   int out_port = inject ? -1 : dor_next_mesh( r->GetID( ), f->dest );
@@ -1273,6 +1370,29 @@ void limited_adapt_mesh( const Router *r, const Flit *f, int in_channel, OutputS
 */
 //=============================================================
 
+/*
+ * [한국어]
+ * valiant_mesh() - Valiant 부하 분산 라우팅 (메시 토폴로지)
+ *
+ * @r: 현재 라우터
+ * @f: 라우팅 대상 Flit (ph, intm 필드 사용)
+ * @in_channel: 입구 채널
+ * @outputs: 라우팅 결과 출구 포트 집합
+ * @inject: true이면 주입 단계
+ *
+ * 2단계 라우팅:
+ *   Phase 0 (f->ph == 0): 랜덤 중간 노드(intm)로 DOR 이동
+ *   Phase 1 (f->ph == 1): 실제 목적지(dest)로 DOR 이동
+ *
+ * 장점: 트래픽 부하를 랜덤 중간 노드를 통해 전체 메시에 균등 분산.
+ * 단점: 경로가 최소 경로의 최대 2배. VC를 phase별로 분리하여 데드락 방지.
+ *   phase 0 → 하위 VC (vcBegin .. vcBegin+available_vcs-1)
+ *   phase 1 → 상위 VC (vcBegin+available_vcs .. vcEnd)
+ *
+ * mutable 필드: f->ph, f->intm 가 라우팅 중 변경됨 (const Flit* 이지만 mutable).
+ *
+ * 호출 체인: gRoutingFunctionMap["valiant_mesh"] → [이 함수]
+ */
 void valiant_mesh( const Router *r, const Flit *f, int in_channel, OutputSet *outputs, bool inject )
 {
   int vcBegin = 0, vcEnd = gNumVCs-1;
@@ -1914,86 +2034,119 @@ void chaos_mesh( const Router *r, const Flit *f,
 
 //=============================================================
 
+/*
+ * [한국어]
+ * InitializeRoutingMap() - VC 범위 설정 및 모든 라우팅 함수를 등록한다
+ *
+ * @config: BookSim 설정 파일 파싱 결과
+ *
+ * 동작 순서:
+ *   1. gNumVCs = num_vcs 설정값 읽기
+ *   2. 타입별 VC 범위 설정 (읽기 요청/쓰기 요청/읽기 응답/쓰기 응답)
+ *      - 음수(-1)이면 기본값 사용:
+ *        요청: 0 .. gNumVCs/2-1
+ *        응답: gNumVCs/2 .. gNumVCs-1
+ *   3. gRoutingFunctionMap에 모든 알고리즘 등록
+ *
+ * VC 분리의 중요성:
+ *   요청 패킷과 응답 패킷이 같은 VC를 사용하면 데드락 가능.
+ *   (응답이 요청 버퍼를 점유 → 요청 진행 불가 → 순환 의존)
+ *   VC를 분리하면 응답이 별도 VC에서 독립적으로 진행됨.
+ *
+ * 등록되는 주요 알고리즘:
+ *   "dor_mesh" / "dim_order_mesh": 결정론적 DOR (GPGPU-Sim 기본)
+ *   "valiant_mesh": Valiant 부하 분산
+ *   "xy_yx_mesh": 두 방향 DOR 중 하나 선택 (oblivious)
+ *   "adaptive_xy_yx_mesh": 부하 기반 적응형 XY/YX 선택
+ *   "min_adapt_mesh": 최소 경로 적응형 + DOR 이탈 채널
+ *   "dim_order_torus": 토러스 DOR (데이트라인 VC 분리)
+ *   "nca_fattree", "anca_fattree": Fat-tree NCA 라우팅
+ *
+ * 호출 체인: InterconnectInterface::CreateInterconnect() → [이 함수]
+ */
 void InitializeRoutingMap( const Configuration & config )
 {
 
-  gNumVCs = config.GetInt( "num_vcs" );
+  gNumVCs = config.GetInt( "num_vcs" ); // [한국어] 총 VC 수 설정
 
   //
   // traffic class partitions
+  // [한국어] 패킷 타입별 VC 범위 설정 (요청/응답 분리로 데드락 방지)
   //
-  gReadReqBeginVC    = config.GetInt("read_request_begin_vc");
-  if(gReadReqBeginVC < 0) {
+  gReadReqBeginVC    = config.GetInt("read_request_begin_vc"); // [한국어] 읽기 요청 VC 시작
+  if(gReadReqBeginVC < 0) { // [한국어] 설정 없으면(-1) 기본값 0 사용
     gReadReqBeginVC = 0;
   }
-  gReadReqEndVC      = config.GetInt("read_request_end_vc");
-  if(gReadReqEndVC < 0) {
+  gReadReqEndVC      = config.GetInt("read_request_end_vc"); // [한국어] 읽기 요청 VC 끝
+  if(gReadReqEndVC < 0) { // [한국어] 기본값: 전체 VC의 하위 절반 끝 (0..gNumVCs/2-1)
     gReadReqEndVC = gNumVCs / 2 - 1;
   }
-  gWriteReqBeginVC   = config.GetInt("write_request_begin_vc");
-  if(gWriteReqBeginVC < 0) {
+  gWriteReqBeginVC   = config.GetInt("write_request_begin_vc"); // [한국어] 쓰기 요청 VC 시작
+  if(gWriteReqBeginVC < 0) { // [한국어] 기본값 0 (읽기 요청과 VC 공유)
     gWriteReqBeginVC = 0;
   }
-  gWriteReqEndVC     = config.GetInt("write_request_end_vc");
-  if(gWriteReqEndVC < 0) {
+  gWriteReqEndVC     = config.GetInt("write_request_end_vc"); // [한국어] 쓰기 요청 VC 끝
+  if(gWriteReqEndVC < 0) { // [한국어] 기본값: gNumVCs/2-1 (읽기 요청과 동일 VC 풀)
     gWriteReqEndVC = gNumVCs / 2 - 1;
   }
-  gReadReplyBeginVC  = config.GetInt("read_reply_begin_vc");
-  if(gReadReplyBeginVC < 0) {
+  gReadReplyBeginVC  = config.GetInt("read_reply_begin_vc"); // [한국어] 읽기 응답 VC 시작
+  if(gReadReplyBeginVC < 0) { // [한국어] 기본값: 전체 VC의 상위 절반 시작
     gReadReplyBeginVC = gNumVCs / 2;
   }
-  gReadReplyEndVC    = config.GetInt("read_reply_end_vc");
-  if(gReadReplyEndVC < 0) {
+  gReadReplyEndVC    = config.GetInt("read_reply_end_vc"); // [한국어] 읽기 응답 VC 끝
+  if(gReadReplyEndVC < 0) { // [한국어] 기본값: 마지막 VC
     gReadReplyEndVC = gNumVCs - 1;
   }
-  gWriteReplyBeginVC = config.GetInt("write_reply_begin_vc");
-  if(gWriteReplyBeginVC < 0) {
+  gWriteReplyBeginVC = config.GetInt("write_reply_begin_vc"); // [한국어] 쓰기 응답 VC 시작
+  if(gWriteReplyBeginVC < 0) { // [한국어] 기본값: gNumVCs/2 (읽기 응답과 동일)
     gWriteReplyBeginVC = gNumVCs / 2;
   }
-  gWriteReplyEndVC   = config.GetInt("write_reply_end_vc");
-  if(gWriteReplyEndVC < 0) {
+  gWriteReplyEndVC   = config.GetInt("write_reply_end_vc"); // [한국어] 쓰기 응답 VC 끝
+  if(gWriteReplyEndVC < 0) { // [한국어] 기본값: gNumVCs-1
     gWriteReplyEndVC = gNumVCs - 1;
   }
 
   /* Register routing functions here */
+  // [한국어] 모든 라우팅 알고리즘을 이름 → 함수 포인터 맵에 등록
 
   // ===================================================
   // Balfour-Schultz
-  gRoutingFunctionMap["nca_fattree"]         = &fattree_nca;
-  gRoutingFunctionMap["anca_fattree"]        = &fattree_anca;
-  gRoutingFunctionMap["nca_qtree"]           = &qtree_nca;
-  gRoutingFunctionMap["nca_tree4"]           = &tree4_nca;
-  gRoutingFunctionMap["anca_tree4"]          = &tree4_anca;
-  gRoutingFunctionMap["dor_mesh"]            = &dim_order_mesh;
-  gRoutingFunctionMap["xy_yx_mesh"]          = &xy_yx_mesh;
-  gRoutingFunctionMap["adaptive_xy_yx_mesh"]          = &adaptive_xy_yx_mesh;
+  // [한국어] Balfour-Schultz 방식 라우팅 함수 등록 (VC 타입 분리 지원)
+  gRoutingFunctionMap["nca_fattree"]         = &fattree_nca;         // [한국어] Fat-tree NCA 랜덤 라우팅
+  gRoutingFunctionMap["anca_fattree"]        = &fattree_anca;        // [한국어] Fat-tree NCA 적응형 라우팅
+  gRoutingFunctionMap["nca_qtree"]           = &qtree_nca;           // [한국어] QTree NCA 라우팅
+  gRoutingFunctionMap["nca_tree4"]           = &tree4_nca;           // [한국어] Tree4 NCA 랜덤 라우팅
+  gRoutingFunctionMap["anca_tree4"]          = &tree4_anca;          // [한국어] Tree4 NCA 적응형 라우팅
+  gRoutingFunctionMap["dor_mesh"]            = &dim_order_mesh;      // [한국어] 메시 DOR (GPGPU-Sim 기본값)
+  gRoutingFunctionMap["xy_yx_mesh"]          = &xy_yx_mesh;          // [한국어] oblivious XY/YX 혼합
+  gRoutingFunctionMap["adaptive_xy_yx_mesh"] = &adaptive_xy_yx_mesh; // [한국어] 부하 기반 적응형 XY/YX
   // End Balfour-Schultz
   // ===================================================
 
-  gRoutingFunctionMap["dim_order_mesh"]  = &dim_order_mesh;
-  gRoutingFunctionMap["dim_order_ni_mesh"]  = &dim_order_ni_mesh;
-  gRoutingFunctionMap["dim_order_pni_mesh"]  = &dim_order_pni_mesh;
-  gRoutingFunctionMap["dim_order_torus"] = &dim_order_torus;
-  gRoutingFunctionMap["dim_order_ni_torus"] = &dim_order_ni_torus;
-  gRoutingFunctionMap["dim_order_bal_torus"] = &dim_order_bal_torus;
+  gRoutingFunctionMap["dim_order_mesh"]      = &dim_order_mesh;      // [한국어] 메시 DOR (dor_mesh와 동일)
+  gRoutingFunctionMap["dim_order_ni_mesh"]   = &dim_order_ni_mesh;   // [한국어] 메시 DOR + 목적지별 VC 분리
+  gRoutingFunctionMap["dim_order_pni_mesh"]  = &dim_order_pni_mesh;  // [한국어] 메시 DOR + 다음 좌표 기반 VC
+  gRoutingFunctionMap["dim_order_torus"]     = &dim_order_torus;     // [한국어] 토러스 DOR (데이트라인 VC 분리)
+  gRoutingFunctionMap["dim_order_ni_torus"]  = &dim_order_ni_torus;  // [한국어] 토러스 DOR + 목적지 VC
+  gRoutingFunctionMap["dim_order_bal_torus"] = &dim_order_bal_torus; // [한국어] 토러스 DOR + 균형 파티션
 
-  gRoutingFunctionMap["romm_mesh"]       = &romm_mesh; 
-  gRoutingFunctionMap["romm_ni_mesh"]    = &romm_ni_mesh;
+  gRoutingFunctionMap["romm_mesh"]    = &romm_mesh;    // [한국어] ROMM: 랜덤 최소 경로 메시 (Valiant 변형)
+  gRoutingFunctionMap["romm_ni_mesh"] = &romm_ni_mesh; // [한국어] ROMM + 목적지 VC 분리
 
-  gRoutingFunctionMap["min_adapt_mesh"]   = &min_adapt_mesh;
-  gRoutingFunctionMap["min_adapt_torus"]  = &min_adapt_torus;
+  gRoutingFunctionMap["min_adapt_mesh"]  = &min_adapt_mesh;  // [한국어] 최소 경로 적응형 + DOR 이탈
+  gRoutingFunctionMap["min_adapt_torus"] = &min_adapt_torus; // [한국어] 최소 경로 적응형 토러스
 
-  gRoutingFunctionMap["planar_adapt_mesh"] = &planar_adapt_mesh;
+  gRoutingFunctionMap["planar_adapt_mesh"] = &planar_adapt_mesh; // [한국어] 평면 적응형 메시 라우팅
 
   // FIXME: This is broken.
   //  gRoutingFunctionMap["limited_adapt_mesh"] = &limited_adapt_mesh;
 
-  gRoutingFunctionMap["valiant_mesh"]  = &valiant_mesh;
-  gRoutingFunctionMap["valiant_torus"] = &valiant_torus;
-  gRoutingFunctionMap["valiant_ni_torus"] = &valiant_ni_torus;
+  gRoutingFunctionMap["valiant_mesh"]     = &valiant_mesh;     // [한국어] Valiant 2단계 랜덤 라우팅 (메시)
+  gRoutingFunctionMap["valiant_torus"]    = &valiant_torus;    // [한국어] Valiant 2단계 랜덤 라우팅 (토러스)
+  gRoutingFunctionMap["valiant_ni_torus"] = &valiant_ni_torus; // [한국어] Valiant 토러스 + 목적지 VC
 
-  gRoutingFunctionMap["dest_tag_fly"] = &dest_tag_fly;
+  gRoutingFunctionMap["dest_tag_fly"] = &dest_tag_fly; // [한국어] Butterfly 네트워크용 목적지 태그 라우팅
 
-  gRoutingFunctionMap["chaos_mesh"]  = &chaos_mesh;
-  gRoutingFunctionMap["chaos_torus"] = &chaos_torus;
+  gRoutingFunctionMap["chaos_mesh"]  = &chaos_mesh;  // [한국어] Chaos 라우터용 메시 라우팅 (연구용)
+  gRoutingFunctionMap["chaos_torus"] = &chaos_torus; // [한국어] Chaos 라우터용 토러스 라우팅
 }

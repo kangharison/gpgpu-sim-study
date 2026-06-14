@@ -1,6 +1,26 @@
 // $Id: separable_input_first.hpp 5188 2012-08-30 00:31:31Z dub $
 
 /*
+ * [한국어 설명] 입력 먼저 분리 할당기 선언 (separable_input_first.hpp)
+ *
+ * === 파일의 역할 ===
+ * SeparableInputFirstAllocator를 선언한다. "입력 먼저(Input-First)"는 1단계에서 각 입력
+ * 중재기가 먼저 원하는 출력을 하나 선택하고, 2단계에서 그 결과를 출력 중재기에 전달하여
+ * 최종 출력 할당을 결정하는 순서를 의미한다. 이 방식은 입력 측 공정성을 우선한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * Allocator::NewAllocator("separable_input_first") 또는 "separable_input_first(arb_type)"으로
+ * 생성되며, IQRouter의 VC 할당기 또는 스위치 할당기로 사용된다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - SeparableAllocator: 상속 — _input_arb, _output_arb 배열과 Clear() 제공
+ * - Arbiter: _input_arb[i]->Arbitrate(), _output_arb[j]->Arbitrate()로 중재 실행
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - Allocate(): 1단계(입력 중재) → 2단계(출력 중재) 순서로 매칭 결정
+ */
+
+/*
  Copyright (c) 2007-2012, Trustees of The Leland Stanford Junior University
  All rights reserved.
 
