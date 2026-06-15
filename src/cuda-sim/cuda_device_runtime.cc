@@ -349,6 +349,27 @@ void cuda_device_runtime::gpgpusim_cuda_launchDeviceV2(
 // Handling device runtime api:
 // cudaError_t cudaStreamCreateWithFlags ( cudaStream_t* pStream, unsigned int
 // flags) flags can only be cudaStreamNonBlocking
+/*
+ * [한국어]
+ * cuda_device_runtime::gpgpusim_cuda_streamCreateWithFlags -
+ *   cudaStreamCreateWithFlags 에뮬레이션
+ *
+ * @pI: PTX call 명령어 — 2개 실제 파라미터 피연산자 포함
+ * @thread: 호출 스레드 — 로컬 메모리에서 pStream 포인터와 flags 읽기
+ * @target_func: cudaStreamCreateWithFlags 함수 정보 — 2개 인자, cudaError_t 리턴값
+ *
+ * CUDA API: cudaError_t cudaStreamCreateWithFlags(cudaStream_t *pStream, unsigned int flags)
+ * 처리 순서:
+ *   1. pStream 포인터(제네릭 주소)를 읽어 local memory 오프셋으로 변환(generic_to_local)
+ *   2. flags를 읽고 cudaStreamNonBlocking(=1)만 지원 — 다른 값이면 assert
+ *   3. 현재 CTA에 속하는 새로운 CUstream_st 객체 생성(create_stream_cta)
+ *   4. 생성된 스트림 포인터를 pStream이 가리키는 로컬 메모리에 기록
+ *   5. 반환값 cudaSuccess를 스레드 로컬 메모리에 기록
+ * 실행 컨텍스트: 기능 시뮬레이션 (CDP 커널 내 cudaStreamCreateWithFlags 호출 시).
+ *
+ * 호출 체인:
+ *   instructions.cc (call 명령어 → CDP API 디스패치) → [이 함수]
+ */
 void cuda_device_runtime::gpgpusim_cuda_streamCreateWithFlags(
     const ptx_instruction *pI, ptx_thread_info *thread,
     const function_info *target_func) {
@@ -410,6 +431,20 @@ void cuda_device_runtime::gpgpusim_cuda_streamCreateWithFlags(
   thread->m_local_mem->write(ret_param_addr, return_size, &error, NULL, NULL);
 }
 
+/*
+ * [한국어]
+ * cuda_device_runtime::launch_one_device_kernel - 큐 앞 자식 커널 하나를 스트림 매니저에 전달
+ *
+ * g_cuda_device_launch_op 큐의 front 항목을 꺼내 stream_operation으로 포장한 후
+ * g_stream_manager->push()로 전달한다. 이 시점에서 자식 커널은 부모 커널 실행
+ * 완료 후에 실제로 스케줄링되며, stream_manager가 이를 CUDA 스트림 순서에 맞춰
+ * 실행 큐에 등록한다.
+ * 큐가 비어 있으면 아무 동작도 하지 않는다.
+ * 실행 컨텍스트: 타이밍 시뮬레이션 루프에서 launch_all_device_kernels()가 호출.
+ *
+ * 호출 체인:
+ *   launch_all_device_kernels() → [이 함수] → stream_manager::push(stream_operation)
+ */
 void cuda_device_runtime::launch_one_device_kernel() {
   if (!g_cuda_device_launch_op.empty()) {
     device_launch_operation_t &op = g_cuda_device_launch_op.front();
@@ -421,6 +456,21 @@ void cuda_device_runtime::launch_one_device_kernel() {
   }
 }
 
+/*
+ * [한국어]
+ * cuda_device_runtime::launch_all_device_kernels - 대기 중인 모든 자식 커널을
+ *   스트림 매니저에 일괄 전달
+ *
+ * g_cuda_device_launch_op 큐가 완전히 빌 때까지 launch_one_device_kernel()을
+ * 반복 호출한다. 부모 커널이 완료된 후(또는 CDP 런칭 단계 후) gpu-sim.cc의
+ * 사이클 루프에서 호출되어, 지금까지 대기하던 모든 자식 커널을 CUDA 스트림
+ * 처리 파이프라인에 등록한다.
+ * 실행 컨텍스트: 타이밍 시뮬레이션 루프(gpu-sim.cc).
+ *
+ * 호출 체인:
+ *   gpgpu-sim/gpu-sim.cc (사이클 루프) → [이 함수]
+ *     → launch_one_device_kernel() → stream_manager::push()
+ */
 void cuda_device_runtime::launch_all_device_kernels() {
   while (!g_cuda_device_launch_op.empty()) {
     launch_one_device_kernel();

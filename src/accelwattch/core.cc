@@ -36,6 +36,73 @@
  *British Columbia             *
  ********************************************************************/
 
+/*
+ * [한국어 설명] AccelWattch SM 코어 전력 모델 구현 (core.cc)
+ *
+ * === 파일의 역할 ===
+ * core.h에 선언된 Core/IFU/LSU/MMU/EXEU/RegFU/Rename/SchedulerU/
+ * BranchPredictor 클래스들의 생성자, computeEnergy(), compute(),
+ * displayEnergy(), 소멸자를 구현한다. McPAT/CACTI ArrayST, FunctionalUnit,
+ * interconnect, Crossbar, Arbiter 등을 이용해 L1I/L1D/shared memory/constant
+ * cache/texture cache, register file, operand collector, ALU/FPU/MUL,
+ * scheduler, TLB, pipeline 등 SM 낭비 구조체의 면적(area)과 단위 접근
+ * 에너지를 산출한다. GPGPU-Sim이 AccelWattch XML에 기록한 카운터
+ * (명령어 수, 캐시 접근, 레지스터 읽기/쓰기, ALU/FPU/SFU 접근 등)와
+ * 곱해지기 위해 local_result.power에 에너지를 저장한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ *   accelwattch_interface::update() [accelwattch_interface.cc]
+ *       → Processor::compute()         [processor.cc]
+ *           → Core::compute()          ← 본 파일의 compute()
+ *               → ifu->computeEnergy(false)
+ *               → lsu->computeEnergy(false)
+ *               → mmu->computeEnergy(false)
+ *               → exu->computeEnergy(false)
+ *               → rnu->computeEnergy(false) (OOO일 때)
+ *               → 파이프라인/UndiffCore 전력 누적
+ *           → Processor::get_coefficient_*()
+ *               → core.{h,cc}의 local_result.power 필드 읽기
+ *           → 최종 SM 전력(Watt) 산출
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존:
+ *   - core.h: 클래스 선언 및 CoreDynParam, 서브컴포넌트 포인터 정의.
+ *   - XML_Parse.h: ParseXML*를 통해 accelwattch XML 파싱 결과 접근.
+ *   - array.h (ArrayST): 캐시/버퍼/RF/TLB/스케줄러 창 SRAM 모델.
+ *   - basic_components.h: Component, Pipeline, UndiffCore, FunctionalUnit.
+ *   - cacti/crossbar.h, cacti/arbiter.h: shared memory/RFU 크로스바.
+ *   - interconnect.h: bypass 버스 모델.
+ *   - logic.h: inst_decoder, selection_logic, dep_resource_conflict_check.
+ *   - sharedcache.h: Private L2 모델.
+ * 데이터 흐름:
+ *   ParseXML → Core::set_core_param() → coredynp 채우기
+ *            → 서브컴포넌트 생성자 → ArrayST/FunctionalUnit 초기화
+ *            → computeEnergy(false) 시 XML->sys.core[*] 카운터로 stats_t.access 설정
+ *            → power_t.readOp.dynamic = energy_per_access × access_count
+ *            → Processor가 계수 메서드로 읽어 GPU 전력 산출.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - BranchPredictor::{ctor, computeEnergy, displayEnergy, dtor}: tournament
+ *   predictor(global/local/chooser/RAS) 전력 계산.
+ * - InstFetchU::{...}: L1I, miss/fill/prefetch/WB 버퍼, BTB, IB, decoder.
+ * - SchedulerU::{...}: instruction window(int/fp), ROB, selection logic.
+ * - RENAMINGU::{...}: FRAT/RRAT/free list/DCL(OOO).
+ * - LoadStoreU::{...}: shared xbar, shared memory, ccache, tcache, dcache,
+ *   LSQ/LoadQ, NoC.
+ * - MemManU::{...}: I/D TLB.
+ * - RegFU::{...}: xbar/arbiter, IRF, OPC, FRF(비활성), RFWIN.
+ * - EXECU::{...}: RFU/SchedulerU/ALU/FPU/MUL/bypass 집계.
+ * - Core::{set_core_param, computeEnergy, compute, displayEnergy, dtor}:
+ *   SM 전체 집계; idle core energy, pipeline energy 추가; Private L2 옵션.
+ *
+ * 관련 설정:
+ *   - gpgpusim.config: --power_config_name, --enable_power_simulation.
+ *   - accelwattch XML: system.core[*] 아래의 icache/dcache/sharedmemory/
+ *     tcache/ccache/BTB/predictor/itlb/dtlb/archi_Regs_*_size/rf_banks/
+ *     collector_units/ALU_per_core/FPU_per_core/MUL_per_core/clock_rate/
+ *     core_clock_ratio/pipeline_duty_cycle/LSU_duty_cycle 등.
+ */
+
 #include "core.h"
 #include <assert.h>
 #include <algorithm>
@@ -103,14 +170,15 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
   clockRate = coredynp.clockRate;
   executionTime = coredynp.executionTime;
 
-  cache_p = (Cache_policy)XML->sys.core[ithCore].icache.icache_config[7];
+  cache_p = (Cache_policy)XML->sys.core[ithCore].icache.icache_config[7];  // [한국어] XML: icache 쓰기 정책(WB=0/WT=1)
   // Assuming all L1 caches are virtually idxed physically tagged.
   // cache
+// [한국어] L1I 데이터/태그 어레이 파라미터 설정 (icache_config[0~5] 사용).
 
-  size = (int)XML->sys.core[ithCore].icache.icache_config[0];
-  line = (int)XML->sys.core[ithCore].icache.icache_config[1];
-  assoc = (int)XML->sys.core[ithCore].icache.icache_config[2];
-  banks = (int)XML->sys.core[ithCore].icache.icache_config[3];
+  size = (int)XML->sys.core[ithCore].icache.icache_config[0];  // [한국어] XML: icache 크기(byte)
+  line = (int)XML->sys.core[ithCore].icache.icache_config[1];  // [한국어] XML: icache 라인 크기(byte)
+  assoc = (int)XML->sys.core[ithCore].icache.icache_config[2];  // [한국어] XML: icache 연관도(way)
+  banks = (int)XML->sys.core[ithCore].icache.icache_config[3];  // [한국어] XML: icache bank 수
   idx = debug ? 9 : int(ceil(log2(size / line / assoc)));
   tag = debug ? 51
               : (int)XML->sys.physical_address_width - idx -
@@ -118,22 +186,22 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
   interface_ip.specific_tag = 1;
   interface_ip.tag_w = tag;
   interface_ip.cache_sz =
-      debug ? 32768 : (int)XML->sys.core[ithCore].icache.icache_config[0];
+      debug ? 32768 : (int)XML->sys.core[ithCore].icache.icache_config[0];  // [한국어] XML: icache 크기(byte)
   interface_ip.line_sz =
-      debug ? 64 : (int)XML->sys.core[ithCore].icache.icache_config[1];
+      debug ? 64 : (int)XML->sys.core[ithCore].icache.icache_config[1];  // [한국어] XML: icache 라인 크기(byte)
   interface_ip.assoc =
-      debug ? 8 : (int)XML->sys.core[ithCore].icache.icache_config[2];
+      debug ? 8 : (int)XML->sys.core[ithCore].icache.icache_config[2];  // [한국어] XML: icache 연관도(way)
   interface_ip.nbanks =
-      debug ? 1 : (int)XML->sys.core[ithCore].icache.icache_config[3];
+      debug ? 1 : (int)XML->sys.core[ithCore].icache.icache_config[3];  // [한국어] XML: icache bank 수
   interface_ip.out_w = interface_ip.line_sz * 8;
   interface_ip.access_mode =
       0;  // debug?0:XML->sys.core[ithCore].icache.icache_config[5];
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;  // [한국어] XML: icache throughput(cycle time)
   interface_ip.latency =
       debug ? 3.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;  // [한국어] XML: icache latency(access time)
   interface_ip.is_cache = true;
   interface_ip.pure_cam = false;
   interface_ip.pure_ram = false;
@@ -158,6 +226,7 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
 
   /*
    *iCache controllers
+// [한국어] L1I 캐시 컨트롤러: miss/fill/prefetch/WB 버퍼 MSHR 어레이 초기화.
    *miss buffer Each MSHR contains enough state
    *to handle one or more accesses of any type to a single memory line.
    *Due to the generality of the MSHR mechanism,
@@ -182,11 +251,11 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 0;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[4] /
+            : XML->sys.core[ithCore].icache.icache_config[4] /  // [한국어] XML: icache throughput(cycle time)
                   clockRate;  // means cycle time
   interface_ip.latency = debug
                              ? 1.0 / clockRate
-                             : XML->sys.core[ithCore].icache.icache_config[5] /
+                             : XML->sys.core[ithCore].icache.icache_config[5] /  // [한국어] XML: icache latency(access time)
                                    clockRate;  // means access time
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
@@ -219,10 +288,10 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 0;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;  // [한국어] XML: icache throughput(cycle time)
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;  // [한국어] XML: icache latency(access time)
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -257,10 +326,10 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 0;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;  // [한국어] XML: icache throughput(cycle time)
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;  // [한국어] XML: icache latency(access time)
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -411,6 +480,10 @@ InstFetchU::InstFetchU(ParseXML* XML_interface, int ithCore_,
                  ID_misc->area.get_area()) *
                     coredynp.decodeW);
 }
+/*
+ * [한국어] BranchPredictor::BranchPredictor — 분기 예측기 생성자
+ * XML->sys.core[*].predictor/BTB 파라미터를 읽어 global/local/chooser/RAS ArrayST를 생성하고 Component::area에 면적을 누적한다. prediction_width>0일 때만 활성화.
+ */
 
 BranchPredictor::BranchPredictor(ParseXML* XML_interface, int ithCore_,
                                  InputParameter* interface_ip_,
@@ -580,6 +653,10 @@ BranchPredictor::BranchPredictor(ParseXML* XML_interface, int ithCore_,
   area.set_area(area.get_area() +
                 RAS->local_result.area * coredynp.num_hthreads);
 }
+/*
+ * [한국어] SchedulerU::SchedulerU — 스케줄러 유닛 생성자
+ * int/fp instruction window, ROB, selection logic을 초기화. OOO/GPU 스케줄러 파라미터를 XML에서 읽어 SRAM 크기/연결 길이를 설정.
+ */
 
 SchedulerU::SchedulerU(ParseXML* XML_interface, int ithCore_,
                        InputParameter* interface_ip_,
@@ -854,6 +931,10 @@ SchedulerU::SchedulerU(ParseXML* XML_interface, int ithCore_,
         coredynp.peak_issueW, &interface_ip, Core_device, coredynp.core_ty);
   }
 }
+/*
+ * [한국어] LoadStoreU::LoadStoreU — 로드/스토어 유닛 생성자
+ * shared memory crossbar(xbar_shared), sharedmemory, constant cache(ccache), texture cache(tcache), L1D(dcache) 캐시/버퍼, LSQ/LoadQ를 초기화. GPU 메모리 구조 전력의 핵심 모델.
+ */
 
 LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
                        InputParameter* interface_ip_,
@@ -871,7 +952,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
 
   clockRate = coredynp.clockRate;
   executionTime = coredynp.executionTime;
-  cache_p = (Cache_policy)XML->sys.core[ithCore].dcache.dcache_config[7];
+  cache_p = (Cache_policy)XML->sys.core[ithCore].dcache.dcache_config[7];  // [한국어] XML: dcache 쓰기 정책
 
   interface_ip.num_search_ports = XML->sys.core[ithCore].memory_ports;
   interface_ip.is_cache = true;
@@ -896,7 +977,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   // Crossbar(simd_width,shared_memory_banks,word_length*simd_width,&(g_tp.peri_global));
 
   // shared memory added by Jingwen
-  size = (int)XML->sys.core[ithCore].sharedmemory.dcache_config[0];
+  size = (int)XML->sys.core[ithCore].sharedmemory.dcache_config[0];  // [한국어] XML: shared memory 크기
   line = (int)XML->sys.core[ithCore].sharedmemory.dcache_config[1];
   assoc = (int)XML->sys.core[ithCore].sharedmemory.dcache_config[2];
   idx = debug ? 9 : int(ceil(log2(size / line / assoc)));
@@ -906,7 +987,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.specific_tag = 1;
   interface_ip.tag_w = 1;
   interface_ip.cache_sz =
-      debug ? 32768 : (int)XML->sys.core[ithCore].sharedmemory.dcache_config[0];
+      debug ? 32768 : (int)XML->sys.core[ithCore].sharedmemory.dcache_config[0];  // [한국어] XML: shared memory 크기
   interface_ip.line_sz =
       debug ? 64 : (int)XML->sys.core[ithCore].sharedmemory.dcache_config[1];
   interface_ip.assoc =
@@ -1091,7 +1172,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
    * ccache starts here
    */
   // Constant cache
-  size = (int)XML->sys.core[ithCore].ccache.dcache_config[0];
+  size = (int)XML->sys.core[ithCore].ccache.dcache_config[0];  // [한국어] XML: ccache 크기
   line = (int)XML->sys.core[ithCore].ccache.dcache_config[1];
   assoc = (int)XML->sys.core[ithCore].ccache.dcache_config[2];
   idx = debug ? 9 : int(ceil(log2(size / line / assoc)));
@@ -1101,7 +1182,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.specific_tag = 1;
   interface_ip.tag_w = tag;
   interface_ip.cache_sz =
-      debug ? 32768 : (int)XML->sys.core[ithCore].ccache.dcache_config[0];
+      debug ? 32768 : (int)XML->sys.core[ithCore].ccache.dcache_config[0];  // [한국어] XML: ccache 크기
   interface_ip.line_sz =
       debug ? 64 : (int)XML->sys.core[ithCore].ccache.dcache_config[1];
   interface_ip.assoc =
@@ -1282,7 +1363,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
    * tcache starts here
    */
   // Texture cache
-  size = (int)XML->sys.core[ithCore].tcache.dcache_config[0];
+  size = (int)XML->sys.core[ithCore].tcache.dcache_config[0];  // [한국어] XML: tcache 크기
   line = (int)XML->sys.core[ithCore].tcache.dcache_config[1];
   assoc = (int)XML->sys.core[ithCore].tcache.dcache_config[2];
   idx = debug ? 9 : int(ceil(log2(size / line / assoc)));
@@ -1292,7 +1373,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.specific_tag = 1;
   interface_ip.tag_w = tag;
   interface_ip.cache_sz =
-      debug ? 32768 : (int)XML->sys.core[ithCore].tcache.dcache_config[0];
+      debug ? 32768 : (int)XML->sys.core[ithCore].tcache.dcache_config[0];  // [한국어] XML: tcache 크기
   interface_ip.line_sz =
       debug ? 64 : (int)XML->sys.core[ithCore].tcache.dcache_config[1];
   interface_ip.assoc =
@@ -1473,9 +1554,9 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
    * dcache starts here
    */
   // Dcache
-  size = (int)XML->sys.core[ithCore].dcache.dcache_config[0];
-  line = (int)XML->sys.core[ithCore].dcache.dcache_config[1];
-  assoc = (int)XML->sys.core[ithCore].dcache.dcache_config[2];
+  size = (int)XML->sys.core[ithCore].dcache.dcache_config[0];  // [한국어] XML: dcache 크기(byte)
+  line = (int)XML->sys.core[ithCore].dcache.dcache_config[1];  // [한국어] XML: dcache 라인 크기(byte)
+  assoc = (int)XML->sys.core[ithCore].dcache.dcache_config[2];  // [한국어] XML: dcache 연관도
   idx = debug ? 9 : int(ceil(log2(size / line / assoc)));
   tag = debug ? 51
               : XML->sys.physical_address_width - idx - int(ceil(log2(line))) +
@@ -1483,22 +1564,22 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.specific_tag = 1;
   interface_ip.tag_w = tag;
   interface_ip.cache_sz =
-      debug ? 32768 : (int)XML->sys.core[ithCore].dcache.dcache_config[0];
+      debug ? 32768 : (int)XML->sys.core[ithCore].dcache.dcache_config[0];  // [한국어] XML: dcache 크기(byte)
   interface_ip.line_sz =
-      debug ? 64 : (int)XML->sys.core[ithCore].dcache.dcache_config[1];
+      debug ? 64 : (int)XML->sys.core[ithCore].dcache.dcache_config[1];  // [한국어] XML: dcache 라인 크기(byte)
   interface_ip.assoc =
-      debug ? 8 : (int)XML->sys.core[ithCore].dcache.dcache_config[2];
+      debug ? 8 : (int)XML->sys.core[ithCore].dcache.dcache_config[2];  // [한국어] XML: dcache 연관도
   interface_ip.nbanks =
-      debug ? 1 : (int)XML->sys.core[ithCore].dcache.dcache_config[3];
+      debug ? 1 : (int)XML->sys.core[ithCore].dcache.dcache_config[3];  // [한국어] XML: dcache bank 수
   interface_ip.out_w = interface_ip.line_sz * 8;
   interface_ip.access_mode =
       0;  // debug?0:XML->sys.core[ithCore].dcache.dcache_config[5];
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
   interface_ip.latency =
       debug ? 3.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
   interface_ip.is_cache = true;
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
@@ -1535,10 +1616,10 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 2;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -1556,6 +1637,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   // output_data_csv(dcache.missb.local_result);
 
   // fill buffer
+// [한국어] fill buffer (ifb): 캐시 미스 시 하위 메모리로부터 온 데이터를 임시 저장.
   tag = XML->sys.physical_address_width + EXTRA_TAG_BITS;
   data = dcache.caches->l_ip.line_sz;
   interface_ip.specific_tag = 1;
@@ -1568,10 +1650,10 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 2;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -1588,6 +1670,7 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   // output_data_csv(dcache.ifb.local_result);
 
   // prefetch buffer
+// [한국어] prefetch buffer: 하드웨어 프리페치 요청을 추적하는 MSHR 버퍼.
   tag = XML->sys.physical_address_width +
         EXTRA_TAG_BITS;  // check with previous entries to decide wthether to
                          // merge.
@@ -1604,10 +1687,10 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 2;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -1640,10 +1723,10 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
     interface_ip.access_mode = 2;
     interface_ip.throughput =
         debug ? 1.0 / clockRate
-              : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+              : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
     interface_ip.latency =
         debug ? 1.0 / clockRate
-              : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+              : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
     interface_ip.obj_func_dyn_energy = 0;
     interface_ip.obj_func_dyn_power = 0;
     interface_ip.obj_func_leak_power = 0;
@@ -1736,6 +1819,10 @@ LoadStoreU::LoadStoreU(ParseXML* XML_interface, int ithCore_,
         sqrt(cdb_overhead); /*XML->sys.core[ithCore].number_hardware_threads*/
   }
 }
+/*
+ * [한국어] MemManU::MemManU — 메모리 관리(TLB) 유닛 생성자
+ * instruction TLB(itlb)와 data TLB(dtlb) ArrayST를 XML 설정으로 초기화.
+ */
 
 MemManU::MemManU(ParseXML* XML_interface, int ithCore_,
                  InputParameter* interface_ip_, const CoreDynParam& dyn_p_,
@@ -1777,10 +1864,10 @@ MemManU::MemManU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 0;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[4] / clockRate;  // [한국어] XML: icache throughput(cycle time)
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;
+            : XML->sys.core[ithCore].icache.icache_config[5] / clockRate;  // [한국어] XML: icache latency(access time)
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -1818,10 +1905,10 @@ MemManU::MemManU(ParseXML* XML_interface, int ithCore_,
   interface_ip.access_mode = 0;
   interface_ip.throughput =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[4] / clockRate;  // [한국어] XML: dcache throughput
   interface_ip.latency =
       debug ? 1.0 / clockRate
-            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;
+            : XML->sys.core[ithCore].dcache.dcache_config[5] / clockRate;  // [한국어] XML: dcache latency
   interface_ip.obj_func_dyn_energy = 0;
   interface_ip.obj_func_dyn_power = 0;
   interface_ip.obj_func_leak_power = 0;
@@ -1838,6 +1925,10 @@ MemManU::MemManU(ParseXML* XML_interface, int ithCore_,
   // output_data_csv(dtlb.tlb.local_result);
 }
 //#define FERMI
+/*
+ * [한국어] RegFU::RegFU — 레지스터 파일 유닛 생성자
+ * RFU crossbar(xbar_rfu)/arbiter(arbiter_rfu), integer register file(IRF), operand collectors(OPC), FP register file(FRF), register window(RFWIN)을 초기화. rf_banks, collector_units, architecture(1=Tesla/2=Fermi+) 등이 영향.
+ */
 
 RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
              InputParameter* interface_ip_, const CoreDynParam& dyn_p_,
@@ -1927,6 +2018,7 @@ RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
   interface_ip.num_wr_ports = 1;  // coredynp.peak_issueW;
   interface_ip.num_se_rd_ports = 0;
   IRF = new ArrayST(&interface_ip, "Integer Register File", Core_device,
+// [한국어] Integer Register File(IRF): 스레드당/워프당 레지스터를 묶어 CACTI 어레이로 모델링.
                     coredynp.opt_local, coredynp.core_ty);
 
   IRF->area.set_area(IRF->area.get_area() + IRF->local_result.area *
@@ -1936,11 +2028,11 @@ RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
   area.set_area(area.get_area() + IRF->local_result.area +
                 xbar_rfu->area.get_area() + arbiter_rfu->area.get_area());
   if (XML->sys.architecture == 1) {
-    IRF->local_result.power.readOp.dynamic *= .33;
-    IRF->local_result.power.writeOp.dynamic *= .33;
+    IRF->local_result.power.readOp.dynamic *= .33;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    IRF->local_result.power.writeOp.dynamic *= .33;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   } else {
-    IRF->local_result.power.readOp.dynamic *= .55;
-    IRF->local_result.power.writeOp.dynamic *= .55;
+    IRF->local_result.power.readOp.dynamic *= .55;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    IRF->local_result.power.writeOp.dynamic *= .55;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
   /**
@@ -1988,6 +2080,7 @@ RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
   interface_ip.num_wr_ports = 1;  // coredynp.peak_issueW;
   interface_ip.num_se_rd_ports = 0;
   OPC = new ArrayST(&interface_ip, "Operand collectors", Core_device,
+// [한국어] Operand Collectors(OPC): GPU operand collector 버퍼; collector_units로 크기 결정.
                     coredynp.opt_local, coredynp.core_ty);
 
   OPC->area.set_area(OPC->area.get_area() + OPC->local_result.area *
@@ -2028,6 +2121,7 @@ RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
   // interface_ip.num_wr_ports    = 1;
   interface_ip.num_se_rd_ports = 0;
   FRF = new ArrayST(&interface_ip, "Floating point Register File", Core_device,
+// [한국어] FP Register File(FRF): AccelWattch GPU 결과에서는 제외.
                     coredynp.opt_local, coredynp.core_ty);
   // FRF->area.set_area(FRF->area.get_area()+
   // FRF->local_result.area*XML->sys.core[ithCore].number_hardware_threads*coredynp.num_fp_pipelines*cdb_overhead);
@@ -2081,6 +2175,10 @@ RegFU::RegFU(ParseXML* XML_interface, int ithCore_,
     // output_data_csv(RFWIN.RF.local_result);
   }
 }
+/*
+ * [한국어] EXECU::EXECU — 실행 유닛 집계 생성자
+ * RegFU, SchedulerU, ALU(exeu), FPU(fp_u), MUL(mul), bypass interconnect들을 생성하고 Component::area에 누적. GPU에서는 bypass가 실제로 동작하지 않는 것으로 처리.
+ */
 
 EXECU::EXECU(ParseXML* XML_interface, int ithCore_,
              InputParameter* interface_ip_, double lsq_height_,
@@ -2309,6 +2407,10 @@ EXECU::EXECU(ParseXML* XML_interface, int ithCore_,
   } /* else */
   area.set_area(area.get_area() /*+ bypass.area.get_area()*/);
 }
+/*
+ * [한국어] RENAMINGU::RENAMINGU — OOO 리네이밍 유닛 생성자
+ * FRAT(iFRAT/fFRAT), RRAT, free list, dependency/conflict check logic(DCL)을 초기화. GPU 설정에서는 일반적으로 사용되지 않는다.
+ */
 
 RENAMINGU::RENAMINGU(ParseXML* XML_interface, int ithCore_,
                      InputParameter* interface_ip_, const CoreDynParam& dyn_p_,
@@ -2867,6 +2969,10 @@ RENAMINGU::RENAMINGU(ParseXML* XML_interface, int ithCore_,
                                            coredynp.phy_freg_width);
   }
 }
+/*
+ * [한국어] Core::Core — Core(SM) 생성자
+ * set_core_param() 후 IFU/LSU/MMU/EXU/UndiffCore/RENAME(OOO)/Pipeline/PrivateL2를 생성.  homogeneous_cores==1이면 모든 코어가 동일한 파라미터를 공유.
+ */
 
 Core::Core(ParseXML* XML_interface, int ithCore_, InputParameter* interface_ip_)
     : XML(XML_interface),
@@ -2968,6 +3074,10 @@ Core::Core(ParseXML* XML_interface, int ithCore_, InputParameter* interface_ip_)
   //  clockNetwork.num_regs           = corepipe.tot_stage_vector;
   //  clockNetwork.optimize_wire();
 }
+/*
+ * [한국어] BranchPredictor::computeEnergy — 분기 예측기 전력 계산
+ * is_tdp=true이면 peak 조건(predictionW × BR_duty_cycle)으로 access를 설정하고 dynamic power를 산출; false이면 XML의 branch_mispredictions 등 실제 카운터를 사용.
+ */
 
 void BranchPredictor::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -2998,9 +3108,9 @@ void BranchPredictor::computeEnergy(bool is_tdp) {
   } else {
     // The resolution of BPT accesses is coarse, but this is
     // because most simulators cannot track finer grained details
-    r_access = XML->sys.core[ithCore].branch_instructions;
+    r_access = XML->sys.core[ithCore].branch_instructions;  // [한국어] 분기 명령어 수
     w_access =
-        XML->sys.core[ithCore].branch_mispredictions +
+        XML->sys.core[ithCore].branch_mispredictions +  // [한국어] 분기 예측 실패 수
         0.1 * XML->sys.core[ithCore]
                   .branch_instructions;  // 10% of BR will flip internal bits//0
     globalBPT->stats_t.readAc.access = r_access;
@@ -3030,60 +3140,64 @@ void BranchPredictor::computeEnergy(bool is_tdp) {
   chooser->power_t.reset();
   RAS->power_t.reset();
 
-  globalBPT->power_t.readOp.dynamic +=
-      globalBPT->local_result.power.readOp.dynamic *
+  globalBPT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      globalBPT->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
           globalBPT->stats_t.readAc.access +
       globalBPT->stats_t.writeAc.access *
-          globalBPT->local_result.power.writeOp.dynamic;
-  L1_localBPT->power_t.readOp.dynamic +=
-      L1_localBPT->local_result.power.readOp.dynamic *
+          globalBPT->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  L1_localBPT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      L1_localBPT->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
           L1_localBPT->stats_t.readAc.access +
       L1_localBPT->stats_t.writeAc.access *
-          L1_localBPT->local_result.power.writeOp.dynamic;
+          L1_localBPT->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
-  L2_localBPT->power_t.readOp.dynamic +=
-      L2_localBPT->local_result.power.readOp.dynamic *
+  L2_localBPT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      L2_localBPT->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
           L2_localBPT->stats_t.readAc.access +
       L2_localBPT->stats_t.writeAc.access *
-          L2_localBPT->local_result.power.writeOp.dynamic;
+          L2_localBPT->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
-  chooser->power_t.readOp.dynamic +=
-      chooser->local_result.power.readOp.dynamic *
+  chooser->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      chooser->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
           chooser->stats_t.readAc.access +
       chooser->stats_t.writeAc.access *
-          chooser->local_result.power.writeOp.dynamic;
-  RAS->power_t.readOp.dynamic +=
-      RAS->local_result.power.readOp.dynamic * RAS->stats_t.readAc.access +
-      RAS->stats_t.writeAc.access * RAS->local_result.power.writeOp.dynamic;
+          chooser->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  RAS->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      RAS->local_result.power.readOp.dynamic * RAS->stats_t.readAc.access +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+      RAS->stats_t.writeAc.access * RAS->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
   if (is_tdp) {
     globalBPT->power =
-        globalBPT->power_t + globalBPT->local_result.power * pppm_lkg;
+        globalBPT->power_t + globalBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     L1_localBPT->power =
-        L1_localBPT->power_t + L1_localBPT->local_result.power * pppm_lkg;
+        L1_localBPT->power_t + L1_localBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     L2_localBPT->power =
-        L2_localBPT->power_t + L2_localBPT->local_result.power * pppm_lkg;
-    chooser->power = chooser->power_t + chooser->local_result.power * pppm_lkg;
+        L2_localBPT->power_t + L2_localBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    chooser->power = chooser->power_t + chooser->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     RAS->power =
-        RAS->power_t + RAS->local_result.power * coredynp.pppm_lkg_multhread;
+        RAS->power_t + RAS->local_result.power * coredynp.pppm_lkg_multhread;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
     power = power + globalBPT->power + L1_localBPT->power + chooser->power +
             RAS->power;
   } else {
     globalBPT->rt_power =
-        globalBPT->power_t + globalBPT->local_result.power * pppm_lkg;
+        globalBPT->power_t + globalBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     L1_localBPT->rt_power =
-        L1_localBPT->power_t + L1_localBPT->local_result.power * pppm_lkg;
+        L1_localBPT->power_t + L1_localBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     L2_localBPT->rt_power =
-        L2_localBPT->power_t + L2_localBPT->local_result.power * pppm_lkg;
+        L2_localBPT->power_t + L2_localBPT->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     chooser->rt_power =
-        chooser->power_t + chooser->local_result.power * pppm_lkg;
+        chooser->power_t + chooser->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     RAS->rt_power =
-        RAS->power_t + RAS->local_result.power * coredynp.pppm_lkg_multhread;
+        RAS->power_t + RAS->local_result.power * coredynp.pppm_lkg_multhread;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     rt_power = rt_power + globalBPT->rt_power + L1_localBPT->rt_power +
                chooser->rt_power + RAS->rt_power;
   }
 }
+/*
+ * [한국어] BranchPredictor::displayEnergy — 분기 예측기 전력/면적 출력
+ * global/local/chooser/RAS 및 총계를 들여쓰기 형식으로 출력한다.
+ */
 
 void BranchPredictor::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -3209,6 +3323,10 @@ void BranchPredictor::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     //<< endl;
   }
 }
+/*
+ * [한국어] InstFetchU::computeEnergy — 명령어 페치 유닛 전력 계산
+ * is_tdp=true이면 fetchW, peak_issue_width, IB_duty_cycle 기준 peak access; false이면 XML->sys.core[*].total_instructions, icache.read_accesses, predictor dire/loop/lookups, BTB misses 등 실제 카운터를 사용.
+ */
 
 void InstFetchU::computeEnergy(bool is_tdp) {
   executionTime =
@@ -3263,7 +3381,7 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     ID_operand->tdp_stats = ID_operand->stats_t;
     ID_misc->tdp_stats = ID_misc->stats_t;
 
-  } /* if (is_tdp) */
+  } /* if (is_tdp) */  // [한국어] TDP(peak)=true, runtime=false
   else {
     rt_power.reset();
     icache.rt_power.reset();  // Jingwen
@@ -3272,9 +3390,9 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     // cout<<"Read accesses: "<< XML->sys.core[ithCore].icache.read_accesses <<
     // " Read misses: "<<XML->sys.core[ithCore].icache.read_misses<<endl;
     icache.caches->stats_t.readAc.access =
-        XML->sys.core[ithCore].icache.read_accesses;
+        XML->sys.core[ithCore].icache.read_accesses;  // [한국어] L1I 읽기 접근 수
     icache.caches->stats_t.readAc.miss =
-        XML->sys.core[ithCore].icache.read_misses;
+        XML->sys.core[ithCore].icache.read_misses;  // [한국어] L1I 읽기 미스 수
     // cout<<endl<<"inside mcpat read access=
     // "<<XML->sys.core[ithCore].icache.read_accesses; cout<<endl<<"inside mcpat
     // read miss= "<<XML->sys.core[ithCore].icache.read_misses;
@@ -3299,7 +3417,7 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     icache.prefetchb->rtp_stats = icache.prefetchb->stats_t;
 
     IB->stats_t.readAc.access = IB->stats_t.writeAc.access =
-        XML->sys.core[ithCore].total_instructions;
+        XML->sys.core[ithCore].total_instructions;  // [한국어] GPGPU-Sim이 기록한 총 명령어 수
     IB->rtp_stats = IB->stats_t;
     // cout<<"IB: total instructions: "<<IB->stats_t.readAc.access <<endl;
     if (coredynp.predictionW > 0) {
@@ -3315,10 +3433,10 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     }
     // cout<<"ID: total instructions: "<<
     // XML->sys.core[ithCore].total_instructions<<endl;
-    ID_inst->stats_t.readAc.access = XML->sys.core[ithCore].total_instructions;
+    ID_inst->stats_t.readAc.access = XML->sys.core[ithCore].total_instructions;  // [한국어] GPGPU-Sim이 기록한 총 명령어 수
     ID_operand->stats_t.readAc.access =
-        XML->sys.core[ithCore].total_instructions;
-    ID_misc->stats_t.readAc.access = XML->sys.core[ithCore].total_instructions;
+        XML->sys.core[ithCore].total_instructions;  // [한국어] GPGPU-Sim이 기록한 총 명령어 수
+    ID_misc->stats_t.readAc.access = XML->sys.core[ithCore].total_instructions;  // [한국어] GPGPU-Sim이 기록한 총 명령어 수
     ID_inst->rtp_stats = ID_inst->stats_t;
     ID_operand->rtp_stats = ID_operand->stats_t;
     ID_misc->rtp_stats = ID_misc->stats_t;
@@ -3333,43 +3451,43 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     BTB->power_t.reset();
   }
 
-  icache.power_t.readOp.dynamic +=
+  icache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       (icache.caches->stats_t.readAc.hit *
-           icache.caches->local_result.power.readOp.dynamic +
+           icache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        // icache.caches->stats_t.readAc.miss*icache.caches->local_result.tag_array2->power.readOp.dynamic+
        icache.caches->stats_t.readAc.miss *
-           icache.caches->local_result.power.readOp
+           icache.caches->local_result.power.readOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
                .dynamic +  // assume tag data accessed in parallel
        icache.caches->stats_t.readAc.miss *
-           icache.caches->local_result.power.writeOp
+           icache.caches->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
                .dynamic);  // read miss in Icache cause a write to Icache
-  icache.power_t.readOp.dynamic +=
+  icache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       icache.missb->stats_t.readAc.access *
-          icache.missb->local_result.power.searchOp.dynamic +
+          icache.missb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       icache.missb->stats_t.writeAc.access *
-          icache.missb->local_result.power.writeOp
+          icache.missb->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic;  // each access to missb involves a CAM and a write
-  icache.power_t.readOp.dynamic +=
+  icache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       icache.ifb->stats_t.readAc.access *
-          icache.ifb->local_result.power.searchOp.dynamic +
+          icache.ifb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       icache.ifb->stats_t.writeAc.access *
-          icache.ifb->local_result.power.writeOp.dynamic;
-  icache.power_t.readOp.dynamic +=
+          icache.ifb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  icache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       icache.prefetchb->stats_t.readAc.access *
-          icache.prefetchb->local_result.power.searchOp.dynamic +
+          icache.prefetchb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       icache.prefetchb->stats_t.writeAc.access *
-          icache.prefetchb->local_result.power.writeOp.dynamic;
+          icache.prefetchb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   // cout<<"Icache power: "<<icache.power_t.readOp.dynamic	<<endl;
-  IB->power_t.readOp.dynamic +=
-      IB->local_result.power.readOp.dynamic * IB->stats_t.readAc.access +
-      IB->stats_t.writeAc.access * IB->local_result.power.writeOp.dynamic;
+  IB->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+      IB->local_result.power.readOp.dynamic * IB->stats_t.readAc.access +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+      IB->stats_t.writeAc.access * IB->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   // cout << "IB power: "<<IB->power_t.readOp.dynamic<<endl;
   if (coredynp.predictionW > 0) {
-    BTB->power_t.readOp.dynamic +=
-        BTB->local_result.power.readOp.dynamic * BTB->stats_t.readAc.access +
-        BTB->stats_t.writeAc.access * BTB->local_result.power.writeOp.dynamic;
+    BTB->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+        BTB->local_result.power.readOp.dynamic * BTB->stats_t.readAc.access +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        BTB->stats_t.writeAc.access * BTB->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
-    BPT->computeEnergy(is_tdp);
+    BPT->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
   }
 
   if (is_tdp) {
@@ -3378,29 +3496,29 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     //    			(icache.missb->local_result.power +
     //    			icache.ifb->local_result.power +
     //    			icache.prefetchb->local_result.power)*pppm_Isub;
-    icache.power = icache.power_t + (icache.caches->local_result.power +
-                                     icache.missb->local_result.power +
-                                     icache.ifb->local_result.power +
-                                     icache.prefetchb->local_result.power) *
+    icache.power = icache.power_t + (icache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     icache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     icache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     icache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                         pppm_lkg;
 
-    IB->power = IB->power_t + IB->local_result.power * pppm_lkg;
+    IB->power = IB->power_t + IB->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     power = power + icache.power + IB->power;
     if (coredynp.predictionW > 0) {
-      BTB->power = BTB->power_t + BTB->local_result.power * pppm_lkg;
+      BTB->power = BTB->power_t + BTB->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       power = power + BTB->power + BPT->power;
     }
 
-    ID_inst->power_t.readOp.dynamic = ID_inst->power.readOp.dynamic;
-    ID_operand->power_t.readOp.dynamic = ID_operand->power.readOp.dynamic;
-    ID_misc->power_t.readOp.dynamic = ID_misc->power.readOp.dynamic;
+    ID_inst->power_t.readOp.dynamic = ID_inst->power.readOp.dynamic;  // [한국어] read 동작 1회당 동적 에너지
+    ID_operand->power_t.readOp.dynamic = ID_operand->power.readOp.dynamic;  // [한국어] read 동작 1회당 동적 에너지
+    ID_misc->power_t.readOp.dynamic = ID_misc->power.readOp.dynamic;  // [한국어] read 동작 1회당 동적 에너지
 
     ID_inst->power.readOp.dynamic *= ID_inst->tdp_stats.readAc.access;
     ID_operand->power.readOp.dynamic *= ID_operand->tdp_stats.readAc.access;
     ID_misc->power.readOp.dynamic *= ID_misc->tdp_stats.readAc.access;
 
     power = power + (ID_inst->power + ID_operand->power + ID_misc->power);
-  } /* if (is_tdp) */
+  } /* if (is_tdp) */  // [한국어] TDP(peak)=true, runtime=false
   else {
     //    	icache.rt_power = icache.power_t +
     //    	        (icache.caches->local_result.power)*pppm_lkg +
@@ -3408,29 +3526,29 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     //    			icache.ifb->local_result.power +
     //    			icache.prefetchb->local_result.power)*pppm_Isub;
 
-    icache.rt_power = icache.power_t + (icache.caches->local_result.power +
-                                        icache.missb->local_result.power +
-                                        icache.ifb->local_result.power +
-                                        icache.prefetchb->local_result.power) *
+    icache.rt_power = icache.power_t + (icache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        icache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        icache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        icache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                            pppm_lkg;
 
     // IB->rt_power = IB->power_t + IB->local_result.power*pppm_lkg;
     IB->rt_power.readOp.dynamic =
-        IB->local_result.power.readOp.dynamic * IB->rtp_stats.readAc.access;
+        IB->local_result.power.readOp.dynamic * IB->rtp_stats.readAc.access;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     IB->rt_power.readOp.dynamic +=
-        IB->local_result.power.writeOp.dynamic * IB->rtp_stats.writeAc.access;
+        IB->local_result.power.writeOp.dynamic * IB->rtp_stats.writeAc.access;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     rt_power = rt_power + icache.rt_power + IB->rt_power;
     if (coredynp.predictionW > 0) {
-      BTB->rt_power = BTB->power_t + BTB->local_result.power * pppm_lkg;
+      BTB->rt_power = BTB->power_t + BTB->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       rt_power = rt_power + BTB->rt_power + BPT->rt_power;
     }
 
     ID_inst->rt_power.readOp.dynamic =
-        ID_inst->power_t.readOp.dynamic * ID_inst->rtp_stats.readAc.access;
-    ID_operand->rt_power.readOp.dynamic = ID_operand->power_t.readOp.dynamic *
+        ID_inst->power_t.readOp.dynamic * ID_inst->rtp_stats.readAc.access;  // [한국어] read 동작 1회당 동적 에너지
+    ID_operand->rt_power.readOp.dynamic = ID_operand->power_t.readOp.dynamic *  // [한국어] read 동작 1회당 동적 에너지
                                           ID_operand->rtp_stats.readAc.access;
     ID_misc->rt_power.readOp.dynamic =
-        ID_misc->power_t.readOp.dynamic * ID_misc->rtp_stats.readAc.access;
+        ID_misc->power_t.readOp.dynamic * ID_misc->rtp_stats.readAc.access;  // [한국어] read 동작 1회당 동적 에너지
 
     rt_power = rt_power +
                (ID_inst->rt_power + ID_operand->rt_power + ID_misc->rt_power);
@@ -3439,6 +3557,10 @@ void InstFetchU::computeEnergy(bool is_tdp) {
     // "<<ID_misc->rt_power.readOp.dynamic<<endl;
   }
 }
+/*
+ * [한국어] InstFetchU::displayEnergy — IFU 전력/면적 출력
+ * icache, IB, BTB, BPT, decoder의 면적/전력을 출력.
+ */
 
 void InstFetchU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -3498,7 +3620,7 @@ void InstFetchU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
              << BPT->rt_power.readOp.dynamic / executionTime << " W" << endl;
         cout << endl;
         if (plevel > 3) {
-          BPT->displayEnergy(indent + 4, plevel, is_tdp);
+          BPT->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
         }
       }
     }
@@ -3563,6 +3685,7 @@ void InstFetchU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     // IB->rt_power.readOp.leakage  << " W" << endl; 		cout <<
     // indent_str_next
     // << "Instruction Buffer   Gate Leakage = " <<
+// [한국어] instruction buffer(IB): fetch된 명령어를 warp/스케줄러에 공급하는 버퍼.
     // IB->rt_power.readOp.gate_leakage
     //<< " W" << endl; 		cout << indent_str_next << "Branch Target Buffer
     // Peak Dynamic = " << BTB->rt_power.readOp.dynamic*clockRate  << " W" <<
@@ -3582,6 +3705,10 @@ void InstFetchU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     //<< " W" << endl;
   }
 }
+/*
+ * [한국어] RENAMINGU::computeEnergy — 리네이밍 유닛 전력 계산
+ * rename lookups, int/fp_instructions 등 peak/runtime 카운터 기반.
+ */
 
 void RENAMINGU::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -3728,7 +3855,7 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
           fFRAT->stats_t.writeAc.access =
               XML->sys.core[ithCore].fp_rename_writes;
           fFRAT->stats_t.searchAc.access =
-              XML->sys.core[ithCore].committed_fp_instructions;
+              XML->sys.core[ithCore].committed_fp_instructions;  // [한국어] FP 명령어 수
           fFRAT->rtp_stats = fFRAT->stats_t;
         } else if ((coredynp.rm_ty == CAMbased)) {
           iFRAT->stats_t.readAc.access = XML->sys.core[ithCore].rename_reads;
@@ -3761,47 +3888,48 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
     } else {
       if (coredynp.issueW > 1) {
         idcl->stats_t.readAc.access =
-            2 * XML->sys.core[ithCore].int_instructions;
-        fdcl->stats_t.readAc.access = XML->sys.core[ithCore].fp_instructions;
+            2 * XML->sys.core[ithCore].int_instructions;  // [한국어] 정수 명령어 수
+        fdcl->stats_t.readAc.access = XML->sys.core[ithCore].fp_instructions;  // [한국어] FP 명령어 수
         idcl->rtp_stats = idcl->stats_t;
         fdcl->rtp_stats = fdcl->stats_t;
       }
     }
   }
   /* Compute engine */
+// [한국어] SM 전체의 compute engine 영역 면적 집계 시작.
   if (coredynp.core_ty == OOO) {
     if (coredynp.scheu_ty == PhysicalRegFile) {
       if (coredynp.rm_ty == RAMbased) {
         iFRAT->power_t.reset();
         fFRAT->power_t.reset();
 
-        iFRAT->power_t.readOp.dynamic +=
+        iFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (iFRAT->stats_t.readAc.access *
-                 (iFRAT->local_result.power.readOp.dynamic +
+                 (iFRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   idcl->power.readOp.dynamic) +
              iFRAT->stats_t.writeAc.access *
-                 iFRAT->local_result.power.writeOp.dynamic);
-        fFRAT->power_t.readOp.dynamic +=
+                 iFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        fFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (fFRAT->stats_t.readAc.access *
-                 (fFRAT->local_result.power.readOp.dynamic +
+                 (fFRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   fdcl->power.readOp.dynamic) +
              fFRAT->stats_t.writeAc.access *
-                 fFRAT->local_result.power.writeOp.dynamic);
+                 fFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
       } else if ((coredynp.rm_ty == CAMbased)) {
         iFRAT->power_t.reset();
         fFRAT->power_t.reset();
-        iFRAT->power_t.readOp.dynamic +=
+        iFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (iFRAT->stats_t.readAc.access *
-                 (iFRAT->local_result.power.searchOp.dynamic +
+                 (iFRAT->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   idcl->power.readOp.dynamic) +
              iFRAT->stats_t.writeAc.access *
-                 iFRAT->local_result.power.writeOp.dynamic);
-        fFRAT->power_t.readOp.dynamic +=
+                 iFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        fFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (fFRAT->stats_t.readAc.access *
-                 (fFRAT->local_result.power.searchOp.dynamic +
+                 (fFRAT->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   fdcl->power.readOp.dynamic) +
              fFRAT->stats_t.writeAc.access *
-                 fFRAT->local_result.power.writeOp.dynamic);
+                 fFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
       }
 
       iRRAT->power_t.reset();
@@ -3809,70 +3937,70 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
       ifreeL->power_t.reset();
       ffreeL->power_t.reset();
 
-      iRRAT->power_t.readOp.dynamic +=
+      iRRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
           (iRRAT->stats_t.readAc.access *
-               iRRAT->local_result.power.readOp.dynamic +
+               iRRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
            iRRAT->stats_t.writeAc.access *
-               iRRAT->local_result.power.writeOp.dynamic);
-      fRRAT->power_t.readOp.dynamic +=
+               iRRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+      fRRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
           (fRRAT->stats_t.readAc.access *
-               fRRAT->local_result.power.readOp.dynamic +
+               fRRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
            fRRAT->stats_t.writeAc.access *
-               fRRAT->local_result.power.writeOp.dynamic);
-      ifreeL->power_t.readOp.dynamic +=
+               fRRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+      ifreeL->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
           (ifreeL->stats_t.readAc.access *
-               ifreeL->local_result.power.readOp.dynamic +
+               ifreeL->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
            ifreeL->stats_t.writeAc.access *
-               ifreeL->local_result.power.writeOp.dynamic);
-      ffreeL->power_t.readOp.dynamic +=
+               ifreeL->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+      ffreeL->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
           (ffreeL->stats_t.readAc.access *
-               ffreeL->local_result.power.readOp.dynamic +
+               ffreeL->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
            ffreeL->stats_t.writeAc.access *
-               ffreeL->local_result.power.writeOp.dynamic);
+               ffreeL->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
     } else if (coredynp.scheu_ty == ReservationStation) {
       if (coredynp.rm_ty == RAMbased) {
         iFRAT->power_t.reset();
         fFRAT->power_t.reset();
 
-        iFRAT->power_t.readOp.dynamic +=
+        iFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (iFRAT->stats_t.readAc.access *
-                 (iFRAT->local_result.power.readOp.dynamic +
+                 (iFRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   idcl->power.readOp.dynamic) +
              iFRAT->stats_t.writeAc.access *
-                 iFRAT->local_result.power.writeOp.dynamic +
+                 iFRAT->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
              iFRAT->stats_t.searchAc.access *
-                 iFRAT->local_result.power.searchOp.dynamic);
-        fFRAT->power_t.readOp.dynamic +=
+                 iFRAT->local_result.power.searchOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        fFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (fFRAT->stats_t.readAc.access *
-                 (fFRAT->local_result.power.readOp.dynamic +
+                 (fFRAT->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   fdcl->power.readOp.dynamic) +
              fFRAT->stats_t.writeAc.access *
-                 fFRAT->local_result.power.writeOp.dynamic +
+                 fFRAT->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
              fFRAT->stats_t.searchAc.access *
-                 fFRAT->local_result.power.searchOp.dynamic);
+                 fFRAT->local_result.power.searchOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
       } else if ((coredynp.rm_ty == CAMbased)) {
         iFRAT->power_t.reset();
         fFRAT->power_t.reset();
-        iFRAT->power_t.readOp.dynamic +=
+        iFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (iFRAT->stats_t.readAc.access *
-                 (iFRAT->local_result.power.searchOp.dynamic +
+                 (iFRAT->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   idcl->power.readOp.dynamic) +
              iFRAT->stats_t.writeAc.access *
-                 iFRAT->local_result.power.writeOp.dynamic);
-        fFRAT->power_t.readOp.dynamic +=
+                 iFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        fFRAT->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
             (fFRAT->stats_t.readAc.access *
-                 (fFRAT->local_result.power.searchOp.dynamic +
+                 (fFRAT->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
                   fdcl->power.readOp.dynamic) +
              fFRAT->stats_t.writeAc.access *
-                 fFRAT->local_result.power.writeOp.dynamic);
+                 fFRAT->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
       }
       ifreeL->power_t.reset();
-      ifreeL->power_t.readOp.dynamic +=
+      ifreeL->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
           (ifreeL->stats_t.readAc.access *
-               ifreeL->local_result.power.readOp.dynamic +
+               ifreeL->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
            ifreeL->stats_t.writeAc.access *
-               ifreeL->local_result.power.writeOp.dynamic);
+               ifreeL->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
   } else {
@@ -3894,32 +4022,32 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
       if (coredynp.scheu_ty == PhysicalRegFile) {
         iFRAT->power =
             iFRAT->power_t +
-            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             idcl->power_t;
         fFRAT->power =
             fFRAT->power_t +
-            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fdcl->power_t;
         iRRAT->power = iRRAT->power_t +
-                       iRRAT->local_result.power * coredynp.pppm_lkg_multhread;
+                       iRRAT->local_result.power * coredynp.pppm_lkg_multhread;  // [한국어] ArrayST가 계산한 단위 접근 에너지
         fRRAT->power = fRRAT->power_t +
-                       fRRAT->local_result.power * coredynp.pppm_lkg_multhread;
-        ifreeL->power = ifreeL->power_t + ifreeL->local_result.power *
+                       fRRAT->local_result.power * coredynp.pppm_lkg_multhread;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+        ifreeL->power = ifreeL->power_t + ifreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                               coredynp.pppm_lkg_multhread;
-        ffreeL->power = ffreeL->power_t + ffreeL->local_result.power *
+        ffreeL->power = ffreeL->power_t + ffreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                               coredynp.pppm_lkg_multhread;
         power = power + (iFRAT->power + fFRAT->power) +
                 (iRRAT->power + fRRAT->power) + (ifreeL->power + ffreeL->power);
       } else if (coredynp.scheu_ty == ReservationStation) {
         iFRAT->power =
             iFRAT->power_t +
-            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             idcl->power_t;
         fFRAT->power =
             fFRAT->power_t +
-            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fdcl->power_t;
-        ifreeL->power = ifreeL->power_t + ifreeL->local_result.power *
+        ifreeL->power = ifreeL->power_t + ifreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                               coredynp.pppm_lkg_multhread;
         power = power + (iFRAT->power + fFRAT->power) + ifreeL->power;
       }
@@ -3932,19 +4060,19 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
       if (coredynp.scheu_ty == PhysicalRegFile) {
         iFRAT->rt_power =
             iFRAT->power_t +
-            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             idcl->power_t;
         fFRAT->rt_power =
             fFRAT->power_t +
-            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fdcl->power_t;
-        iRRAT->rt_power = iRRAT->power_t + iRRAT->local_result.power *
+        iRRAT->rt_power = iRRAT->power_t + iRRAT->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                                coredynp.pppm_lkg_multhread;
-        fRRAT->rt_power = fRRAT->power_t + fRRAT->local_result.power *
+        fRRAT->rt_power = fRRAT->power_t + fRRAT->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                                coredynp.pppm_lkg_multhread;
-        ifreeL->rt_power = ifreeL->power_t + ifreeL->local_result.power *
+        ifreeL->rt_power = ifreeL->power_t + ifreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                                  coredynp.pppm_lkg_multhread;
-        ffreeL->rt_power = ffreeL->power_t + ffreeL->local_result.power *
+        ffreeL->rt_power = ffreeL->power_t + ffreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                                  coredynp.pppm_lkg_multhread;
         rt_power = rt_power + (iFRAT->rt_power + fFRAT->rt_power) +
                    (iRRAT->rt_power + fRRAT->rt_power) +
@@ -3952,13 +4080,13 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
       } else if (coredynp.scheu_ty == ReservationStation) {
         iFRAT->rt_power =
             iFRAT->power_t +
-            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (iFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             idcl->power_t;
         fFRAT->rt_power =
             fFRAT->power_t +
-            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +
+            (fFRAT->local_result.power) * coredynp.pppm_lkg_multhread +  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fdcl->power_t;
-        ifreeL->rt_power = ifreeL->power_t + ifreeL->local_result.power *
+        ifreeL->rt_power = ifreeL->power_t + ifreeL->local_result.power *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                                  coredynp.pppm_lkg_multhread;
         rt_power =
             rt_power + (iFRAT->rt_power + fFRAT->rt_power) + ifreeL->rt_power;
@@ -3968,6 +4096,10 @@ void RENAMINGU::computeEnergy(bool is_tdp) {
     }
   }
 }
+/*
+ * [한국어] RENAMINGU::displayEnergy — 리네이밍 유닛 출력
+ * FRAT/RRAT/free list/DCL 면적/전력 출력.
+ */
 
 void RENAMINGU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -4162,6 +4294,10 @@ void RENAMINGU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     }
   }
 }
+/*
+ * [한국어] SchedulerU::computeEnergy — 스케줄러 유닛 전력 계산
+ * is_tdp=true이면 issueW, ROB_size 등 peak access; false이면 XML의 int_instructions, fp_instructions, committed_int_instructions 등 카운터 사용.
+ */
 
 void SchedulerU::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -4261,14 +4397,14 @@ void SchedulerU::computeEnergy(bool is_tdp) {
 
     } else if (coredynp.multithreaded) {
       int_inst_window->stats_t.readAc.access =
-          XML->sys.core[ithCore].int_instructions +
-          XML->sys.core[ithCore].fp_instructions;
+          XML->sys.core[ithCore].int_instructions +  // [한국어] 정수 명령어 수
+          XML->sys.core[ithCore].fp_instructions;  // [한국어] FP 명령어 수
       int_inst_window->stats_t.writeAc.access =
-          XML->sys.core[ithCore].int_instructions +
-          XML->sys.core[ithCore].fp_instructions;
+          XML->sys.core[ithCore].int_instructions +  // [한국어] 정수 명령어 수
+          XML->sys.core[ithCore].fp_instructions;  // [한국어] FP 명령어 수
       int_inst_window->stats_t.searchAc.access =
-          2 * (XML->sys.core[ithCore].int_instructions +
-               XML->sys.core[ithCore].fp_instructions);
+          2 * (XML->sys.core[ithCore].int_instructions +  // [한국어] 정수 명령어 수
+               XML->sys.core[ithCore].fp_instructions);  // [한국어] FP 명령어 수
       int_inst_window->rtp_stats = int_inst_window->stats_t;
     }
   }
@@ -4283,41 +4419,41 @@ void SchedulerU::computeEnergy(bool is_tdp) {
      * operand
      *
      */
-    int_inst_window->power_t.readOp.dynamic +=
-        int_inst_window->local_result.power.readOp.dynamic *
+    int_inst_window->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+        int_inst_window->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.readAc.access +
-        int_inst_window->local_result.power.searchOp.dynamic *
+        int_inst_window->local_result.power.searchOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.searchAc.access +
-        int_inst_window->local_result.power.writeOp.dynamic *
+        int_inst_window->local_result.power.writeOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.writeAc.access +
         int_inst_window->stats_t.readAc.access *
             instruction_selection->power.readOp.dynamic;
 
-    fp_inst_window->power_t.readOp.dynamic +=
-        fp_inst_window->local_result.power.readOp.dynamic *
+    fp_inst_window->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+        fp_inst_window->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fp_inst_window->stats_t.readAc.access +
-        fp_inst_window->local_result.power.searchOp.dynamic *
+        fp_inst_window->local_result.power.searchOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fp_inst_window->stats_t.searchAc.access +
-        fp_inst_window->local_result.power.writeOp.dynamic *
+        fp_inst_window->local_result.power.writeOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             fp_inst_window->stats_t.writeAc.access +
         fp_inst_window->stats_t.writeAc.access *
             instruction_selection->power.readOp.dynamic;
 
     if (XML->sys.core[ithCore].ROB_size > 0) {
       ROB->power_t.reset();
-      ROB->power_t.readOp.dynamic +=
-          ROB->local_result.power.readOp.dynamic * ROB->stats_t.readAc.access +
-          ROB->stats_t.writeAc.access * ROB->local_result.power.writeOp.dynamic;
+      ROB->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+          ROB->local_result.power.readOp.dynamic * ROB->stats_t.readAc.access +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+          ROB->stats_t.writeAc.access * ROB->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
   } else if (coredynp.multithreaded) {
     int_inst_window->power_t.reset();
-    int_inst_window->power_t.readOp.dynamic +=
-        int_inst_window->local_result.power.readOp.dynamic *
+    int_inst_window->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+        int_inst_window->local_result.power.readOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.readAc.access +
-        int_inst_window->local_result.power.searchOp.dynamic *
+        int_inst_window->local_result.power.searchOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.searchAc.access +
-        int_inst_window->local_result.power.writeOp.dynamic *
+        int_inst_window->local_result.power.writeOp.dynamic *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             int_inst_window->stats_t.writeAc.access +
         int_inst_window->stats_t.writeAc.access *
             instruction_selection->power.readOp.dynamic;
@@ -4328,15 +4464,15 @@ void SchedulerU::computeEnergy(bool is_tdp) {
     if (coredynp.core_ty == OOO) {
       int_inst_window->power =
           int_inst_window->power_t +
-          (int_inst_window->local_result.power + instruction_selection->power) *
+          (int_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       fp_inst_window->power =
           fp_inst_window->power_t +
-          (fp_inst_window->local_result.power + instruction_selection->power) *
+          (fp_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       power = power + int_inst_window->power + fp_inst_window->power;
       if (XML->sys.core[ithCore].ROB_size > 0) {
-        ROB->power = ROB->power_t + ROB->local_result.power * pppm_lkg;
+        ROB->power = ROB->power_t + ROB->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
         power = power + ROB->power;
       }
 
@@ -4345,7 +4481,7 @@ void SchedulerU::computeEnergy(bool is_tdp) {
       // XML->sys.core[ithCore].issue_width,1, 1, 1);
       int_inst_window->power =
           int_inst_window->power_t +
-          (int_inst_window->local_result.power + instruction_selection->power) *
+          (int_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       power = power + int_inst_window->power;
     }
@@ -4354,16 +4490,16 @@ void SchedulerU::computeEnergy(bool is_tdp) {
     if (coredynp.core_ty == OOO) {
       int_inst_window->rt_power =
           int_inst_window->power_t +
-          (int_inst_window->local_result.power + instruction_selection->power) *
+          (int_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       fp_inst_window->rt_power =
           fp_inst_window->power_t +
-          (fp_inst_window->local_result.power + instruction_selection->power) *
+          (fp_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       rt_power =
           rt_power + int_inst_window->rt_power + fp_inst_window->rt_power;
       if (XML->sys.core[ithCore].ROB_size > 0) {
-        ROB->rt_power = ROB->power_t + ROB->local_result.power * pppm_lkg;
+        ROB->rt_power = ROB->power_t + ROB->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
         rt_power = rt_power + ROB->rt_power;
       }
 
@@ -4372,7 +4508,7 @@ void SchedulerU::computeEnergy(bool is_tdp) {
       // XML->sys.core[ithCore].issue_width,1, 1, 1);
       int_inst_window->rt_power =
           int_inst_window->power_t +
-          (int_inst_window->local_result.power + instruction_selection->power) *
+          (int_inst_window->local_result.power + instruction_selection->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
               pppm_lkg;
       rt_power = rt_power + int_inst_window->rt_power;
     }
@@ -4386,6 +4522,10 @@ void SchedulerU::computeEnergy(bool is_tdp) {
   //    int_inst_window->stats_t.writeAc.access<<"leakage="<<int_inst_window->local_result.power.readOp.leakage<<endl;
   //	cout<<"selection"<<instruction_selection->power.readOp.dynamic<<"leakage"<<instruction_selection->power.readOp.leakage<<endl;
 }
+/*
+ * [한국어] SchedulerU::displayEnergy — 스케줄러 전력/면적 출력
+ * int_inst_window, fp_inst_window, ROB, selection logic 출력.
+ */
 
 void SchedulerU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -4507,6 +4647,10 @@ void SchedulerU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     }
   }
 }
+/*
+ * [한국어] LoadStoreU::computeEnergy — LSU 전력 계산
+ * dcache/tcache/ccache/sharedmemory의 read/write hit/miss 카운터를 XML에서 읽어 runtime 동적 전력을 산출; TDP 모드에서는 LSU_duty_cycle 기준 peak.
+ */
 
 void LoadStoreU::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -4668,7 +4812,7 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
     // init stats for Runtime Dynamic (RTP)
 
     sharedmemory.caches->stats_t.readAc.access =
-        XML->sys.core[ithCore].sharedmemory.read_accesses;
+        XML->sys.core[ithCore].sharedmemory.read_accesses;  // [한국어] shared memory 읽기 접근 수
     sharedmemory.caches->stats_t.readAc.miss =
         XML->sys.core[ithCore].sharedmemory.read_misses;
     sharedmemory.caches->stats_t.readAc.hit =
@@ -4684,23 +4828,23 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
     sharedmemory.caches->rtp_stats = sharedmemory.caches->stats_t;
 
     dcache.caches->stats_t.readAc.access =
-        XML->sys.core[ithCore].dcache.read_accesses;
+        XML->sys.core[ithCore].dcache.read_accesses;  // [한국어] L1D 읽기 접근 수
     dcache.caches->stats_t.readAc.miss =
-        XML->sys.core[ithCore].dcache.read_misses;
+        XML->sys.core[ithCore].dcache.read_misses;  // [한국어] L1D 읽기 미스 수
     dcache.caches->stats_t.readAc.hit = dcache.caches->stats_t.readAc.access -
                                         dcache.caches->stats_t.readAc.miss;
     dcache.caches->stats_t.writeAc.access =
-        XML->sys.core[ithCore].dcache.write_accesses;
+        XML->sys.core[ithCore].dcache.write_accesses;  // [한국어] L1D 쓰기 접근 수
     dcache.caches->stats_t.writeAc.miss =
-        XML->sys.core[ithCore].dcache.write_misses;
+        XML->sys.core[ithCore].dcache.write_misses;  // [한국어] L1D 쓰기 미스 수
     dcache.caches->stats_t.writeAc.hit = dcache.caches->stats_t.writeAc.access -
                                          dcache.caches->stats_t.writeAc.miss;
     dcache.caches->rtp_stats = dcache.caches->stats_t;
 
     ccache.caches->stats_t.readAc.access =
-        XML->sys.core[ithCore].ccache.read_accesses;
+        XML->sys.core[ithCore].ccache.read_accesses;  // [한국어] constant cache 읽기 접근 수
     ccache.caches->stats_t.readAc.miss =
-        XML->sys.core[ithCore].ccache.read_misses;
+        XML->sys.core[ithCore].ccache.read_misses;  // [한국어] constant cache 읽기 미스 수
     ccache.caches->stats_t.readAc.hit = ccache.caches->stats_t.readAc.access -
                                         ccache.caches->stats_t.readAc.miss;
     ccache.caches->stats_t.writeAc.access =
@@ -4712,9 +4856,9 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
     ccache.caches->rtp_stats = ccache.caches->stats_t;
 
     tcache.caches->stats_t.readAc.access =
-        XML->sys.core[ithCore].tcache.read_accesses;
+        XML->sys.core[ithCore].tcache.read_accesses;  // [한국어] texture cache 읽기 접근 수
     tcache.caches->stats_t.readAc.miss =
-        XML->sys.core[ithCore].tcache.read_misses;
+        XML->sys.core[ithCore].tcache.read_misses;  // [한국어] texture cache 읽기 미스 수
     tcache.caches->stats_t.readAc.hit = tcache.caches->stats_t.readAc.access -
                                         tcache.caches->stats_t.readAc.miss;
     tcache.caches->stats_t.writeAc.access =
@@ -4872,183 +5016,183 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
   tcache.power_t.reset();
   LSQ->power_t.reset();
 
-  sharedmemory.power_t.readOp.dynamic +=
+  sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       (sharedmemory.caches->stats_t.readAc.hit *
-           sharedmemory.caches->local_result.power.readOp.dynamic +
+           sharedmemory.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        sharedmemory.caches->stats_t.readAc.miss *
-           sharedmemory.caches->local_result.power.readOp.dynamic +
+           sharedmemory.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        sharedmemory.caches->stats_t.writeAc.miss *
            sharedmemory.caches->local_result.tag_array2->power.readOp.dynamic +
        sharedmemory.caches->stats_t.writeAc.access *
-           sharedmemory.caches->local_result.power.writeOp.dynamic +
+           sharedmemory.caches->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        xbar_shared->power.readOp.dynamic *
            (sharedmemory.caches->stats_t.readAc.hit +
             sharedmemory.caches->stats_t.writeAc.hit));
 
-  dcache.power_t.readOp.dynamic +=
+  dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       (dcache.caches->stats_t.readAc.hit *
-           dcache.caches->local_result.power.readOp.dynamic +
+           dcache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        dcache.caches->stats_t.readAc.miss *
-           dcache.caches->local_result.power.readOp.dynamic +
+           dcache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        dcache.caches->stats_t.writeAc.miss *
            dcache.caches->local_result.tag_array2->power.readOp.dynamic +
        dcache.caches->stats_t.writeAc.access *
-           dcache.caches->local_result.power.writeOp.dynamic +
+           dcache.caches->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        xbar_shared->power.readOp.dynamic *
            (dcache.caches->stats_t.readAc.hit +
             dcache.caches->stats_t.writeAc.hit));
-  ccache.power_t.readOp.dynamic +=
+  ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       (ccache.caches->stats_t.readAc.hit *
-           ccache.caches->local_result.power.readOp.dynamic +
+           ccache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        ccache.caches->stats_t.readAc.miss *
-           ccache.caches->local_result.power.readOp.dynamic +
+           ccache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        ccache.caches->stats_t.writeAc.miss *
            ccache.caches->local_result.tag_array2->power.readOp.dynamic +
        ccache.caches->stats_t.writeAc.access *
-           ccache.caches->local_result.power.writeOp.dynamic +
+           ccache.caches->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        xbar_shared->power.readOp.dynamic * (ccache.caches->stats_t.readAc.hit));
 
-  tcache.power_t.readOp.dynamic +=
+  tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       (tcache.caches->stats_t.readAc.hit *
-           tcache.caches->local_result.power.readOp.dynamic +
+           tcache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        tcache.caches->stats_t.readAc.miss *
-           tcache.caches->local_result.power.readOp.dynamic +
+           tcache.caches->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        tcache.caches->stats_t.writeAc.miss *
            tcache.caches->local_result.tag_array2->power.readOp.dynamic +
        tcache.caches->stats_t.writeAc.access *
-           tcache.caches->local_result.power.writeOp.dynamic +
+           tcache.caches->local_result.power.writeOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
        xbar_shared->power.readOp.dynamic *
            (tcache.caches->stats_t.readAc.hit +
             tcache.caches->stats_t.writeAc.hit));
 
   if (cache_p == Write_back) {  // write miss will generate a write later
-    dcache.power_t.readOp.dynamic +=
+    dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         dcache.caches->stats_t.writeAc.miss *
-        dcache.caches->local_result.power.writeOp.dynamic;
-    ccache.power_t.readOp.dynamic +=
+        dcache.caches->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         ccache.caches->stats_t.writeAc.miss *
-        ccache.caches->local_result.power.writeOp.dynamic;
-    tcache.power_t.readOp.dynamic +=
+        ccache.caches->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         tcache.caches->stats_t.writeAc.miss *
-        tcache.caches->local_result.power.writeOp.dynamic;
-    sharedmemory.power_t.readOp.dynamic +=
+        tcache.caches->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         sharedmemory.caches->stats_t.writeAc.miss *
-        sharedmemory.caches->local_result.power.writeOp.dynamic;
+        sharedmemory.caches->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
-  sharedmemory.power_t.readOp.dynamic +=
+  sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       sharedmemory.missb->stats_t.readAc.access *
-          sharedmemory.missb->local_result.power.searchOp.dynamic +
+          sharedmemory.missb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       sharedmemory.missb->stats_t.writeAc.access *
-          sharedmemory.missb->local_result.power.writeOp
+          sharedmemory.missb->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic;  // each access to missb involves a CAM and a write
-  sharedmemory.power_t.readOp.dynamic +=
+  sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       sharedmemory.ifb->stats_t.readAc.access *
-          sharedmemory.ifb->local_result.power.searchOp.dynamic +
+          sharedmemory.ifb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       sharedmemory.ifb->stats_t.writeAc.access *
-          sharedmemory.ifb->local_result.power.writeOp.dynamic;
-  sharedmemory.power_t.readOp.dynamic +=
+          sharedmemory.ifb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       sharedmemory.prefetchb->stats_t.readAc.access *
-          sharedmemory.prefetchb->local_result.power.searchOp.dynamic +
+          sharedmemory.prefetchb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       sharedmemory.prefetchb->stats_t.writeAc.access *
-          sharedmemory.prefetchb->local_result.power.writeOp.dynamic;
+          sharedmemory.prefetchb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   if (cache_p == Write_back) {
-    sharedmemory.power_t.readOp.dynamic +=
+    sharedmemory.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         sharedmemory.wbb->stats_t.readAc.access *
-            sharedmemory.wbb->local_result.power.searchOp.dynamic +
+            sharedmemory.wbb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         sharedmemory.wbb->stats_t.writeAc.access *
-            sharedmemory.wbb->local_result.power.writeOp.dynamic;
+            sharedmemory.wbb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
-  dcache.power_t.readOp.dynamic +=
+  dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       dcache.missb->stats_t.readAc.access *
-          dcache.missb->local_result.power.searchOp.dynamic +
+          dcache.missb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       dcache.missb->stats_t.writeAc.access *
-          dcache.missb->local_result.power.writeOp
+          dcache.missb->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic;  // each access to missb involves a CAM and a write
-  dcache.power_t.readOp.dynamic +=
+  dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       dcache.ifb->stats_t.readAc.access *
-          dcache.ifb->local_result.power.searchOp.dynamic +
+          dcache.ifb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       dcache.ifb->stats_t.writeAc.access *
-          dcache.ifb->local_result.power.writeOp.dynamic;
-  dcache.power_t.readOp.dynamic +=
+          dcache.ifb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       dcache.prefetchb->stats_t.readAc.access *
-          dcache.prefetchb->local_result.power.searchOp.dynamic +
+          dcache.prefetchb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       dcache.prefetchb->stats_t.writeAc.access *
-          dcache.prefetchb->local_result.power.writeOp.dynamic;
+          dcache.prefetchb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   if (cache_p == Write_back) {
-    dcache.power_t.readOp.dynamic +=
+    dcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         dcache.wbb->stats_t.readAc.access *
-            dcache.wbb->local_result.power.searchOp.dynamic +
+            dcache.wbb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         dcache.wbb->stats_t.writeAc.access *
-            dcache.wbb->local_result.power.writeOp.dynamic;
+            dcache.wbb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
-  ccache.power_t.readOp.dynamic +=
+  ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       ccache.missb->stats_t.readAc.access *
-          ccache.missb->local_result.power.searchOp.dynamic +
+          ccache.missb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       ccache.missb->stats_t.writeAc.access *
-          ccache.missb->local_result.power.writeOp
+          ccache.missb->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic;  // each access to missb involves a CAM and a write
-  ccache.power_t.readOp.dynamic +=
+  ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       ccache.ifb->stats_t.readAc.access *
-          ccache.ifb->local_result.power.searchOp.dynamic +
+          ccache.ifb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       ccache.ifb->stats_t.writeAc.access *
-          ccache.ifb->local_result.power.writeOp.dynamic;
-  ccache.power_t.readOp.dynamic +=
+          ccache.ifb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       ccache.prefetchb->stats_t.readAc.access *
-          ccache.prefetchb->local_result.power.searchOp.dynamic +
+          ccache.prefetchb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       ccache.prefetchb->stats_t.writeAc.access *
-          ccache.prefetchb->local_result.power.writeOp.dynamic;
+          ccache.prefetchb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   if (cache_p == Write_back) {
-    ccache.power_t.readOp.dynamic +=
+    ccache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         ccache.wbb->stats_t.readAc.access *
-            ccache.wbb->local_result.power.searchOp.dynamic +
+            ccache.wbb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         ccache.wbb->stats_t.writeAc.access *
-            ccache.wbb->local_result.power.writeOp.dynamic;
+            ccache.wbb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
-  tcache.power_t.readOp.dynamic +=
+  tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       tcache.missb->stats_t.readAc.access *
-          tcache.missb->local_result.power.searchOp.dynamic +
+          tcache.missb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       tcache.missb->stats_t.writeAc.access *
-          tcache.missb->local_result.power.writeOp
+          tcache.missb->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic;  // each access to missb involves a CAM and a write
-  tcache.power_t.readOp.dynamic +=
+  tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       tcache.ifb->stats_t.readAc.access *
-          tcache.ifb->local_result.power.searchOp.dynamic +
+          tcache.ifb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       tcache.ifb->stats_t.writeAc.access *
-          tcache.ifb->local_result.power.writeOp.dynamic;
-  tcache.power_t.readOp.dynamic +=
+          tcache.ifb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       tcache.prefetchb->stats_t.readAc.access *
-          tcache.prefetchb->local_result.power.searchOp.dynamic +
+          tcache.prefetchb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
       tcache.prefetchb->stats_t.writeAc.access *
-          tcache.prefetchb->local_result.power.writeOp.dynamic;
+          tcache.prefetchb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   if (cache_p == Write_back) {
-    tcache.power_t.readOp.dynamic +=
+    tcache.power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         tcache.wbb->stats_t.readAc.access *
-            tcache.wbb->local_result.power.searchOp.dynamic +
+            tcache.wbb->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         tcache.wbb->stats_t.writeAc.access *
-            tcache.wbb->local_result.power.writeOp.dynamic;
+            tcache.wbb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
   if ((coredynp.core_ty == OOO) &&
       (XML->sys.core[ithCore].load_buffer_size > 0)) {
     LoadQ->power_t.reset();
-    LoadQ->power_t.readOp.dynamic +=
+    LoadQ->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         LoadQ->stats_t.readAc.access *
-            (LoadQ->local_result.power.searchOp.dynamic +
-             LoadQ->local_result.power.readOp.dynamic) +
+            (LoadQ->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+             LoadQ->local_result.power.readOp.dynamic) +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         LoadQ->stats_t.writeAc.access *
-            LoadQ->local_result.power.writeOp
+            LoadQ->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
                 .dynamic;  // every memory access invloves at least two
                            // operations on LoadQ
 
-    LSQ->power_t.readOp.dynamic +=
-        LSQ->stats_t.readAc.access * (LSQ->local_result.power.searchOp.dynamic +
-                                      LSQ->local_result.power.readOp.dynamic) +
+    LSQ->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
+        LSQ->stats_t.readAc.access * (LSQ->local_result.power.searchOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                      LSQ->local_result.power.readOp.dynamic) +  // [한국어] ArrayST가 계산한 단위 접근 에너지
         LSQ->stats_t.writeAc.access *
-            LSQ->local_result.power.writeOp
+            LSQ->local_result.power.writeOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
                 .dynamic;  // every memory access invloves at least two
                            // operations on LSQ
 
@@ -5072,44 +5216,44 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
 
     sharedmemory.power =
         sharedmemory.power_t +
-        (sharedmemory.caches->local_result.power +
-         sharedmemory.missb->local_result.power +
-         sharedmemory.ifb->local_result.power +
-         sharedmemory.prefetchb->local_result.power + xbar_shared->power) *
+        (sharedmemory.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+         sharedmemory.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+         sharedmemory.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+         sharedmemory.prefetchb->local_result.power + xbar_shared->power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
             pppm_lkg;
     if (cache_p == Write_back) {
       sharedmemory.power =
-          sharedmemory.power + sharedmemory.wbb->local_result.power * pppm_lkg;
+          sharedmemory.power + sharedmemory.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    dcache.power = dcache.power_t + (dcache.caches->local_result.power +
-                                     dcache.missb->local_result.power +
-                                     dcache.ifb->local_result.power +
-                                     dcache.prefetchb->local_result.power) *
+    dcache.power = dcache.power_t + (dcache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     dcache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     dcache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     dcache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                         pppm_lkg;
     if (cache_p == Write_back) {
-      dcache.power = dcache.power + dcache.wbb->local_result.power * pppm_lkg;
+      dcache.power = dcache.power + dcache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    ccache.power = ccache.power_t + (ccache.caches->local_result.power +
-                                     ccache.missb->local_result.power +
-                                     ccache.ifb->local_result.power +
-                                     ccache.prefetchb->local_result.power) *
+    ccache.power = ccache.power_t + (ccache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     ccache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     ccache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     ccache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                         pppm_lkg;
     if (cache_p == Write_back) {
-      ccache.power = ccache.power + ccache.wbb->local_result.power * pppm_lkg;
+      ccache.power = ccache.power + ccache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    tcache.power = tcache.power_t + (tcache.caches->local_result.power +
-                                     tcache.missb->local_result.power +
-                                     tcache.ifb->local_result.power +
-                                     tcache.prefetchb->local_result.power) *
+    tcache.power = tcache.power_t + (tcache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     tcache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     tcache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                     tcache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                         pppm_lkg;
     if (cache_p == Write_back) {
-      tcache.power = tcache.power + tcache.wbb->local_result.power * pppm_lkg;
+      tcache.power = tcache.power + tcache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    LSQ->power = LSQ->power_t + LSQ->local_result.power * pppm_lkg;
+    LSQ->power = LSQ->power_t + LSQ->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     // No LSQ in GPUs (Syed)
     LSQ->power.reset();
     power = power + dcache.power + LSQ->power + sharedmemory.power +
@@ -5117,7 +5261,7 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
 
     if ((coredynp.core_ty == OOO) &&
         (XML->sys.core[ithCore].load_buffer_size > 0)) {
-      LoadQ->power = LoadQ->power_t + LoadQ->local_result.power * pppm_lkg;
+      LoadQ->power = LoadQ->power_t + LoadQ->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       power = power + LoadQ->power;
     }
   } else {
@@ -5135,59 +5279,63 @@ void LoadStoreU::computeEnergy(bool is_tdp) {
     LSQ->rt_power.reset();
 
     sharedmemory.rt_power =
-        sharedmemory.power_t + (sharedmemory.caches->local_result.power +
-                                sharedmemory.missb->local_result.power +
-                                sharedmemory.ifb->local_result.power +
-                                sharedmemory.prefetchb->local_result.power) *
+        sharedmemory.power_t + (sharedmemory.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                sharedmemory.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                sharedmemory.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                sharedmemory.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                    pppm_lkg;
 
     if (cache_p == Write_back) {
       sharedmemory.rt_power = sharedmemory.rt_power +
-                              sharedmemory.wbb->local_result.power * pppm_lkg;
+                              sharedmemory.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    dcache.rt_power = dcache.power_t + (dcache.caches->local_result.power +
-                                        dcache.missb->local_result.power +
-                                        dcache.ifb->local_result.power +
-                                        dcache.prefetchb->local_result.power) *
+    dcache.rt_power = dcache.power_t + (dcache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        dcache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        dcache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        dcache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                            pppm_lkg;
     if (cache_p == Write_back) {
       dcache.rt_power =
-          dcache.rt_power + dcache.wbb->local_result.power * pppm_lkg;
+          dcache.rt_power + dcache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    ccache.rt_power = ccache.power_t + (ccache.caches->local_result.power +
-                                        ccache.missb->local_result.power +
-                                        ccache.ifb->local_result.power +
-                                        ccache.prefetchb->local_result.power) *
+    ccache.rt_power = ccache.power_t + (ccache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        ccache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        ccache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        ccache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                            pppm_lkg;
     if (cache_p == Write_back) {
       ccache.rt_power =
-          ccache.rt_power + ccache.wbb->local_result.power * pppm_lkg;
+          ccache.rt_power + ccache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    tcache.rt_power = tcache.power_t + (tcache.caches->local_result.power +
-                                        tcache.missb->local_result.power +
-                                        tcache.ifb->local_result.power +
-                                        tcache.prefetchb->local_result.power) *
+    tcache.rt_power = tcache.power_t + (tcache.caches->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        tcache.missb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        tcache.ifb->local_result.power +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+                                        tcache.prefetchb->local_result.power) *  // [한국어] ArrayST가 계산한 단위 접근 에너지
                                            pppm_lkg;
     if (cache_p == Write_back) {
       tcache.rt_power =
-          tcache.rt_power + tcache.wbb->local_result.power * pppm_lkg;
+          tcache.rt_power + tcache.wbb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     }
 
-    LSQ->rt_power = LSQ->power_t + LSQ->local_result.power * pppm_lkg;
+    LSQ->rt_power = LSQ->power_t + LSQ->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     LSQ->rt_power.reset();
     rt_power = rt_power + dcache.rt_power + LSQ->rt_power +
                sharedmemory.rt_power + ccache.rt_power + tcache.rt_power;
 
     if ((coredynp.core_ty == OOO) &&
         (XML->sys.core[ithCore].load_buffer_size > 0)) {
-      LoadQ->rt_power = LoadQ->power_t + LoadQ->local_result.power * pppm_lkg;
+      LoadQ->rt_power = LoadQ->power_t + LoadQ->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       rt_power = rt_power + LoadQ->rt_power;
     }
   }
 }
+/*
+ * [한국어] LoadStoreU::displayEnergy — LSU 전력/면적 출력
+ * shared xbar, sharedmemory, ccache, tcache, dcache, LSQ/LoadQ, NoC 출력.
+ */
 
 void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -5331,6 +5479,7 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     cout << indent_str_next << "Shared Memory    Subthreshold Leakage = "
          << sharedmemory.rt_power.readOp.leakage << " W" << endl;
     cout << indent_str_next << "Shared Memory    Gate Leakage = "
+// [한국어] shared memory: SM 내 warp들이 공유하는 software-managed SRAM.
          << sharedmemory.rt_power.readOp.gate_leakage << " W" << endl;
 
     cout << indent_str_next << "Data Cache    Peak Dynamic = "
@@ -5338,6 +5487,7 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     cout << indent_str_next << "Data Cache    Subthreshold Leakage = "
          << dcache.rt_power.readOp.leakage << " W" << endl;
     cout << indent_str_next << "Data Cache    Gate Leakage = "
+// [한국어] L1 data cache(dcache): thread/warp의 일반 메모리 접근용 캐시.
          << dcache.rt_power.readOp.gate_leakage << " W" << endl;
 
     cout << indent_str_next << "Constant Cache    Peak Dynamic = "
@@ -5345,6 +5495,7 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     cout << indent_str_next << "Constant Cache    Subthreshold Leakage = "
          << ccache.rt_power.readOp.leakage << " W" << endl;
     cout << indent_str_next << "Constant Cache    Gate Leakage = "
+// [한국어] constant cache(ccache): 상수 메모리 접근 가속용 읽기 전용 캐시.
          << ccache.rt_power.readOp.gate_leakage << " W" << endl;
 
     cout << indent_str_next << "Texture Cache    Peak Dynamic = "
@@ -5352,6 +5503,7 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     cout << indent_str_next << "Texture Cache    Subthreshold Leakage = "
          << tcache.rt_power.readOp.leakage << " W" << endl;
     cout << indent_str_next << "Texture Cache    Gate Leakage = "
+// [한국어] texture cache(tcache): texture unit 메모리 접근용 캐시.
          << tcache.rt_power.readOp.gate_leakage << " W" << endl;
 
     if (coredynp.core_ty == Inorder) {
@@ -5360,6 +5512,7 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
       cout << indent_str_next << "Load/Store Queue   Subthreshold Leakage = "
            << LSQ->rt_power.readOp.leakage << " W" << endl;
       cout << indent_str_next << "Load/Store Queue   Gate Leakage = "
+// [한국어] LSQ/LoadQ: GPU 설정에서는 제거되며 전력을 0으로 리셋.
            << LSQ->rt_power.readOp.gate_leakage << " W" << endl;
     } else {
       cout << indent_str_next << "LoadQ   Peak Dynamic = "
@@ -5380,6 +5533,10 @@ void LoadStoreU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     }
   }
 }
+/*
+ * [한국어] MemManU::computeEnergy — TLB 전력 계산
+ * itlb/dtlb read_accesses로 runtime access를 설정.
+ */
 
 void MemManU::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -5414,29 +5571,33 @@ void MemManU::computeEnergy(bool is_tdp) {
 
   itlb->power_t.reset();
   dtlb->power_t.reset();
-  itlb->power_t.readOp.dynamic +=
+  itlb->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       itlb->stats_t.readAc.access *
-          itlb->local_result.power.searchOp
+          itlb->local_result.power.searchOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic  // FA spent most power in tag,
                         // so use total access not hits
-      + itlb->stats_t.readAc.miss * itlb->local_result.power.writeOp.dynamic;
-  dtlb->power_t.readOp.dynamic +=
+      + itlb->stats_t.readAc.miss * itlb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  dtlb->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
       dtlb->stats_t.readAc.access *
-          dtlb->local_result.power.searchOp
+          dtlb->local_result.power.searchOp  // [한국어] ArrayST가 계산한 단위 접근 에너지
               .dynamic  // FA spent most power in tag,
                         // so use total access not hits
-      + dtlb->stats_t.readAc.miss * dtlb->local_result.power.writeOp.dynamic;
+      + dtlb->stats_t.readAc.miss * dtlb->local_result.power.writeOp.dynamic;  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
   if (is_tdp) {
-    itlb->power = itlb->power_t + itlb->local_result.power * pppm_lkg;
-    dtlb->power = dtlb->power_t + dtlb->local_result.power * pppm_lkg;
+    itlb->power = itlb->power_t + itlb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    dtlb->power = dtlb->power_t + dtlb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     power = power + itlb->power + dtlb->power;
   } else {
-    itlb->rt_power = itlb->power_t + itlb->local_result.power * pppm_lkg;
-    dtlb->rt_power = dtlb->power_t + dtlb->local_result.power * pppm_lkg;
+    itlb->rt_power = itlb->power_t + itlb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    dtlb->rt_power = dtlb->power_t + dtlb->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     rt_power = rt_power + itlb->rt_power + dtlb->rt_power;
   }
 }
+/*
+ * [한국어] MemManU::displayEnergy — TLB 전력/면적 출력
+ * itlb, dtlb 출력.
+ */
 
 void MemManU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -5496,6 +5657,10 @@ void MemManU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
          << " W" << endl;
   }
 }
+/*
+ * [한국어] RegFU::computeEnergy — RFU 전력 계산
+ * int_regfile_reads/writes, fp_regfile_reads/writes, non_rf_operands, num_opt_collisions 등을 XML에서 읽어 IRF/OPC/xbar/arbiter runtime 전력 산출.
+ */
 
 void RegFU::computeEnergy(bool is_tdp) {
   /*
@@ -5540,7 +5705,7 @@ void RegFU::computeEnergy(bool is_tdp) {
       RFWIN->stats_t.writeAc.access = 0;  // 0.5*RFWIN->l_ip.num_rw_ports;
       RFWIN->tdp_stats = RFWIN->stats_t;
     }
-  } /* if (is_tdp) */
+  } /* if (is_tdp) */  // [한국어] TDP(peak)=true, runtime=false
   else {
     // init stats for Runtime Dynamic (RTP)
     // in Tesla each RF operand accesses 2 banks, so multiply acceses by 2
@@ -5554,7 +5719,7 @@ void RegFU::computeEnergy(bool is_tdp) {
           (XML->sys.core[ithCore].int_regfile_writes / 32) * (4 * 2);  /// 1.5;
     } else {
       IRF->stats_t.readAc.access =
-          (XML->sys.core[ithCore].int_regfile_reads / 32) *
+          (XML->sys.core[ithCore].int_regfile_reads / 32) *  // [한국어] integer register file 읽기 수
           (2 * 4);  /// 1.5;//TODO: no diff on archi and phy
       IRF->stats_t.writeAc.access =
           (XML->sys.core[ithCore].int_regfile_writes / 32) * (2 * 4);  /// 1.5;
@@ -5562,7 +5727,7 @@ void RegFU::computeEnergy(bool is_tdp) {
     IRF->rtp_stats = IRF->stats_t;
 
     OPC->stats_t.readAc.access =
-        (XML->sys.core[ithCore].int_regfile_reads) /*/1.5*/ +
+        (XML->sys.core[ithCore].int_regfile_reads) /*/1.5*/ +  // [한국어] integer register file 읽기 수
         XML->sys.core[ithCore]
             .non_rf_operands;  /// 1.5;//TODO: no diff on archi and phy
     OPC->stats_t.writeAc.access = 0;
@@ -5581,9 +5746,9 @@ void RegFU::computeEnergy(bool is_tdp) {
           XML->sys.core[ithCore].function_calls * 16;
       RFWIN->rtp_stats = RFWIN->stats_t;
 
-      IRF->stats_t.readAc.access = XML->sys.core[ithCore].int_regfile_reads +
+      IRF->stats_t.readAc.access = XML->sys.core[ithCore].int_regfile_reads +  // [한국어] integer register file 읽기 수
                                    XML->sys.core[ithCore].function_calls * 16;
-      IRF->stats_t.writeAc.access = XML->sys.core[ithCore].int_regfile_writes +
+      IRF->stats_t.writeAc.access = XML->sys.core[ithCore].int_regfile_writes +  // [한국어] integer register file 쓰기 수
                                     XML->sys.core[ithCore].function_calls * 16;
       IRF->rtp_stats = IRF->stats_t;
     }
@@ -5594,19 +5759,19 @@ void RegFU::computeEnergy(bool is_tdp) {
   // IRF->power_t  =  IRF->power_t + IRF->local_result.power;// +
   // xbar_rfu->power + arbiter_rfu->power;
 
-  IRF->power_t.readOp.dynamic =
-      (IRF->stats_t.readAc.access * IRF->local_result.power.readOp.dynamic +
-       IRF->stats_t.writeAc.access * IRF->local_result.power.writeOp.dynamic);
-  OPC->power_t.readOp.dynamic =
-      (OPC->stats_t.readAc.access * OPC->local_result.power.readOp.dynamic);
+  IRF->power_t.readOp.dynamic =  // [한국어] read 동작 1회당 동적 에너지
+      (IRF->stats_t.readAc.access * IRF->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
+       IRF->stats_t.writeAc.access * IRF->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
+  OPC->power_t.readOp.dynamic =  // [한국어] read 동작 1회당 동적 에너지
+      (OPC->stats_t.readAc.access * OPC->local_result.power.readOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
 
   if (coredynp.regWindowing) {
     RFWIN->power_t.reset();
-    RFWIN->power_t.readOp.dynamic +=
+    RFWIN->power_t.readOp.dynamic +=  // [한국어] read 동작 1회당 동적 에너지
         (RFWIN->stats_t.readAc.access *
-             RFWIN->local_result.power.readOp.dynamic +
+             RFWIN->local_result.power.readOp.dynamic +  // [한국어] ArrayST가 계산한 단위 접근 에너지
          RFWIN->stats_t.writeAc.access *
-             RFWIN->local_result.power.writeOp.dynamic);
+             RFWIN->local_result.power.writeOp.dynamic);  // [한국어] ArrayST가 계산한 단위 접근 에너지
   }
 
   if (is_tdp) {
@@ -5622,51 +5787,55 @@ void RegFU::computeEnergy(bool is_tdp) {
     double pppm_lkg_banks[4];
     set_pppm(pppm_lkg_banks, 0, XML->sys.core[ithCore].collector_units,
              XML->sys.core[ithCore].collector_units);
-    IRF->power = (IRF->power_t) + IRF->local_result.power * pppm_lkg;
-    IRF->power.readOp.dynamic = IRF->power_t.readOp.dynamic * 1;
-    OPC->power = (OPC->power_t) + OPC->local_result.power * pppm_lkg_banks;
-    OPC->power.readOp.dynamic = OPC->power_t.readOp.dynamic * 1;
+    IRF->power = (IRF->power_t) + IRF->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    IRF->power.readOp.dynamic = IRF->power_t.readOp.dynamic * 1;  // [한국어] read 동작 1회당 동적 에너지
+    OPC->power = (OPC->power_t) + OPC->local_result.power * pppm_lkg_banks;  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    OPC->power.readOp.dynamic = OPC->power_t.readOp.dynamic * 1;  // [한국어] read 동작 1회당 동적 에너지
 
     power = power + (IRF->power + OPC->power);
 
     if (coredynp.regWindowing) {
-      RFWIN->power = RFWIN->power_t + RFWIN->local_result.power * pppm_lkg;
+      RFWIN->power = RFWIN->power_t + RFWIN->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       power = power + RFWIN->power;
     }
-  } /* if (is_tdp) */
+  } /* if (is_tdp) */  // [한국어] TDP(peak)=true, runtime=false
   else {
     // Removed *coredynp.pppm_lkg_multhread since all hardware threads shared
     // the same IRF
     IRF->rt_power =
         IRF->power_t +
-        IRF->local_result.power * pppm_lkg; /* *coredynp.pppm_lkg_multhread;*/
-    OPC->rt_power = OPC->power_t + OPC->local_result.power * pppm_lkg;
+        IRF->local_result.power * pppm_lkg; /* *coredynp.pppm_lkg_multhread;*/  // [한국어] ArrayST가 계산한 단위 접근 에너지
+    OPC->rt_power = OPC->power_t + OPC->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
     if (XML->sys.architecture == 1) {
       // Each warp operand accesses the crossbar
       xbar_rfu->rt_power.readOp.dynamic =
-          ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +
-           (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *
+          ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +  // [한국어] integer register file 읽기 수
+           (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *  // [한국어] 레지스터 파일을 거치지 않는 operand 접근 수
           xbar_rfu->power.readOp.dynamic;
     } else {
       xbar_rfu->rt_power.readOp.dynamic =
-          ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +
-           (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *
+          ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +  // [한국어] integer register file 읽기 수
+           (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *  // [한국어] 레지스터 파일을 거치지 않는 operand 접근 수
           xbar_rfu->power.readOp.dynamic;
     }
     arbiter_rfu->rt_power.readOp.dynamic =
-        ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +
-         (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *
+        ((XML->sys.core[ithCore].int_regfile_reads / (32 /**1.5*/)) +  // [한국어] integer register file 읽기 수
+         (XML->sys.core[ithCore].non_rf_operands / (32 /**1.5*/))) *  // [한국어] 레지스터 파일을 거치지 않는 operand 접근 수
         arbiter_rfu->power.readOp.dynamic;
 
     rt_power =
         rt_power + (IRF->power_t /*+ FRF->power_t*/ + xbar_rfu->rt_power +
                     arbiter_rfu->rt_power + OPC->power_t);
     if (coredynp.regWindowing) {
-      RFWIN->rt_power = RFWIN->power_t + RFWIN->local_result.power * pppm_lkg;
+      RFWIN->rt_power = RFWIN->power_t + RFWIN->local_result.power * pppm_lkg;  // [한국어] ArrayST가 계산한 단위 접근 에너지
       rt_power = rt_power + RFWIN->rt_power;
     }
   }
 }
+/*
+ * [한국어] RegFU::displayEnergy — RFU 전력/면적 출력
+ * IRF, OPC, FRF, xbar, arbiter 출력.
+ */
 
 void RegFU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -5780,10 +5949,15 @@ void RegFU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
       cout << indent_str_next << "Register Windows   Subthreshold Leakage = "
            << RFWIN->rt_power.readOp.leakage << " W" << endl;
       cout << indent_str_next << "Register Windows   Gate Leakage = "
+// [한국어] Register Window: In-order SPARC 스타일 윈도우 (GPU에서는 미사용).
            << RFWIN->rt_power.readOp.gate_leakage << " W" << endl;
     }
   }
 }
+/*
+ * [한국어] EXECU::computeEnergy — EXECU 전력 집계
+ * rfu/scheu/exeu/fp_u/mul의 computeEnergy를 호출하고 bypass 전력을 더한다.
+ */
 
 void EXECU::computeEnergy(bool is_tdp) {
   if (!exist) return;
@@ -5800,16 +5974,16 @@ void EXECU::computeEnergy(bool is_tdp) {
   //	exeu->power.reset();
   exeu->rt_power.reset();
 
-  rfu->computeEnergy(is_tdp);
-  scheu->computeEnergy(is_tdp);
-  exeu->computeEnergy(is_tdp);
+  rfu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+  scheu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+  exeu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
   if (coredynp.num_fpus > 0) {
     fp_u->rt_power.reset();
-    fp_u->computeEnergy(is_tdp);
+    fp_u->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
   }
   if (coredynp.num_muls > 0) {
     mul->rt_power.reset();
-    mul->computeEnergy(is_tdp);
+    mul->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
   }
   bypass.rt_power.reset();
 
@@ -5855,7 +6029,7 @@ void EXECU::computeEnergy(bool is_tdp) {
     // bypass.rt_power = bypass.rt_power + int_bypass->power*pppm_t;
 
     if (coredynp.num_muls > 0) {
-      set_pppm(pppm_t, XML->sys.core[ithCore].cdb_mul_accesses, 2, 2,
+      set_pppm(pppm_t, XML->sys.core[ithCore].cdb_mul_accesses, 2, 2,  // [한국어] MUL/SFU 접근 수
                XML->sys.core[ithCore]
                    .cdb_mul_accesses);  // 2 means two source operands needs to
                                         // be passed for each int instruction.
@@ -5865,8 +6039,8 @@ void EXECU::computeEnergy(bool is_tdp) {
     }
 
     if (coredynp.num_fpus > 0) {
-      set_pppm(pppm_t, XML->sys.core[ithCore].cdb_fpu_accesses, 3, 3,
-               XML->sys.core[ithCore].cdb_fpu_accesses);
+      set_pppm(pppm_t, XML->sys.core[ithCore].cdb_fpu_accesses, 3, 3,  // [한국어] FPU 접근 수
+               XML->sys.core[ithCore].cdb_fpu_accesses);  // [한국어] FPU 접근 수
       // bypass.rt_power = bypass.rt_power + fp_bypass->power*pppm_t;
       // bypass.rt_power = bypass.rt_power + fpTagBypass->power*pppm_t;
       rt_power = rt_power + fp_u->rt_power;
@@ -5877,6 +6051,10 @@ void EXECU::computeEnergy(bool is_tdp) {
                /*bypass.rt_power +*/ scheu->rt_power;
   }
 }
+/*
+ * [한국어] EXECU::displayEnergy — EXECU 전력/면적 출력
+ * RFU, scheduler, ALU/FPU/MUL, bypass 출력.
+ */
 
 void EXECU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   if (!exist) return;
@@ -5905,7 +6083,7 @@ void EXECU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
          << " W" << endl;
     cout << endl;
     if (plevel > 3) {
-      rfu->displayEnergy(indent + 4, is_tdp);
+      rfu->displayEnergy(indent + 4, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     }
     cout << indent_str << "Instruction Scheduler:" << endl;
     cout << indent_str_next << "Area = " << scheu->area.get_area() * 1e-6
@@ -5924,14 +6102,14 @@ void EXECU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
          << scheu->rt_power.readOp.dynamic / executionTime << " W" << endl;
     cout << endl;
     if (plevel > 3) {
-      scheu->displayEnergy(indent + 4, is_tdp);
+      scheu->displayEnergy(indent + 4, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     }
-    exeu->displayEnergy(indent, is_tdp);
+    exeu->displayEnergy(indent, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     if (coredynp.num_fpus > 0) {
-      fp_u->displayEnergy(indent, is_tdp);
+      fp_u->displayEnergy(indent, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     }
     if (coredynp.num_muls > 0) {
-      mul->displayEnergy(indent, is_tdp);
+      mul->displayEnergy(indent, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     }
     cout << indent_str << "Results Broadcast Bus:" << endl;
     cout << indent_str_next
@@ -5973,6 +6151,10 @@ void EXECU::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
 }
 
 // Jingwen
+/*
+ * [한국어] Core::compute — AccelWattch runtime 전력 진입점
+ * accelwattch_interface가 호출. IFU/LSU/MMU/EXU/RENAME의 computeEnergy(false)를 호출하고, pipeline energy와 idle core energy를 더해 현재 SM 전력을 업데이트.
+ */
 void Core::compute() {
   // power_point_product_masks
   double pppm_t[4] = {1, 1, 1, 1};
@@ -6048,6 +6230,10 @@ void Core::compute() {
 
   rt_power.readOp.dynamic += IdleCoreEnergy;
 }
+/*
+ * [한국어] Core::computeEnergy — Core 전력 집계
+ * is_tdp=true이면 peak/TDP 전력을, false이면 runtime 전력을 모든 서브유닛에 대해 집계. Processor::compute()에서 TDP 용도로도 사용될 수 있다.
+ */
 
 void Core::computeEnergy(bool is_tdp) {
   // power_point_product_masks
@@ -6064,14 +6250,14 @@ void Core::computeEnergy(bool is_tdp) {
   }
 
   if (is_tdp) {
-    ifu->computeEnergy(is_tdp);
-    lsu->computeEnergy(is_tdp);
-    mmu->computeEnergy(is_tdp);
-    exu->computeEnergy(is_tdp);
+    ifu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    lsu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    mmu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    exu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
 
     if (coredynp.core_ty == OOO) {
       num_units = 5.0;
-      rnu->computeEnergy(is_tdp);
+      rnu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       set_pppm(pppm_t, coredynp.num_pipelines / num_units,
                coredynp.num_pipelines / num_units,
                coredynp.num_pipelines / num_units,
@@ -6156,7 +6342,7 @@ void Core::computeEnergy(bool is_tdp) {
     power = power + undiffCore->power;
 
     if (XML->sys.Private_L2) {
-      l2cache->computeEnergy(is_tdp);
+      l2cache->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       set_pppm(pppm_t, l2cache->cachep.clockRate / clockRate, 1, 1, 1);
       // l2cache->power = l2cache->power*pppm_t;
       power = power + l2cache->power * pppm_t;
@@ -6165,13 +6351,13 @@ void Core::computeEnergy(bool is_tdp) {
   } else {
     rt_power.reset();
 
-    ifu->computeEnergy(is_tdp);
-    lsu->computeEnergy(is_tdp);
-    mmu->computeEnergy(is_tdp);
-    exu->computeEnergy(is_tdp);
+    ifu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    lsu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    mmu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
+    exu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     if (coredynp.core_ty == OOO) {
       num_units = 5.0;
-      rnu->computeEnergy(is_tdp);
+      rnu->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       set_pppm(pppm_t, coredynp.num_pipelines / num_units,
                coredynp.num_pipelines / num_units,
                coredynp.num_pipelines / num_units,
@@ -6221,13 +6407,17 @@ void Core::computeEnergy(bool is_tdp) {
     //		cout << "EXE = " << exu->power.readOp.dynamic*clockRate  << " W"
     //<< endl;
     if (XML->sys.Private_L2) {
-      l2cache->computeEnergy(is_tdp);
+      l2cache->computeEnergy(is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       // set_pppm(pppm_t,1/l2cache->cachep.executionTime, 1,1,1);
       // l2cache->rt_power = l2cache->rt_power*pppm_t;
       rt_power = rt_power + l2cache->rt_power;
     }
   }
 }
+/*
+ * [한국어] Core::displayEnergy — Core 전체 전력/면적 출력
+ * IFU, LSU, MMU, EXU, RENAME, pipeline, UndiffCore, Private L2의 면적/전력을 출력.
+ */
 
 void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   string indent_str(indent, ' ');
@@ -6271,7 +6461,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
            << ifu->rt_power.readOp.dynamic / executionTime << " W" << endl;
       cout << endl;
       if (plevel > 2) {
-        ifu->displayEnergy(indent + 4, plevel, is_tdp);
+        ifu->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       }
     }
     if (coredynp.core_ty == OOO) {
@@ -6295,7 +6485,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
              << rnu->rt_power.readOp.dynamic / executionTime << " W" << endl;
         cout << endl;
         if (plevel > 2) {
-          rnu->displayEnergy(indent + 4, plevel, is_tdp);
+          rnu->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
         }
       }
     }
@@ -6319,7 +6509,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
            << lsu->rt_power.readOp.dynamic / executionTime << " W" << endl;
       cout << endl;
       if (plevel > 2) {
-        lsu->displayEnergy(indent + 4, plevel, is_tdp);
+        lsu->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       }
     }
     if (mmu->exist) {
@@ -6342,7 +6532,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
            << mmu->rt_power.readOp.dynamic / executionTime << " W" << endl;
       cout << endl;
       if (plevel > 2) {
-        mmu->displayEnergy(indent + 4, plevel, is_tdp);
+        mmu->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       }
     }
     if (exu->exist) {
@@ -6370,7 +6560,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
            << exu->rt_power.readOp.dynamic / executionTime << " W" << endl;
       cout << endl;
       if (plevel > 2) {
-        exu->displayEnergy(indent + 4, plevel, is_tdp);
+        exu->displayEnergy(indent + 4, plevel, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
       }
     }
     //		if (plevel >2)
@@ -6409,7 +6599,7 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     //			}
     //		}
     if (XML->sys.Private_L2) {
-      l2cache->displayEnergy(4, is_tdp);
+      l2cache->displayEnergy(4, is_tdp);  // [한국어] TDP(peak)=true, runtime=false
     }
 
     cout << indent_str << "Idle Core: " << endl;
@@ -6456,6 +6646,10 @@ void Core::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
     //<< " W" << endl;
   }
 }
+/*
+ * [한국어] InstFetchU::~InstFetchU — IFU 소멸자
+ * icache 하위 ArrayST, BTB, BPT, IB, 디코더 객체를 해제.
+ */
 InstFetchU ::~InstFetchU() {
   if (!exist) return;
   if (IB) {
@@ -6478,6 +6672,7 @@ InstFetchU ::~InstFetchU() {
     if (BTB) {
       delete BTB;
       BTB = 0;
+// [한국어] Branch Target Buffer(BTB): 분기 목적지 주소 저장용 CAM/SRAM.
     }
     if (BPT) {
       delete BPT;
@@ -6485,6 +6680,10 @@ InstFetchU ::~InstFetchU() {
     }
   }
 }
+/*
+ * [한국어] BranchPredictor::~BranchPredictor — 분기 예측기 소멸자
+ * 동적 할당한 ArrayST 객체들을 해제한다.
+ */
 
 BranchPredictor ::~BranchPredictor() {
   if (!exist) return;
@@ -6513,6 +6712,10 @@ BranchPredictor ::~BranchPredictor() {
     RAS = 0;
   }
 }
+/*
+ * [한국어] RENAMINGU::~RENAMINGU — 리네이밍 소멸자
+ * 동적 할당 객체 해제.
+ */
 
 RENAMINGU ::~RENAMINGU() {
   if (!exist) return;
@@ -6553,6 +6756,10 @@ RENAMINGU ::~RENAMINGU() {
     RAHT = 0;
   }
 }
+/*
+ * [한국어] LoadStoreU::~LoadStoreU — LSU 소멸자
+ * 하위 캐시/버퍼/LSQ/LoadQ/xbar/noc 객체 해제.
+ */
 
 LoadStoreU ::~LoadStoreU() {
   if (!exist) return;
@@ -6561,6 +6768,10 @@ LoadStoreU ::~LoadStoreU() {
     LSQ = 0;
   }
 }
+/*
+ * [한국어] MemManU::~MemManU — TLB 소멸자
+ * itlb/dtlb 해제.
+ */
 
 MemManU ::~MemManU() {
   if (!exist) return;
@@ -6573,6 +6784,10 @@ MemManU ::~MemManU() {
     dtlb = 0;
   }
 }
+/*
+ * [한국어] RegFU::~RegFU — RFU 소멸자
+ * 동적 객체 해제.
+ */
 
 RegFU ::~RegFU() {
   if (!exist) return;
@@ -6589,6 +6804,10 @@ RegFU ::~RegFU() {
     RFWIN = 0;
   }
 }
+/*
+ * [한국어] SchedulerU::~SchedulerU — 스케줄러 소멸자
+ * 동적 할당한 서브 객체들을 해제.
+ */
 
 SchedulerU ::~SchedulerU() {
   if (!exist) return;
@@ -6609,6 +6828,10 @@ SchedulerU ::~SchedulerU() {
     instruction_selection = 0;
   }
 }
+/*
+ * [한국어] EXECU::~EXECU — EXECU 소멸자
+ * 하위 객체 해제.
+ */
 
 EXECU ::~EXECU() {
   if (!exist) return;
@@ -6635,6 +6858,7 @@ EXECU ::~EXECU() {
   if (fpTagBypass) {
     delete fpTagBypass;
     fpTagBypass = 0;
+// [한국어] bypass interconnect: CPU OOO bypass 버스; GPU에서는 비활성/0으로 처리.
   }
   if (fp_u) {
     delete fp_u;
@@ -6657,6 +6881,10 @@ EXECU ::~EXECU() {
     scheu = 0;
   }
 }
+/*
+ * [한국어] Core::~Core — Core 소멸자
+ * 하위 객체(IFU/LSU/MMU/EXU/RNU/Pipeline/UndiffCore/L2)를 해제.
+ */
 
 Core ::~Core() {
   if (ifu) {
@@ -6692,13 +6920,21 @@ Core ::~Core() {
     l2cache = 0;
   }
 }
+/*
+ * [한국어] Core::set_core_param — 코어 동적 파라미터 설정
+ * XML->sys.core[ithCore]에서 fetch/issue/peak/execution width, pipeline depth, archi/phy register 수, ROB/scheduler/LQ/SQ/IR/FR sizes, RF banks, collector units, clock rate, core_clock_ratio, pipeline/LSU duty cycle, ALU/FPU/MUL 수 등을 읽어 coredynp와 exClockRate를 계산.
+ */
 
 void Core::set_core_param() {
+  // [한국어] 아래 필드들은 XML->sys.core[ithCore]에서 읽어 CoreDynParam을 채운다.
+  // 생성자에서 이 값들로 IFU/LSU/EXU/RFU 등의 SRAM/실행유닛 크기를 결정.
   coredynp.opt_local = XML->sys.core[ithCore].opt_local;
   coredynp.x86 = XML->sys.core[ithCore].x86;
   coredynp.Embedded = XML->sys.Embedded;
   coredynp.core_ty = (enum Core_type)XML->sys.core[ithCore].machine_type;
   coredynp.rm_ty = (enum Renaming_type)XML->sys.core[ithCore].rename_scheme;
+
+  // [한국어] 파이프라인 폭: fetch/decode/issue/commit/peak/prediction/fp 폭
   coredynp.fetchW = XML->sys.core[ithCore].fetch_width;
   coredynp.decodeW = XML->sys.core[ithCore].decode_width;
   coredynp.issueW = XML->sys.core[ithCore].issue_width;
@@ -6708,17 +6944,21 @@ void Core::set_core_param() {
   coredynp.predictionW = XML->sys.core[ithCore].prediction_width;
   coredynp.fp_issueW = XML->sys.core[ithCore].fp_issue_width;
   coredynp.fp_decodeW = XML->sys.core[ithCore].fp_issue_width;
+
+  // [한국어] 실행 유닛 개수: ALU(IALU), FPU, MUL(SFU)
   coredynp.num_alus = XML->sys.core[ithCore].ALU_per_core;
   coredynp.num_fpus = XML->sys.core[ithCore].FPU_per_core;
   coredynp.num_muls = XML->sys.core[ithCore].MUL_per_core;
 
+  // [한국어] 하드웨어 스레드 수 및 명령어/PC/opcode 폭
   coredynp.num_hthreads = XML->sys.core[ithCore].number_hardware_threads;
   coredynp.multithreaded = coredynp.num_hthreads > 1 ? true : false;
   coredynp.instruction_length = XML->sys.core[ithCore].instruction_length;
   coredynp.pc_width = XML->sys.virtual_address_width;
-
   coredynp.opcode_length = XML->sys.core[ithCore].opcode_width;
   coredynp.micro_opcode_length = XML->sys.core[ithCore].micro_opcode_width;
+
+  // [한국어] 파이프라인 수/깊이, 정수/FP 데이터 폭, 가상/물리 주소 폭
   coredynp.num_pipelines = XML->sys.core[ithCore].pipelines_per_core[0];
   coredynp.pipeline_stages = XML->sys.core[ithCore].pipeline_depth[0];
   coredynp.num_fp_pipelines = XML->sys.core[ithCore].pipelines_per_core[1];
@@ -6728,6 +6968,7 @@ void Core::set_core_param() {
   coredynp.v_address_width = XML->sys.virtual_address_width;
   coredynp.p_address_width = XML->sys.physical_address_width;
 
+  // [한국어] 스케줄러 타입, architected 레지스터 크기/수, duty cycle, 총/유휴/바쁜 사이클
   coredynp.scheu_ty =
       (enum Scheduler_type)XML->sys.core[ithCore].instruction_window_scheme;
   coredynp.arch_ireg_width =
@@ -6741,7 +6982,8 @@ void Core::set_core_param() {
   coredynp.busy_cycles = XML->sys.core[ithCore].busy_cycles;
   coredynp.idle_cycles = XML->sys.core[ithCore].idle_cycles;
 
-  // Max power duty cycle for peak power estimation
+  // [한국어] TDP(peak) 추정 시 각 서브유닛의 최대 활동 duty cycle.
+  // XML->sys.core[*].{IFU,BR,LSU,MemManU_I,MemManU_D,ALU,MUL,FPU,...}_duty_cycle
   //	if (coredynp.core_ty==OOO)
   //	{
   //		coredynp.IFU_duty_cycle = 1;
@@ -6770,6 +7012,7 @@ void Core::set_core_param() {
   coredynp.FPU_cdb_duty_cycle = XML->sys.core[ithCore].FPU_cdb_duty_cycle;
   //	}
 
+  // [한국어] 코어 타입, 스케줄러 타입, 리네이밍 타입 유효성 검사
   if (!((coredynp.core_ty == OOO) || (coredynp.core_ty == Inorder))) {
     cout << "Invalid Core Type" << endl;
     exit(0);
@@ -6790,6 +7033,7 @@ void Core::set_core_param() {
     exit(0);
   }
 
+  // [한국어] OOO 코어의 물리 레지스터 파일 또는 ReservationStation/ROB 크기
   if (coredynp.core_ty == OOO) {
     if (coredynp.scheu_ty == PhysicalRegFile) {
       coredynp.phy_ireg_width =
@@ -6815,6 +7059,8 @@ void Core::set_core_param() {
            // 16~48;See TR for reference.
   coredynp.perThreadState = 8;
   coredynp.instruction_length = 32;
+
+  // [한국어] 클럭 레이트: XML의 MHz 값을 Hz로 변환, 실행 시간 = 총 사이클 / 클럭
   coredynp.clockRate = XML->sys.core[ithCore].clock_rate;
   coredynp.clockRate *= 1e6;
   coredynp.regWindowing = (XML->sys.core[ithCore].register_windows_size > 0 &&

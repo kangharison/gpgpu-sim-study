@@ -29,12 +29,96 @@
  *
  ***************************************************************************/
 
+/*
+ * [한국어 설명] CACTI 캐시 Mat(매트) 모델 구현 (mat.cc)
+ *
+ * === 파일의 역할 ===
+ * CACTI에서 캐시 뱅크의 기본 타이밍/전력 단위인 Mat 하나를 모델링한다.
+ * 생성자는 DynamicParameter로부터 캐시 파티션 정보(연관도, 매트 수, 비트 mux 차수,
+ * SA mux 차수, 포트 수 등)를 받아 행 디코더, 예비디코더, 비트/SA mux 디코더,
+ * 비트라인 프리차지 드라이버, 서브어레이 출력 배선(Wire), 그리고 FA/CAM용
+ * 서치라인/매치라인 드라이버 등 모든 서브회로 객체를 동적으로 생성한다.
+ * compute_delays()는 행 디코더→비트라인→센스앰프→출력 드라이버로 이어지는
+ * 접근 경로의 지연을 계산하고, compute_power_energy()는 각 구성 요소의
+ * 동적/누설/게이트 누설 전력을 집계하여 Component::power에 저장한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * AccelWattch 전력 모델 난의 CACTI 캐시 모델 계층:
+ *   UCA → Mat [이 파일] → Subarray → SRAM/DRAM/CAM 셀
+ * AccelWattch 초기화 시점에 XML 기술 파라미터와 캐시 구성에 따라 Mat 객체가
+ * 생성되며, 그 결과는 GPU L1/L2 캐시의 접근 에너지 계수로 사용된다.
+ * 실행 컨텍스트: 호스트 CPU 유저스페이스, 단일 스레드, 시뮬레이션 시작 단계.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존:
+ *   - mat.h: Mat 클래스 선언 및 서브회로 포인터/결과 필드 정의
+ *   - decoder.h/.cc: Decoder, Predec, PredecBlk, PredecBlkDrv — 행/열/예비 디코딩
+ *   - subarray.h/.cc: Subarray — 셀 어레이 크기, C_bl, C_wl, R_wl 제공
+ *   - wire.h/.cc: Wire — 서브어레이 출력 배선 RC 모델
+ *   - basic_circuit.h: tr_R_on, gate_C, drain_C_, horowitz, cmos_Isub/Ig_leakage
+ *   - parameter.h: g_ip, g_tp, DynamicParameter — 공정/구조 파라미터
+ * 소비:
+ *   - uca.cc: Mat 결과(delay, power, area)를 읽어 UCA 전체 결과 산출
+ *   - accelwattch_interface / processor: L1/L2 캐시 접근 에너지 계수로 활용
+ *
+ * AccelWattch XML / gpgpusim.config 연동:
+ *   - gpgpusim.config의 --power_config_name (XML 경로)를 통해 기술 노드,
+ *     공급 전압, 셀 치수, 배선 파라미터가 g_tp/g_ip에 로드된다.
+ *   - 캐시 크기, 연관도, 라인 크기, 포트 수, Ndwl/Ndbl/Nspd/Ndsam 등은
+ *     DynamicParameter로 전달되어 본 파일의 모든 면적/지연/전력 계산에 영향을 준다.
+ *   - g_ip->num_rw_ports/num_rd_ports/num_wr_ports/num_search_ports 등 포트 수는
+ *     누설 전력과 면적에 직접 곱해진다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - Mat::Mat()              : 생성자 — 서브회로 객체 생성 및 mat 면적(area.h/area.w) 산정
+ * - Mat::~Mat()             : 소멸자 — 동적 생성한 서브회로 객체 해제
+ * - compute_delays()        : mat 전체 타이밍 경로(디코더→비트라인→SA→출력) 지연 계산
+ * - compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h() :
+ *                             비트 mux/SA/프리차지/쓰기 드라이버 물리 높이 계산
+ * - compute_cam_delay()     : FA/CAM의 서치라인/매치라인 검색 경로 지연·전력 계산
+ * - width_write_driver_or_write_mux() : 쓰기 드라이버 NMOS 폭 결정
+ * - compute_comparators_height() : FA 태그 비교기 배열 높이 계산
+ * - compute_bitline_delay() : 비트라인 RC 지연 및 읽기/쓰기 에너지 계산
+ * - compute_sa_delay()      : 센스앰프 지연 및 전력 계산
+ * - compute_subarray_out_drv() : 서브어레이 출력 드라이버 지연/전력 계산
+ * - compute_comparator_delay() : 집합 연관 태그 비교기 지연/전력 계산
+ * - compute_power_energy()  : mat 내 모든 서브회로의 동적·누설 전력 집계
+ */
+
 
 
 #include "mat.h"
 #include <assert.h>
 
 
+
+/*
+ * [한국어]
+ * Mat::Mat - Mat 타이밍/전력 모델 생성자
+ *
+ * @dyn_p: DynamicParameter const 참조 — 캐시 크기, 연관도, 매트/서브어레이 구성,
+ *         포트 수, Ndwl/Ndbl/Nspd/Ndsam, 셀 타입(SRAM/DRAM/CAM) 등이 담김.
+ * @return: (생성자, 반환값 없음)
+ *
+ * 동작 과정:
+ *   1) 멤버 초기화 리스트로 delay/power 관련 필드를 0으로 초기화하고
+ *      subarray(dp, dp.fully_assoc)를 생성한다.
+ *   2) dp.use_inp_params 플래그에 따라 포트 수(RWP/ERP/EWP/SCHP)를
+ *      dp 또는 g_ip에서 가져온다.
+ *   3) SRAM/FA/CAM 모드에 따라 SA 수(number_sa_subarray)와 워드라인 구동 부하
+ *      (R_wire_wl_drv_out)을 분기 계산한다.
+ *   4) 비트 mux 차수, Ndsam_lev_1/2에 따라 mux 디코더 부하 커패시턴스를 계산한다.
+ *   5) 행 디코더(row_dec), 비트/SA mux 디코더, 예비디코더 블록/드라이버를
+ *      new로 동적 생성하고 Predec 객체로 묶는다.
+ *   6) 비트라인 프리차지 드라이버(bl_precharge_eq_drv)와, FA/CAM일 경우
+ *      서치라인/매치라인/ML→RAM WL 드라이버를 추가 생성한다.
+ *   7) 서브어레이 출력 배선(subarray_out_wire)을 Wire 객체로 생성한다.
+ *   8) 예비디코더 출력 배선 폭, 비트 mux/SA/프리차지/쓰기 회로 높이,
+ *      비교기 높이, 중앙 회로 면적을 포함하여 최종 area.h/area.w를 산정한다.
+ *
+ * 호출 체인:
+ *   UCA::UCA() → [Mat::Mat()] → Subarray() / Decoder() / PredecBlk() / Driver() / Wire()
+ */
 Mat::Mat(const DynamicParameter & dyn_p)
  :dp(dyn_p),
   power_subarray_out_drv(),
@@ -63,8 +147,8 @@ Mat::Mat(const DynamicParameter & dyn_p)
   num_subarrays_per_mat(dp.num_subarrays/dp.num_mats),
   num_subarrays_per_row(dp.Ndwl/dp.num_mats_h_dir)
 {
-  assert(num_subarrays_per_mat <= 4);
-  assert(num_subarrays_per_row <= 2);
+  assert(num_subarrays_per_mat <= 4); // [한국어] 설계 제약/불변식 검증
+  assert(num_subarrays_per_row <= 2); // [한국어] 설계 제약/불변식 검증
   is_fa = (dp.fully_assoc) ? true : false;
   camFlag = (is_fa || pure_cam);//although cam_cell.w = cell.w for fa, we still differentiate them.
 
@@ -133,13 +217,13 @@ Mat::Mat(const DynamicParameter & dyn_p)
   if (dp.Ndsam_lev_1 > 1)
   {
     C_ld_sa_mux_lev_1_dec_out =
-      (num_subarrays_per_mat * number_sa_subarray / dp.Ndsam_lev_1)*gate_C(g_tp.w_nmos_sa_mux, 0, is_dram) +
+      (num_subarrays_per_mat * number_sa_subarray / dp.Ndsam_lev_1)*gate_C(g_tp.w_nmos_sa_mux, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
       num_subarrays_per_row * subarray.num_cols*g_tp.wire_inside_mat.C_per_um*cell.get_w();
   }
   if (dp.Ndsam_lev_2 > 1)
   {
     C_ld_sa_mux_lev_2_dec_out =
-      (num_subarrays_per_mat * number_sa_subarray / (dp.Ndsam_lev_1*dp.Ndsam_lev_2))*gate_C(g_tp.w_nmos_sa_mux, 0, is_dram) +
+      (num_subarrays_per_mat * number_sa_subarray / (dp.Ndsam_lev_1*dp.Ndsam_lev_2))*gate_C(g_tp.w_nmos_sa_mux, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
       num_subarrays_per_row * subarray.num_cols*g_tp.wire_inside_mat.C_per_um*cell.get_w();
   }
 
@@ -151,7 +235,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
   }
 
 
-  row_dec = new Decoder(
+  row_dec = new Decoder( // [한국어] 행/열 디코더 객체 동적 생성
       num_dec_signals,
       false,
       subarray.C_wl,
@@ -164,7 +248,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
 //  {
 //    row_dec->exist = true;
 //  }
-  bit_mux_dec = new Decoder(
+  bit_mux_dec = new Decoder( // [한국어] 행/열 디코더 객체 동적 생성
       deg_bl_muxing,// This number is 1 for FA or CAM
       false,
       C_ld_bit_mux_dec_out,
@@ -173,7 +257,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
       is_dram,
       false,
       camFlag? cam_cell:cell);
-  sa_mux_lev_1_dec = new Decoder(
+  sa_mux_lev_1_dec = new Decoder( // [한국어] 행/열 디코더 객체 동적 생성
       dp.deg_senseamp_muxing_non_associativity, // This number is 1 for FA or CAM
       dp.number_way_select_signals_mat ? true : false,//only sa_mux_lev_1_dec needs way select signal
       C_ld_sa_mux_lev_1_dec_out,
@@ -182,7 +266,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
       is_dram,
       false,
       camFlag? cam_cell:cell);
-  sa_mux_lev_2_dec = new Decoder(
+  sa_mux_lev_2_dec = new Decoder( // [한국어] 행/열 디코더 객체 동적 생성
       dp.Ndsam_lev_2, // This number is 1 for FA or CAM
       false,
       C_ld_sa_mux_lev_2_dec_out,
@@ -212,7 +296,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
   if (is_fa||pure_cam)
 	  num_dec_signals += _log2(num_subarrays_per_mat);
 
-  PredecBlk * r_predec_blk1 = new PredecBlk(
+  PredecBlk * r_predec_blk1 = new PredecBlk( // [한국어] 예비디코더 블록 객체 동적 생성
       num_dec_signals,
       row_dec,
       C_wire_predec_blk_out,
@@ -220,7 +304,7 @@ Mat::Mat(const DynamicParameter & dyn_p)
       num_subarrays_per_mat,
       is_dram,
       true);
-  PredecBlk * r_predec_blk2 = new PredecBlk(
+  PredecBlk * r_predec_blk2 = new PredecBlk( // [한국어] 예비디코더 블록 객체 동적 생성
       num_dec_signals,
       row_dec,
       C_wire_predec_blk_out,
@@ -228,14 +312,14 @@ Mat::Mat(const DynamicParameter & dyn_p)
       num_subarrays_per_mat,
       is_dram,
       false);
-  PredecBlk * b_mux_predec_blk1 = new PredecBlk(deg_bl_muxing, bit_mux_dec, 0, 0, 1, is_dram, true);
-  PredecBlk * b_mux_predec_blk2 = new PredecBlk(deg_bl_muxing, bit_mux_dec, 0, 0, 1, is_dram, false);
-  PredecBlk * sa_mux_lev_1_predec_blk1 = new PredecBlk(dyn_p.deg_senseamp_muxing_non_associativity, sa_mux_lev_1_dec, 0, 0, 1, is_dram, true);
-  PredecBlk * sa_mux_lev_1_predec_blk2 = new PredecBlk(dyn_p.deg_senseamp_muxing_non_associativity, sa_mux_lev_1_dec, 0, 0, 1, is_dram, false);
-  PredecBlk * sa_mux_lev_2_predec_blk1 = new PredecBlk(dp.Ndsam_lev_2, sa_mux_lev_2_dec, 0, 0, 1, is_dram, true);
-  PredecBlk * sa_mux_lev_2_predec_blk2 = new PredecBlk(dp.Ndsam_lev_2, sa_mux_lev_2_dec, 0, 0, 1, is_dram, false);
-  dummy_way_sel_predec_blk1 = new PredecBlk(1, sa_mux_lev_1_dec, 0, 0, 0, is_dram, true);
-  dummy_way_sel_predec_blk2 = new PredecBlk(1, sa_mux_lev_1_dec, 0, 0, 0, is_dram, false);
+  PredecBlk * b_mux_predec_blk1 = new PredecBlk(deg_bl_muxing, bit_mux_dec, 0, 0, 1, is_dram, true); // [한국어] 예비디코더 블록 객체 동적 생성
+  PredecBlk * b_mux_predec_blk2 = new PredecBlk(deg_bl_muxing, bit_mux_dec, 0, 0, 1, is_dram, false); // [한국어] 예비디코더 블록 객체 동적 생성
+  PredecBlk * sa_mux_lev_1_predec_blk1 = new PredecBlk(dyn_p.deg_senseamp_muxing_non_associativity, sa_mux_lev_1_dec, 0, 0, 1, is_dram, true); // [한국어] 예비디코더 블록 객체 동적 생성
+  PredecBlk * sa_mux_lev_1_predec_blk2 = new PredecBlk(dyn_p.deg_senseamp_muxing_non_associativity, sa_mux_lev_1_dec, 0, 0, 1, is_dram, false); // [한국어] 예비디코더 블록 객체 동적 생성
+  PredecBlk * sa_mux_lev_2_predec_blk1 = new PredecBlk(dp.Ndsam_lev_2, sa_mux_lev_2_dec, 0, 0, 1, is_dram, true); // [한국어] 예비디코더 블록 객체 동적 생성
+  PredecBlk * sa_mux_lev_2_predec_blk2 = new PredecBlk(dp.Ndsam_lev_2, sa_mux_lev_2_dec, 0, 0, 1, is_dram, false); // [한국어] 예비디코더 블록 객체 동적 생성
+  dummy_way_sel_predec_blk1 = new PredecBlk(1, sa_mux_lev_1_dec, 0, 0, 0, is_dram, true); // [한국어] 예비디코더 블록 객체 동적 생성
+  dummy_way_sel_predec_blk2 = new PredecBlk(1, sa_mux_lev_1_dec, 0, 0, 0, is_dram, false); // [한국어] 예비디코더 블록 객체 동적 생성
 
   PredecBlkDrv * r_predec_blk_drv1 = new PredecBlkDrv(0, r_predec_blk1, is_dram);
   PredecBlkDrv * r_predec_blk_drv2 = new PredecBlkDrv(0, r_predec_blk2, is_dram);
@@ -248,10 +332,10 @@ Mat::Mat(const DynamicParameter & dyn_p)
   way_sel_drv1 = new PredecBlkDrv(dyn_p.number_way_select_signals_mat, dummy_way_sel_predec_blk1, is_dram);
   dummy_way_sel_predec_blk_drv2 = new PredecBlkDrv(1, dummy_way_sel_predec_blk2, is_dram);
 
-  r_predec            = new Predec(r_predec_blk_drv1, r_predec_blk_drv2);
-  b_mux_predec        = new Predec(b_mux_predec_blk_drv1, b_mux_predec_blk_drv2);
-  sa_mux_lev_1_predec = new Predec(sa_mux_lev_1_predec_blk_drv1, sa_mux_lev_1_predec_blk_drv2);
-  sa_mux_lev_2_predec = new Predec(sa_mux_lev_2_predec_blk_drv1, sa_mux_lev_2_predec_blk_drv2);
+  r_predec            = new Predec(r_predec_blk_drv1, r_predec_blk_drv2); // [한국어] 예비디코더 스테이지 객체 동적 생성
+  b_mux_predec        = new Predec(b_mux_predec_blk_drv1, b_mux_predec_blk_drv2); // [한국어] 예비디코더 스테이지 객체 동적 생성
+  sa_mux_lev_1_predec = new Predec(sa_mux_lev_1_predec_blk_drv1, sa_mux_lev_1_predec_blk_drv2); // [한국어] 예비디코더 스테이지 객체 동적 생성
+  sa_mux_lev_2_predec = new Predec(sa_mux_lev_2_predec_blk_drv1, sa_mux_lev_2_predec_blk_drv2); // [한국어] 예비디코더 스테이지 객체 동적 생성
 
   subarray_out_wire   = new Wire(g_ip->wt, subarray.area.h);//Bug should be subarray.area.w Owen and Sheng
 
@@ -262,10 +346,10 @@ Mat::Mat(const DynamicParameter & dyn_p)
   if (is_fa || pure_cam)
 
   {   //Although CAM and RAM use different bl pre-charge driver, assuming the precharge p size is the same
-	  driver_c_gate_load =  (subarray.num_cols_fa_cam )* gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false);
+	  driver_c_gate_load =  (subarray.num_cols_fa_cam )* gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false); // [한국어] 게이트 커패시턴스 계산 [F]
 	  driver_c_wire_load =  subarray.num_cols_fa_cam * cam_cell.w * g_tp.wire_outside_mat.C_per_um;
 	  driver_r_wire_load =  subarray.num_cols_fa_cam * cam_cell.w * g_tp.wire_outside_mat.R_per_um;
-	  cam_bl_precharge_eq_drv = new Driver(
+	  cam_bl_precharge_eq_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
 			  driver_c_gate_load,
 			  driver_c_wire_load,
 			  driver_r_wire_load,
@@ -274,10 +358,10 @@ Mat::Mat(const DynamicParameter & dyn_p)
 	  if (!pure_cam)
 	  {
 		  //This is only used for fully asso not pure CAM
-		  driver_c_gate_load =  (subarray.num_cols_fa_ram )* gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false);
+		  driver_c_gate_load =  (subarray.num_cols_fa_ram )* gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false); // [한국어] 게이트 커패시턴스 계산 [F]
 		  driver_c_wire_load =  subarray.num_cols_fa_ram * cell.w * g_tp.wire_outside_mat.C_per_um;
 		  driver_r_wire_load =  subarray.num_cols_fa_ram * cell.w * g_tp.wire_outside_mat.R_per_um;
-		  bl_precharge_eq_drv = new Driver(
+		  bl_precharge_eq_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
 				  driver_c_gate_load,
 				  driver_c_wire_load,
 				  driver_r_wire_load,
@@ -287,10 +371,10 @@ Mat::Mat(const DynamicParameter & dyn_p)
 
   else
   {
-	  driver_c_gate_load =  subarray.num_cols * gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false);
+	  driver_c_gate_load =  subarray.num_cols * gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false); // [한국어] 게이트 커패시턴스 계산 [F]
 	  driver_c_wire_load =  subarray.num_cols * cell.w * g_tp.wire_outside_mat.C_per_um;
 	  driver_r_wire_load =  subarray.num_cols * cell.w * g_tp.wire_outside_mat.R_per_um;
-	  bl_precharge_eq_drv = new Driver(
+	  bl_precharge_eq_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
 			  driver_c_gate_load,
 			  driver_c_wire_load,
 			  driver_r_wire_load,
@@ -395,10 +479,10 @@ Mat::Mat(const DynamicParameter & dyn_p)
 
 //  if (!is_fa)
 //  {
-    assert(num_subarrays_per_mat/num_subarrays_per_row>0);
-    area.h = (num_subarrays_per_mat/num_subarrays_per_row)* subarray.area.h + h_non_cell_area;
-    area.w = num_subarrays_per_row * subarray.area.get_w() + w_non_cell_area;
-    area.w = (area.h*area.w + area_mat_center_circuitry) / area.h;
+    assert(num_subarrays_per_mat/num_subarrays_per_row>0); // [한국어] 설계 제약/불변식 검증
+    area.h = (num_subarrays_per_mat/num_subarrays_per_row)* subarray.area.h + h_non_cell_area; // [한국어] mat의 높이/너비 갱신 [m]
+    area.w = num_subarrays_per_row * subarray.area.get_w() + w_non_cell_area; // [한국어] mat의 높이/너비 갱신 [m]
+    area.w = (area.h*area.w + area_mat_center_circuitry) / area.h; // [한국어] mat의 높이/너비 갱신 [m]
 
 //    cout<<"h_bit_mux_sense_amp_precharge_sa_mux_write_driver_write_mux"<<h_bit_mux_sense_amp_precharge_sa_mux_write_driver_write_mux<<endl;
 //    cout<<"h_comparators"<<h_comparators<<endl;
@@ -411,8 +495,8 @@ Mat::Mat(const DynamicParameter & dyn_p)
 //    cout<<"w_non_cell_area"<<w_non_cell_area<<endl;
 //    cout<<"area_mat_center_circuitry"<<area_mat_center_circuitry<<endl;
 
-    assert(area.h>0);
-    assert(area.w>0);
+    assert(area.h>0); // [한국어] 설계 제약/불변식 검증
+    assert(area.w>0); // [한국어] 설계 제약/불변식 검증
 //  }
 //  else
 //  {
@@ -425,56 +509,90 @@ Mat::Mat(const DynamicParameter & dyn_p)
 
 
 
+
+/*
+ * [한국어]
+ * Mat::~Mat - Mat 소멸자
+ *
+ * 생성자에서 new로 할당한 모든 서브회로 객체를 delete로 해제한다.
+ * 디코더, 예비디코더 블록/드라이버, Predec 객체, Wire, 드라이버들을
+ * 순차적으로 해제하여 메모리 누수를 방지한다.
+ *
+ * 호출 체인: CACTI 최적화 루프 종료 시 자동 호출
+ */
 Mat::~Mat()
 {
-  delete row_dec;
-  delete bit_mux_dec;
-  delete sa_mux_lev_1_dec;
-  delete sa_mux_lev_2_dec;
+  delete row_dec; // [한국어] 동적 할당 객체 해제
+  delete bit_mux_dec; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_dec; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_dec; // [한국어] 동적 할당 객체 해제
 
-  delete r_predec->blk1;
-  delete r_predec->blk2;
-  delete b_mux_predec->blk1;
-  delete b_mux_predec->blk2;
-  delete sa_mux_lev_1_predec->blk1;
-  delete sa_mux_lev_1_predec->blk2;
-  delete sa_mux_lev_2_predec->blk1;
-  delete sa_mux_lev_2_predec->blk2;
-  delete dummy_way_sel_predec_blk1;
-  delete dummy_way_sel_predec_blk2;
+  delete r_predec->blk1; // [한국어] 동적 할당 객체 해제
+  delete r_predec->blk2; // [한국어] 동적 할당 객체 해제
+  delete b_mux_predec->blk1; // [한국어] 동적 할당 객체 해제
+  delete b_mux_predec->blk2; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_predec->blk1; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_predec->blk2; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_predec->blk1; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_predec->blk2; // [한국어] 동적 할당 객체 해제
+  delete dummy_way_sel_predec_blk1; // [한국어] 동적 할당 객체 해제
+  delete dummy_way_sel_predec_blk2; // [한국어] 동적 할당 객체 해제
 
-  delete r_predec->drv1;
-  delete r_predec->drv2;
-  delete b_mux_predec->drv1;
-  delete b_mux_predec->drv2;
-  delete sa_mux_lev_1_predec->drv1;
-  delete sa_mux_lev_1_predec->drv2;
-  delete sa_mux_lev_2_predec->drv1;
-  delete sa_mux_lev_2_predec->drv2;
-  delete way_sel_drv1;
-  delete dummy_way_sel_predec_blk_drv2;
+  delete r_predec->drv1; // [한국어] 동적 할당 객체 해제
+  delete r_predec->drv2; // [한국어] 동적 할당 객체 해제
+  delete b_mux_predec->drv1; // [한국어] 동적 할당 객체 해제
+  delete b_mux_predec->drv2; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_predec->drv1; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_predec->drv2; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_predec->drv1; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_predec->drv2; // [한국어] 동적 할당 객체 해제
+  delete way_sel_drv1; // [한국어] 동적 할당 객체 해제
+  delete dummy_way_sel_predec_blk_drv2; // [한국어] 동적 할당 객체 해제
 
-  delete r_predec;
-  delete b_mux_predec;
-  delete sa_mux_lev_1_predec;
-  delete sa_mux_lev_2_predec;
+  delete r_predec; // [한국어] 동적 할당 객체 해제
+  delete b_mux_predec; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_1_predec; // [한국어] 동적 할당 객체 해제
+  delete sa_mux_lev_2_predec; // [한국어] 동적 할당 객체 해제
 
-  delete subarray_out_wire;
+  delete subarray_out_wire; // [한국어] 동적 할당 객체 해제
   if (!pure_cam)
-    delete bl_precharge_eq_drv;
+    delete bl_precharge_eq_drv; // [한국어] 동적 할당 객체 해제
 
   if (is_fa || pure_cam)
   {
-    delete sl_precharge_eq_drv ;
-    delete sl_data_drv ;
-    delete cam_bl_precharge_eq_drv;
-    delete ml_precharge_drv;
-    delete ml_to_ram_wl_drv;
+    delete sl_precharge_eq_drv ; // [한국어] 동적 할당 객체 해제
+    delete sl_data_drv ; // [한국어] 동적 할당 객체 해제
+    delete cam_bl_precharge_eq_drv; // [한국어] 동적 할당 객체 해제
+    delete ml_precharge_drv; // [한국어] 동적 할당 객체 해제
+    delete ml_to_ram_wl_drv; // [한국어] 동적 할당 객체 해제
   }
 }
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_delays - mat 전체 타이밍 경로 지연 계산
+ *
+ * @inrisetime: mat 입력 신호의 상승 시간 [s]
+ * @return    : mat 출력 신호의 상승 시간 [s]
+ *
+ * 동작 과정:
+ *   - 일반 SRAM/DRAM: 예비디코더→행 디코더→비트라인→센스앰프→출력 드라이버
+ *     순서로 각 단의 지연을 누적한다.
+ *   - FA/CAM: compute_cam_delay()로 서치라인/매치라인 검색 경로 지연을 먼저
+ *     계산하고, 이후 일반 읽기/쓰기 경로 지연도 병행 계산한다.
+ *   - delay_wl_reset, delay_bl_restore, delay_subarray_out_drv_htree 등
+ *     사이클 타임 제약 관련 지연도 함께 채운다.
+ *   - 태그 mat(dp.is_tag)이면서 집합 연관이면 compute_comparator_delay()를
+ *     추가로 호출한다.
+ *
+ * 호출 체인:
+ *   UCA::compute_delays() → [Mat::compute_delays()] → compute_bitline_delay(),
+ *   compute_sa_delay(), compute_subarray_out_drv(), compute_comparator_delay(),
+ *   compute_cam_delay()
+ */
 double Mat::compute_delays(double inrisetime)
 {
 	int k;
@@ -487,21 +605,21 @@ double Mat::compute_delays(double inrisetime)
 		outrisetime_search = compute_cam_delay(inrisetime);
 		if (is_fa)
 		{
-			bl_precharge_eq_drv->compute_delay(0);
+			bl_precharge_eq_drv->compute_delay(0); // [한국어] 드라이버 지연 계산 위임
 			k = ml_to_ram_wl_drv->number_gates - 1;
-			rd = tr_R_on(ml_to_ram_wl_drv->width_n[k], NCH, 1, is_dram, false, true);
-			C_intrinsic = drain_C_(ml_to_ram_wl_drv->width_n[k], PCH, 1, 1, 4*cell.h, is_dram, false, true) +
-			drain_C_(ml_to_ram_wl_drv->width_n[k], NCH, 1, 1, 4*cell.h, is_dram, false, true);
+			rd = tr_R_on(ml_to_ram_wl_drv->width_n[k], NCH, 1, is_dram, false, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+			C_intrinsic = drain_C_(ml_to_ram_wl_drv->width_n[k], PCH, 1, 1, 4*cell.h, is_dram, false, true) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+			drain_C_(ml_to_ram_wl_drv->width_n[k], NCH, 1, 1, 4*cell.h, is_dram, false, true); // [한국어] 드레인/확산 커패시턴스 계산 [F]
 			C_ld = ml_to_ram_wl_drv->c_gate_load+ ml_to_ram_wl_drv->c_wire_load;
 			tf = rd * (C_intrinsic + C_ld) + ml_to_ram_wl_drv->r_wire_load * C_ld / 2;
-			delay_wl_reset = horowitz(0, tf, 0.5, 0.5, RISE);
+			delay_wl_reset = horowitz(0, tf, 0.5, 0.5, RISE); // [한국어] 세부 지연 항목 갱신 [s]
 
-			R_bl_precharge = tr_R_on(g_tp.w_pmos_bl_precharge, PCH, 1, is_dram, false, false);
+			R_bl_precharge = tr_R_on(g_tp.w_pmos_bl_precharge, PCH, 1, is_dram, false, false); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
 			r_b_metal = cam_cell.h * g_tp.wire_local.R_per_um;//dummy rows in sram are filled in
 			R_bl = subarray.num_rows * r_b_metal;
 			C_bl = subarray.C_bl;
-			delay_bl_restore = bl_precharge_eq_drv->delay +
-			         log((g_tp.sram.Vbitpre - 0.1 * dp.V_b_sense) / (g_tp.sram.Vbitpre - dp.V_b_sense))*
+			delay_bl_restore = bl_precharge_eq_drv->delay + // [한국어] 세부 지연 항목 갱신 [s]
+			         log((g_tp.sram.Vbitpre - 0.1 * dp.V_b_sense) / (g_tp.sram.Vbitpre - dp.V_b_sense))* // [한국어] RC 충방전 시간 계산을 위한 로그 연산
 			         (R_bl_precharge * C_bl + R_bl * C_bl / 2);
 
 
@@ -511,21 +629,21 @@ double Mat::compute_delays(double inrisetime)
 			outrisetime_search = compute_subarray_out_drv(outrisetime_search);
 			subarray_out_wire->set_in_rise_time(outrisetime_search);
 			outrisetime_search = subarray_out_wire->signal_rise_time();
-			delay_subarray_out_drv_htree = delay_subarray_out_drv + subarray_out_wire->delay;
+			delay_subarray_out_drv_htree = delay_subarray_out_drv + subarray_out_wire->delay; // [한국어] 세부 지연 항목 갱신 [s]
 
 
 			//TODO: this is just for compute plain read/write energy for fa and cam, plain read/write access timing need to be revisited.
-			outrisetime = r_predec->compute_delays(inrisetime);
-			row_dec_outrisetime = row_dec->compute_delays(outrisetime);
+			outrisetime = r_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+			row_dec_outrisetime = row_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-			outrisetime = b_mux_predec->compute_delays(inrisetime);
-			bit_mux_dec->compute_delays(outrisetime);
+			outrisetime = b_mux_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+			bit_mux_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-			outrisetime = sa_mux_lev_1_predec->compute_delays(inrisetime);
-			sa_mux_lev_1_dec->compute_delays(outrisetime);
+			outrisetime = sa_mux_lev_1_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+			sa_mux_lev_1_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-			outrisetime = sa_mux_lev_2_predec->compute_delays(inrisetime);
-			sa_mux_lev_2_dec->compute_delays(outrisetime);
+			outrisetime = sa_mux_lev_2_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+			sa_mux_lev_2_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
 			if (pure_cam)
 			{
@@ -536,48 +654,48 @@ double Mat::compute_delays(double inrisetime)
     }
 	else
 	{
-		bl_precharge_eq_drv->compute_delay(0);
+		bl_precharge_eq_drv->compute_delay(0); // [한국어] 드라이버 지연 계산 위임
 		if (row_dec->exist == true)
 		{
 			int k = row_dec->num_gates - 1;
-			double rd = tr_R_on(row_dec->w_dec_n[k], NCH, 1, is_dram, false, true);
+			double rd = tr_R_on(row_dec->w_dec_n[k], NCH, 1, is_dram, false, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
 			// TODO: this 4*cell.h number must be revisited
-			double C_intrinsic = drain_C_(row_dec->w_dec_p[k], PCH, 1, 1, 4*cell.h, is_dram, false, true) +
-			drain_C_(row_dec->w_dec_n[k], NCH, 1, 1, 4*cell.h, is_dram, false, true);
+			double C_intrinsic = drain_C_(row_dec->w_dec_p[k], PCH, 1, 1, 4*cell.h, is_dram, false, true) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+			drain_C_(row_dec->w_dec_n[k], NCH, 1, 1, 4*cell.h, is_dram, false, true); // [한국어] 드레인/확산 커패시턴스 계산 [F]
 			double C_ld = row_dec->C_ld_dec_out;
 			double tf = rd * (C_intrinsic + C_ld) + row_dec->R_wire_dec_out * C_ld / 2;
-			delay_wl_reset = horowitz(0, tf, 0.5, 0.5, RISE);
+			delay_wl_reset = horowitz(0, tf, 0.5, 0.5, RISE); // [한국어] 세부 지연 항목 갱신 [s]
 		}
-		double R_bl_precharge = tr_R_on(g_tp.w_pmos_bl_precharge, PCH, 1, is_dram, false, false);
+		double R_bl_precharge = tr_R_on(g_tp.w_pmos_bl_precharge, PCH, 1, is_dram, false, false); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
 		double r_b_metal = cell.h * g_tp.wire_local.R_per_um;
 		double R_bl = subarray.num_rows * r_b_metal;
 		double C_bl = subarray.C_bl;
 
 		if (is_dram)
 		{
-			delay_bl_restore = bl_precharge_eq_drv->delay + 2.3 * (R_bl_precharge * C_bl + R_bl * C_bl / 2);
+			delay_bl_restore = bl_precharge_eq_drv->delay + 2.3 * (R_bl_precharge * C_bl + R_bl * C_bl / 2); // [한국어] 세부 지연 항목 갱신 [s]
 		}
 		else
 		{
-			delay_bl_restore = bl_precharge_eq_drv->delay +
-			log((g_tp.sram.Vbitpre - 0.1 * dp.V_b_sense) / (g_tp.sram.Vbitpre - dp.V_b_sense))*
+			delay_bl_restore = bl_precharge_eq_drv->delay + // [한국어] 세부 지연 항목 갱신 [s]
+			log((g_tp.sram.Vbitpre - 0.1 * dp.V_b_sense) / (g_tp.sram.Vbitpre - dp.V_b_sense))* // [한국어] RC 충방전 시간 계산을 위한 로그 연산
 			(R_bl_precharge * C_bl + R_bl * C_bl / 2);
 		}
   }
 
 
 
-  outrisetime = r_predec->compute_delays(inrisetime);
-  row_dec_outrisetime = row_dec->compute_delays(outrisetime);
+  outrisetime = r_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+  row_dec_outrisetime = row_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-  outrisetime = b_mux_predec->compute_delays(inrisetime);
-  bit_mux_dec->compute_delays(outrisetime);
+  outrisetime = b_mux_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+  bit_mux_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-  outrisetime = sa_mux_lev_1_predec->compute_delays(inrisetime);
-  sa_mux_lev_1_dec->compute_delays(outrisetime);
+  outrisetime = sa_mux_lev_1_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+  sa_mux_lev_1_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
-  outrisetime = sa_mux_lev_2_predec->compute_delays(inrisetime);
-  sa_mux_lev_2_dec->compute_delays(outrisetime);
+  outrisetime = sa_mux_lev_2_predec->compute_delays(inrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
+  sa_mux_lev_2_dec->compute_delays(outrisetime); // [한국어] 하위 디코더/예비디코더 지연 계산 위임
 
   outrisetime = compute_bitline_delay(row_dec_outrisetime);
   outrisetime = compute_sa_delay(outrisetime);
@@ -585,7 +703,7 @@ double Mat::compute_delays(double inrisetime)
   subarray_out_wire->set_in_rise_time(outrisetime);
   outrisetime = subarray_out_wire->signal_rise_time();
 
-  delay_subarray_out_drv_htree = delay_subarray_out_drv + subarray_out_wire->delay;
+  delay_subarray_out_drv_htree = delay_subarray_out_drv + subarray_out_wire->delay; // [한국어] 세부 지연 항목 갱신 [s]
 
   if (dp.is_tag == true && dp.fully_assoc == false)
   {
@@ -594,13 +712,29 @@ double Mat::compute_delays(double inrisetime)
 
   if (row_dec->exist == false)
     {
-      delay_wl_reset = MAX(r_predec->blk1->delay, r_predec->blk2->delay);
+      delay_wl_reset = MAX(r_predec->blk1->delay, r_predec->blk2->delay); // [한국어] 세부 지연 항목 갱신 [s]
     }
   return outrisetime;
 }
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h -
+ * 비트 mux/센스앰프/프리차지/쓰기 드라이버 회로의 총 물리 높이 계산
+ *
+ * @return: 해당 회로들이 차지하는 총 높이 [m]
+ *
+ * 비트라인 프리차지 PMOS, 이퀄라이즈 트랜지스터, 비트 mux pass 트랜지스터,
+ * 센스앰프(SA), SA mux pass 트랜지스터, 그리고 레벨 2 SA mux 사이의
+ * 인버터 버퍼 높이를 compute_tr_width_after_folding()과
+ * height_sense_amplifier()로 합산한다. 이 높이는 mat의 비셀(non-cell) 면적
+ * 산정에 직접 사용된다.
+ *
+ * 호출 체인: Mat::Mat() → [compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h()]
+ */
 double Mat::compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h()
 {
 
@@ -630,7 +764,7 @@ double Mat::compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h()
 
     // add height of inverter-buffers between the two levels (pass-transistors) of sense-amp mux
     height += 2 * compute_tr_width_after_folding(
-        pmos_to_nmos_sz_ratio(is_dram) * g_tp.min_w_nmos_, cell.w * dp.Ndsam_lev_2 / (RWP + ERP));
+        pmos_to_nmos_sz_ratio(is_dram) * g_tp.min_w_nmos_, cell.w * dp.Ndsam_lev_2 / (RWP + ERP)); // [한국어] PMOS/NMOS 폭 비율 계산
     height += 2 * compute_tr_width_after_folding(g_tp.min_w_nmos_, cell.w * dp.Ndsam_lev_2 / (RWP + ERP));
   }
 
@@ -651,6 +785,29 @@ double Mat::compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h()
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_cam_delay - FA/CAM 검색 경로 지연·전력 계산
+ *
+ * @inrisetime: 입력 신호 상승 시간 [s]
+ * @return    : 검색 경로 출력 신호의 상승 시간 [s]
+ *
+ * 동작 과정:
+ *   1) 서치라인(searchline) 프리차지 및 데이터 드라이버를 생성하고,
+ *      서치라인 구동 지연(delay_searchline)을 계산한다.
+ *   2) 매치라인(matchline) 프리차지 드라이버를 생성하고, 더미 셀을 포함한
+ *      매치라인 RC 지연을 단계별(비교기→NAND→인버터→NOR→WL 드라이버)로 누적하여
+ *      delay_matchchline에 저장한다.
+ *   3) 히트/미스 판정 회로(precharge + 평가)의 지연(delay_hit_miss,
+ *      delay_hit_miss_reset)을 계산한다.
+ *   4) FA인 경우 매치라인 결과를 RAM 워드라인으로 변환하는 드라이버
+ *      (ml_to_ram_wl_drv) 지연을 추가한다.
+ *   5) 검색 동작 에너지(dynSearchEng)와 CAM 셀/비교기 누설 전력을
+ *      power_matchline.searchOp에 누적한다.
+ *
+ * 호출 체인: Mat::compute_delays() → [compute_cam_delay()]
+ */
 double Mat::compute_cam_delay(double inrisetime)
 {
 
@@ -685,8 +842,8 @@ double Mat::compute_cam_delay(double inrisetime)
   r_searchline_metal  = cam_cell.get_h() * g_tp.wire_local.R_per_um;
 
   dynSearchEng = 0.0;
-  delay_matchchline = 0.0;
-  double p_to_n_sizing_r = pmos_to_nmos_sz_ratio(is_dram);
+  delay_matchchline = 0.0; // [한국어] 세부 지연 항목 갱신 [s]
+  double p_to_n_sizing_r = pmos_to_nmos_sz_ratio(is_dram); // [한국어] PMOS/NMOS 폭 비율 계산
   bool linear_scaling = false;
 
   if (linear_scaling)
@@ -727,11 +884,11 @@ double Mat::compute_cam_delay(double inrisetime)
 
   //Searchline precharge circuitry is same as that of bitline. However, no sharing between search ports and r/w ports
   //Searchline precharge routes horizontally
-  driver_c_gate_load = subarray.num_cols_fa_cam * gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false);
+  driver_c_gate_load = subarray.num_cols_fa_cam * gate_C(2 * g_tp.w_pmos_bl_precharge + g_tp.w_pmos_bl_eq, 0, is_dram, false, false); // [한국어] 게이트 커패시턴스 계산 [F]
   driver_c_wire_load = subarray.num_cols_fa_cam * cam_cell.w * g_tp.wire_outside_mat.C_per_um;
   driver_r_wire_load = subarray.num_cols_fa_cam * cam_cell.w * g_tp.wire_outside_mat.R_per_um;
 
-  sl_precharge_eq_drv = new Driver(
+  sl_precharge_eq_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
       driver_c_gate_load,
 	  driver_c_wire_load,
       driver_r_wire_load,
@@ -739,22 +896,22 @@ double Mat::compute_cam_delay(double inrisetime)
 
   //searchline data driver ; subarray.num_rows + 1 is because of the dummy row
   //data drv should only have gate_C not 2*gate_C since the two searchlines are differential--same as bitlines
-  driver_c_gate_load = (subarray.num_rows + 1) * gate_C(Wdummyn, 0, is_dram, false, false);
+  driver_c_gate_load = (subarray.num_rows + 1) * gate_C(Wdummyn, 0, is_dram, false, false); // [한국어] 게이트 커패시턴스 계산 [F]
   driver_c_wire_load = (subarray.num_rows + 1) * c_searchline_metal;
   driver_r_wire_load = (subarray.num_rows + 1) * r_searchline_metal;
-  sl_data_drv = new Driver(
+  sl_data_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
       driver_c_gate_load,
 	  driver_c_wire_load,
       driver_r_wire_load,
       is_dram);
 
-  sl_precharge_eq_drv->compute_delay(0);
+  sl_precharge_eq_drv->compute_delay(0); // [한국어] 드라이버 지연 계산 위임
   double R_bl_precharge = tr_R_on(g_tp.w_pmos_bl_precharge, PCH, 1, is_dram, false, false);//Assuming CAM and SRAM have same Pre_eq_dr
   double r_b_metal = cam_cell.h * g_tp.wire_local.R_per_um;
   double R_bl = (subarray.num_rows + 1) * r_b_metal;
   double C_bl = subarray.C_bl_cam;
-  delay_cam_sl_restore = sl_precharge_eq_drv->delay
-                         + log(g_tp.cam.Vbitpre)* (R_bl_precharge * C_bl + R_bl * C_bl / 2);
+  delay_cam_sl_restore = sl_precharge_eq_drv->delay // [한국어] 세부 지연 항목 갱신 [s]
+                         + log(g_tp.cam.Vbitpre)* (R_bl_precharge * C_bl + R_bl * C_bl / 2); // [한국어] RC 충방전 시간 계산을 위한 로그 연산
 
   out_time_ramp = sl_data_drv->compute_delay(inrisetime);//After entering one mat, start to consider the inrisetime from 0(0 is passed from outside)
 
@@ -766,37 +923,37 @@ double Mat::compute_cam_delay(double inrisetime)
 
   ////matchline precharge circuitry routes vertically
   //There are two matchline precharge driver chains per subarray.
-  driver_c_gate_load = (subarray.num_rows + 1) * gate_C(Wfaprechp, 0, is_dram);
+  driver_c_gate_load = (subarray.num_rows + 1) * gate_C(Wfaprechp, 0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   driver_c_wire_load = (subarray.num_rows + 1) * c_searchline_metal;
   driver_r_wire_load = (subarray.num_rows + 1) * r_searchline_metal;
 
-  ml_precharge_drv = new Driver(
+  ml_precharge_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
 						  driver_c_gate_load,
   	                      driver_c_wire_load,
                           driver_r_wire_load,
                           is_dram);
 
-  ml_precharge_drv->compute_delay(0);
+  ml_precharge_drv->compute_delay(0); // [한국어] 드라이버 지연 계산 위임
 
 
-  rd =  tr_R_on(Wdummyn, NCH, 2, is_dram);
+  rd =  tr_R_on(Wdummyn, NCH, 2, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   c_intrinsic = Htagbits*(2*drain_C_(Wdummyn, NCH, 2, 1, g_tp.cell_h_def, is_dram)//TODO: the cell_h_def should be revisit
 				  + drain_C_(Wfaprechp, PCH, 1, 1, g_tp.cell_h_def, is_dram)/Htagbits);//since each halve only has one precharge tx per matchline
 
   Cwire = c_matchline_metal * Htagbits;
   Rwire = r_matchline_metal * Htagbits;
-  c_gate_load = gate_C(Waddrnandn + Waddrnandp, 0, is_dram);
+  c_gate_load = gate_C(Waddrnandn + Waddrnandp, 0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
 
-  double R_ml_precharge = tr_R_on(Wfaprechp, PCH, 1, is_dram);
+  double R_ml_precharge = tr_R_on(Wfaprechp, PCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   //double r_ml_metal = cam_cell.w * g_tp.wire_local.R_per_um;
   double R_ml = Rwire;
   double C_ml = Cwire + c_intrinsic;
-  delay_cam_ml_reset = ml_precharge_drv->delay
+  delay_cam_ml_reset = ml_precharge_drv->delay // [한국어] 세부 지연 항목 갱신 [s]
                            + log(g_tp.cam.Vbitpre)* (R_ml_precharge * C_ml + R_ml * C_ml / 2);//TODO: latest CAM has sense amps on matchlines too
 
   //matchline ops delay
   tf = rd * (c_intrinsic + Cwire / 2 + c_gate_load) + Rwire * (Cwire / 2 + c_gate_load);
-  this_delay = horowitz(out_time_ramp, tf, VTHFA2, VTHFA3, FALL);
+  this_delay = horowitz(out_time_ramp, tf, VTHFA2, VTHFA3, FALL); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   delay_matchchline += this_delay;
   out_time_ramp = this_delay / VTHFA3;
 
@@ -804,12 +961,12 @@ double Mat::compute_cam_delay(double inrisetime)
 					  * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd *2;//* Ntbl;//each subarry has two halves
 
   /* third stage, from the NAND2 gates to the drivers in the dummy row */
-  rd = tr_R_on(Waddrnandn, NCH, 2, is_dram);
-  c_intrinsic = drain_C_(Waddrnandn, NCH, 2, 1, g_tp.cell_h_def, is_dram) +
-                drain_C_(Waddrnandp, PCH, 1, 1, g_tp.cell_h_def, is_dram)*2;
-  c_gate_load = gate_C(Wdummyinvn + Wdummyinvp, 0, is_dram);
+  rd = tr_R_on(Waddrnandn, NCH, 2, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  c_intrinsic = drain_C_(Waddrnandn, NCH, 2, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+                drain_C_(Waddrnandp, PCH, 1, 1, g_tp.cell_h_def, is_dram)*2; // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  c_gate_load = gate_C(Wdummyinvn + Wdummyinvp, 0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * (c_intrinsic + c_gate_load);
-  this_delay = horowitz(out_time_ramp, tf, VTHFA3, VTHFA4, RISE);
+  this_delay = horowitz(out_time_ramp, tf, VTHFA3, VTHFA4, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   out_time_ramp = this_delay / (1 - VTHFA4);
   delay_matchchline += this_delay;
 
@@ -817,13 +974,13 @@ double Mat::compute_cam_delay(double inrisetime)
   dynSearchEng += (c_intrinsic* (subarray.num_rows+1)+ c_gate_load*2) * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;//  * Ntbl;
 
   /* fourth stage, from the driver in dummy matchline to the NOR2 gate which drives the wordline of the data portion */
-  rd = tr_R_on(Wdummyinvn, NCH, 1, is_dram);
-  c_intrinsic = drain_C_(Wdummyinvn, NCH, 1, 1, g_tp.cell_h_def, is_dram) + drain_C_(Wdummyinvp, NCH, 1, 1, g_tp.cell_h_def, is_dram);
+  rd = tr_R_on(Wdummyinvn, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  c_intrinsic = drain_C_(Wdummyinvn, NCH, 1, 1, g_tp.cell_h_def, is_dram) + drain_C_(Wdummyinvp, NCH, 1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
   Cwire = c_matchline_metal * Htagbits +  c_searchline_metal * (subarray.num_rows+1)/2;
   Rwire = r_matchline_metal * Htagbits +  r_searchline_metal * (subarray.num_rows+1)/2;
-  c_gate_load = gate_C(Wfanorn + Wfanorp, 0, is_dram);
+  c_gate_load = gate_C(Wfanorn + Wfanorp, 0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * (c_intrinsic + Cwire + c_gate_load) + Rwire * (Cwire / 2 + c_gate_load);
-  this_delay = horowitz (out_time_ramp, tf, VTHFA4, VTHFA5, FALL);
+  this_delay = horowitz (out_time_ramp, tf, VTHFA4, VTHFA5, FALL); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   out_time_ramp = this_delay / VTHFA5;
   delay_matchchline += this_delay;
 
@@ -836,7 +993,7 @@ double Mat::compute_cam_delay(double inrisetime)
   driver_c_wire_load = subarray.C_wl_ram;
   driver_r_wire_load = subarray.R_wl_ram;
 
-  ml_to_ram_wl_drv = new Driver(
+  ml_to_ram_wl_drv = new Driver( // [한국어] 버퍼/드라이버 객체 동적 생성
 						  driver_c_gate_load,
   	                      driver_c_wire_load,
                           driver_r_wire_load,
@@ -844,15 +1001,15 @@ double Mat::compute_cam_delay(double inrisetime)
 
 
 
-  rd = tr_R_on(Wfanorn, NCH, 1, is_dram);
-  c_intrinsic = 2* drain_C_(Wfanorn, NCH, 1, 1, g_tp.cell_h_def, is_dram) + drain_C_(Wfanorp, NCH, 1, 1, g_tp.cell_h_def, is_dram);
-  c_gate_load = gate_C(ml_to_ram_wl_drv->width_n[0] + ml_to_ram_wl_drv->width_p[0], 0, is_dram);
+  rd = tr_R_on(Wfanorn, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  c_intrinsic = 2* drain_C_(Wfanorn, NCH, 1, 1, g_tp.cell_h_def, is_dram) + drain_C_(Wfanorp, NCH, 1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  c_gate_load = gate_C(ml_to_ram_wl_drv->width_n[0] + ml_to_ram_wl_drv->width_p[0], 0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * (c_intrinsic + c_gate_load);
-  this_delay = horowitz (out_time_ramp, tf, 0.5, 0.5, RISE);
+  this_delay = horowitz (out_time_ramp, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   out_time_ramp = this_delay / (1-0.5);
   delay_matchchline += this_delay;
 
-  out_time_ramp   = ml_to_ram_wl_drv->compute_delay(out_time_ramp);
+  out_time_ramp   = ml_to_ram_wl_drv->compute_delay(out_time_ramp); // [한국어] 드라이버 지연 계산 위임
 
   //c_gate_load energy is computed in ml_to_ram_wl_drv
   dynSearchEng  += (c_intrinsic) * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;//* Ntbl;
@@ -860,28 +1017,28 @@ double Mat::compute_cam_delay(double inrisetime)
 
   /* peripheral-- hitting logic "CMOS VLSI Design Fig11.51*/
   /*Precharge the hitting logic */
-  c_intrinsic = 2*drain_C_(W_hit_miss_p, NCH, 2, 1, g_tp.cell_h_def, is_dram);
+  c_intrinsic = 2*drain_C_(W_hit_miss_p, NCH, 2, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
   Cwire = c_searchline_metal * subarray.num_rows;
   Rwire = r_searchline_metal * subarray.num_rows;
-  c_gate_load = drain_C_(W_hit_miss_n, NCH, 1, 1, g_tp.cell_h_def, is_dram)* subarray.num_rows;
+  c_gate_load = drain_C_(W_hit_miss_n, NCH, 1, 1, g_tp.cell_h_def, is_dram)* subarray.num_rows; // [한국어] 드레인/확산 커패시턴스 계산 [F]
 
-  rd = tr_R_on(W_hit_miss_p, PCH, 1, is_dram, false, false);
+  rd = tr_R_on(W_hit_miss_p, PCH, 1, is_dram, false, false); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   //double r_ml_metal = cam_cell.w * g_tp.wire_local.R_per_um;
   double R_hit_miss = Rwire;
   double C_hit_miss = Cwire + c_intrinsic;
-  delay_hit_miss_reset = log(g_tp.cam.Vbitpre)* (rd * C_hit_miss + R_hit_miss * C_hit_miss / 2);
+  delay_hit_miss_reset = log(g_tp.cam.Vbitpre)* (rd * C_hit_miss + R_hit_miss * C_hit_miss / 2); // [한국어] 세부 지연 항목 갱신 [s]
   dynSearchEng  += (c_intrinsic + Cwire + c_gate_load) * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
 
   /*hitting logic evaluation */
-  c_intrinsic = 2*drain_C_(W_hit_miss_n, NCH, 2, 1, g_tp.cell_h_def, is_dram);
+  c_intrinsic = 2*drain_C_(W_hit_miss_n, NCH, 2, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
   Cwire = c_searchline_metal * subarray.num_rows;
   Rwire = r_searchline_metal * subarray.num_rows;
-  c_gate_load = drain_C_(W_hit_miss_n, NCH, 1, 1, g_tp.cell_h_def, is_dram)* subarray.num_rows;
+  c_gate_load = drain_C_(W_hit_miss_n, NCH, 1, 1, g_tp.cell_h_def, is_dram)* subarray.num_rows; // [한국어] 드레인/확산 커패시턴스 계산 [F]
 
-  rd = tr_R_on(W_hit_miss_n, PCH, 1, is_dram, false, false);
+  rd = tr_R_on(W_hit_miss_n, PCH, 1, is_dram, false, false); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   tf = rd * (c_intrinsic + Cwire / 2 + c_gate_load) + Rwire * (Cwire / 2 + c_gate_load);
 
-  delay_hit_miss = horowitz(0, tf, 0.5, 0.5, FALL);
+  delay_hit_miss = horowitz(0, tf, 0.5, 0.5, FALL); // [한국어] 세부 지연 항목 갱신 [s]
 
   if (is_fa)
       delay_matchchline += MAX(ml_to_ram_wl_drv->delay, delay_hit_miss);
@@ -894,8 +1051,8 @@ double Mat::compute_cam_delay(double inrisetime)
 
   //leakage in one subarray
   double Iport     = cmos_Isub_leakage(g_tp.cam.cell_a_w, 0,  1, nmos, false, true);//TODO: how much is the idle time? just by *2?
-  double Iport_erp = cmos_Isub_leakage(g_tp.cam.cell_a_w, 0,  2, nmos, false, true);
-  double Icell     = cmos_Isub_leakage(g_tp.cam.cell_nmos_w, g_tp.cam.cell_pmos_w, 1, inv, false, true)*2;
+  double Iport_erp = cmos_Isub_leakage(g_tp.cam.cell_a_w, 0,  2, nmos, false, true); // [한국어] 서브-임계 누설 전류 계산 [A]
+  double Icell     = cmos_Isub_leakage(g_tp.cam.cell_nmos_w, g_tp.cam.cell_pmos_w, 1, inv, false, true)*2; // [한국어] 서브-임계 누설 전류 계산 [A]
   double Icell_comparator = cmos_Isub_leakage(Wdummyn, Wdummyn, 1, inv, false, true)*2;//approx XOR with Inv
 
   leak_power_cc_inverters_sram_cell         = Icell * g_tp.cam_cell.Vdd;
@@ -912,16 +1069,16 @@ double Mat::compute_cam_delay(double inrisetime)
     leak_power_SCHP_port_sram_cell*SCHP;
 //  power_matchline.searchOp.leakage += leak_comparator_cam_cell;
   power_matchline.searchOp.leakage *= (subarray.num_rows+1) * subarray.num_cols_fa_cam;//TODO:dumy line precise
-  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(0, Wfaprechp, 1, pmos) * g_tp.cam_cell.Vdd;
-  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(Waddrnandn, Waddrnandp, 2, nand) * g_tp.cam_cell.Vdd;
-  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(Wfanorn, Wfanorp,2, nor) * g_tp.cam_cell.Vdd;
+  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(0, Wfaprechp, 1, pmos) * g_tp.cam_cell.Vdd; // [한국어] 서브-임계 누설 전류 계산 [A]
+  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(Waddrnandn, Waddrnandp, 2, nand) * g_tp.cam_cell.Vdd; // [한국어] 서브-임계 누설 전류 계산 [A]
+  power_matchline.searchOp.leakage += (subarray.num_rows+1) * cmos_Isub_leakage(Wfanorn, Wfanorp,2, nor) * g_tp.cam_cell.Vdd; // [한국어] 서브-임계 누설 전류 계산 [A]
   //In idle states, the hit/miss txs are closed (on) therefore no Isub
   power_matchline.searchOp.leakage += 0;// subarray.num_rows * cmos_Isub_leakage(W_hit_miss_n, 0,1, nmos) * g_tp.cam_cell.Vdd+
     // + cmos_Isub_leakage(0, W_hit_miss_p,1, pmos) * g_tp.cam_cell.Vdd;
 
   //in idle state, Ig_on only possibly exist in access transistors of read only ports
-  double Ig_port_erp = cmos_Ig_leakage(g_tp.cam.cell_a_w, 0, 1, nmos, false, true);
-  double Ig_cell     = cmos_Ig_leakage(g_tp.cam.cell_nmos_w, g_tp.cam.cell_pmos_w, 1, inv, false, true)*2;
+  double Ig_port_erp = cmos_Ig_leakage(g_tp.cam.cell_a_w, 0, 1, nmos, false, true); // [한국어] 게이트 절연막 누설 전류 계산 [A]
+  double Ig_cell     = cmos_Ig_leakage(g_tp.cam.cell_nmos_w, g_tp.cam.cell_pmos_w, 1, inv, false, true)*2; // [한국어] 게이트 절연막 누설 전류 계산 [A]
   double Ig_cell_comparator = cmos_Ig_leakage(Wdummyn, Wdummyn, 1, inv, false, true)*2;// cmos_Ig_leakage(Wdummyn, 0, 2, nmos)*2;
 
   gate_leak_comparator_cam_cell          = Ig_cell_comparator* g_tp.cam_cell.Vdd;
@@ -935,43 +1092,93 @@ double Mat::compute_cam_delay(double inrisetime)
   power_matchline.searchOp.gate_leakage += gate_leak_comparator_cam_cell;
   power_matchline.searchOp.gate_leakage += gate_leak_power_SCHP_port_sram_cell*SCHP + gate_leak_power_RD_port_sram_cell * ERP;
   power_matchline.searchOp.gate_leakage *= (subarray.num_rows+1) * subarray.num_cols_fa_cam;//TODO:dumy line precise
-  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(0, Wfaprechp,1, pmos) * g_tp.cam_cell.Vdd;
-  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(Waddrnandn, Waddrnandp, 2, nand) * g_tp.cam_cell.Vdd;
-  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(Wfanorn, Wfanorp, 2, nor) * g_tp.cam_cell.Vdd;
-  power_matchline.searchOp.gate_leakage += subarray.num_rows * cmos_Ig_leakage(W_hit_miss_n, 0,1, nmos) * g_tp.cam_cell.Vdd+
-                                       + cmos_Ig_leakage(0, W_hit_miss_p,1, pmos) * g_tp.cam_cell.Vdd;
+  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(0, Wfaprechp,1, pmos) * g_tp.cam_cell.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
+  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(Waddrnandn, Waddrnandp, 2, nand) * g_tp.cam_cell.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
+  power_matchline.searchOp.gate_leakage += (subarray.num_rows+1) * cmos_Ig_leakage(Wfanorn, Wfanorp, 2, nor) * g_tp.cam_cell.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
+  power_matchline.searchOp.gate_leakage += subarray.num_rows * cmos_Ig_leakage(W_hit_miss_n, 0,1, nmos) * g_tp.cam_cell.Vdd+ // [한국어] 게이트 절연막 누설 전류 계산 [A]
+                                       + cmos_Ig_leakage(0, W_hit_miss_p,1, pmos) * g_tp.cam_cell.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
 
    return out_time_ramp;
 }
 
 
+
+/*
+ * [한국어]
+ * Mat::width_write_driver_or_write_mux - 쓰기 드라이버/쓰기 mux NMOS 폭 계산
+ *
+ * @return: 쓰기 경로에 필요한 NMOS 트랜지스터의 채널 폭 [m]
+ *
+ * SRAM 셀의 pull-up PMOS 저항과 access 트랜지스터 저항을 고려하여,
+ * 셀에 안정적으로 쓰기 동작을 수행할 수 있는 쓰기 드라이버/mux의
+ * 목표 저항을 산출하고 R_to_w()로 폭을 변환한다.
+ *
+ * 호출 체인: compute_bit_mux_sa_precharge_sa_mux_wr_drv_wr_mux_h() →
+ *            [width_write_driver_or_write_mux()]
+ */
 double Mat::width_write_driver_or_write_mux()
 {
   // calculate resistance of SRAM cell pull-up PMOS transistor
   // cam and sram have same cell trasistor properties
-  double R_sram_cell_pull_up_tr  = tr_R_on(g_tp.sram.cell_pmos_w, NCH, 1, is_dram, true);
-  double R_access_tr             = tr_R_on(g_tp.sram.cell_a_w,    NCH, 1, is_dram, true);
+  double R_sram_cell_pull_up_tr  = tr_R_on(g_tp.sram.cell_pmos_w, NCH, 1, is_dram, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  double R_access_tr             = tr_R_on(g_tp.sram.cell_a_w,    NCH, 1, is_dram, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   double target_R_write_driver_and_mux = (2 * R_sram_cell_pull_up_tr - R_access_tr) / 2;
-  double width_write_driver_nmos = R_to_w(target_R_write_driver_and_mux, NCH, is_dram);
+  double width_write_driver_nmos = R_to_w(target_R_write_driver_and_mux, NCH, is_dram); // [한국어] 저항→트랜지스터 채널 폭 변환
 
   return width_write_driver_nmos;
 }
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_comparators_height - 태그 비교기 배열의 물리 높이 계산
+ *
+ * @tagbits                  : 태그 비트 수
+ * @number_ways_in_mat       : 이 mat 내 웨이(way) 수
+ * @subarray_mem_cell_area_width: 서브어레이 셀 면적의 폭 [m]
+ * @return                   : 비교기 회로 배열의 총 높이 [m]
+ *
+ * 4분할(quarter) NAND2 비교기 면적을 태그 비트와 웨이 수만큼 곱한 뒤
+ * 서브어레이 폭으로 나누어 높이를 추정한다. 집합 연관 태그 mat의
+ * 비셀 면적 계산에 사용된다.
+ *
+ * 호출 체인: Mat::Mat() → [compute_comparators_height()]
+ */
 double Mat::compute_comparators_height(
     int tagbits,
     int number_ways_in_mat,
     double subarray_mem_cell_area_width)
 {
-  double nand2_area = compute_gate_area(NAND, 2, 0, g_tp.w_comp_n, g_tp.cell_h_def);
+  double nand2_area = compute_gate_area(NAND, 2, 0, g_tp.w_comp_n, g_tp.cell_h_def); // [한국어] 인버터/게이트 레이아웃 면적 계산 [m^2]
   double cumulative_area = nand2_area * number_ways_in_mat * tagbits / 4;
   return cumulative_area / subarray_mem_cell_area_width;
 }
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_bitline_delay - 비트라인 RC 지연 및 읽기/쓰기 에너지 계산
+ *
+ * @inrisetime: 워드라인 활성화 신호의 상승 시간 [s]
+ * @return    : 비트라인 충분히 스윙 후의 출력 rise time [s]
+ *
+ * 동작 과정:
+ *   - DRAM과 SRAM 분기: DRAM은 셀 커패시턴스와 C_bl의 전하 공유 비율로
+ *     tstep을 계산하고, SRAM은 셀 pull-down/access 트랜지스터 저항과
+ *     비트라인/ mux / SA 커패시턴스로 RC 시정수 tau를 계산한다.
+ *   - 입력 rise time을 고려하여 delay_bitline을 Horowitz-like 식으로 산출한다.
+ *   - 읽기/쓰기 동적 에너지(dynRdEnergy, dynWriteEnergy)와
+ *     per_bitline_read_energy를 계산한다.
+ *   - SRAM 셀의 서브-임계/게이트 누설 전류를 바탕으로 power_bitline 누설 성분을
+ *     저장한다.
+ *
+ * 호출 체인: Mat::compute_delays() → [compute_bitline_delay()]
+ */
 double Mat::compute_bitline_delay(double inrisetime)
 {
   double V_b_pre, v_th_mem_cell, V_wl;
@@ -998,7 +1205,7 @@ double Mat::compute_bitline_delay(double inrisetime)
     V_wl = g_tp.vpp;
     //The access transistor is not folded. So we just need to specify a threshold value for the
     //folding width that is equal to or greater than Wmemcella.
-    R_cell_acc = tr_R_on(g_tp.dram.cell_a_w, NCH, 1, true, true);
+    R_cell_acc = tr_R_on(g_tp.dram.cell_a_w, NCH, 1, true, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
     r_dev = g_tp.dram_cell_Vdd / g_tp.dram_cell_I_on + R_bl / 2;
   }
   else
@@ -1006,12 +1213,12 @@ double Mat::compute_bitline_delay(double inrisetime)
     V_b_pre = g_tp.sram.Vbitpre;
     v_th_mem_cell = g_tp.sram_cell.Vth;
     V_wl = g_tp.sram_cell.Vdd;
-    R_cell_pull_down = tr_R_on(g_tp.sram.cell_nmos_w, NCH, 1, false, true);
-    R_cell_acc = tr_R_on(g_tp.sram.cell_a_w, NCH, 1, false, true);
+    R_cell_pull_down = tr_R_on(g_tp.sram.cell_nmos_w, NCH, 1, false, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+    R_cell_acc = tr_R_on(g_tp.sram.cell_a_w, NCH, 1, false, true); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
 
     //Leakage current of an SRAM cell
     double Iport     = cmos_Isub_leakage(g_tp.sram.cell_a_w, 0,  1, nmos,false, true);//TODO: how much is the idle time? just by *2?
-    double Iport_erp = cmos_Isub_leakage(g_tp.sram.cell_a_w, 0,  2, nmos,false, true);
+    double Iport_erp = cmos_Isub_leakage(g_tp.sram.cell_a_w, 0,  2, nmos,false, true); // [한국어] 서브-임계 누설 전류 계산 [A]
     double Icell     = cmos_Isub_leakage(g_tp.sram.cell_nmos_w, g_tp.sram.cell_pmos_w, 1, inv,false, true)*2;//two invs per cell
 
     leak_power_cc_inverters_sram_cell         = Icell * g_tp.sram_cell.Vdd;
@@ -1020,22 +1227,22 @@ double Mat::compute_bitline_delay(double inrisetime)
 
 
     //in idle state, Ig_on only possibly exist in access transistors of read only ports
-    double Ig_port_erp   = cmos_Ig_leakage(g_tp.sram.cell_a_w, 0, 1, nmos,false, true);
-    double Ig_cell   = cmos_Ig_leakage(g_tp.sram.cell_nmos_w, g_tp.sram.cell_pmos_w, 1, inv,false, true);
+    double Ig_port_erp   = cmos_Ig_leakage(g_tp.sram.cell_a_w, 0, 1, nmos,false, true); // [한국어] 게이트 절연막 누설 전류 계산 [A]
+    double Ig_cell   = cmos_Ig_leakage(g_tp.sram.cell_nmos_w, g_tp.sram.cell_pmos_w, 1, inv,false, true); // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
     gate_leak_power_cc_inverters_sram_cell = Ig_cell*g_tp.sram_cell.Vdd;
     gate_leak_power_RD_port_sram_cell      = Ig_port_erp*g_tp.sram_cell.Vdd;
   }
 
 
-  double C_drain_bit_mux = drain_C_(g_tp.w_nmos_b_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w / (2 *(RWP + ERP + SCHP)), is_dram);
-  double R_bit_mux = tr_R_on(g_tp.w_nmos_b_mux, NCH, 1, is_dram);
-  double C_drain_sense_amp_iso = drain_C_(g_tp.w_iso, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram);
-  double R_sense_amp_iso = tr_R_on(g_tp.w_iso, PCH, 1, is_dram);
-  double C_sense_amp_latch = gate_C(g_tp.w_sense_p + g_tp.w_sense_n, 0, is_dram) +
-    drain_C_(g_tp.w_sense_n, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) +
-    drain_C_(g_tp.w_sense_p, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram);
-  double C_drain_sense_amp_mux = drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram);
+  double C_drain_bit_mux = drain_C_(g_tp.w_nmos_b_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w / (2 *(RWP + ERP + SCHP)), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  double R_bit_mux = tr_R_on(g_tp.w_nmos_b_mux, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  double C_drain_sense_amp_iso = drain_C_(g_tp.w_iso, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  double R_sense_amp_iso = tr_R_on(g_tp.w_iso, PCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  double C_sense_amp_latch = gate_C(g_tp.w_sense_p + g_tp.w_sense_n, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_sense_n, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_sense_p, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  double C_drain_sense_amp_mux = drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
 
   if (is_dram)
   {
@@ -1043,7 +1250,7 @@ double Mat::compute_bitline_delay(double inrisetime)
     tstep = 2.3 * fraction * r_dev *
       (g_tp.dram_cell_C * (C_bl + 2*C_drain_sense_amp_iso + C_sense_amp_latch + C_drain_sense_amp_mux)) /
       (g_tp.dram_cell_C + (C_bl + 2*C_drain_sense_amp_iso + C_sense_amp_latch + C_drain_sense_amp_mux));
-    delay_writeback = tstep;
+    delay_writeback = tstep; // [한국어] 세부 지연 항목 갱신 [s]
     dynRdEnergy += (C_bl + 2*C_drain_sense_amp_iso + C_sense_amp_latch + C_drain_sense_amp_mux) *
       (g_tp.dram_cell_Vdd / 2) * g_tp.dram_cell_Vdd /* subarray.num_cols * num_subarrays_per_mat*/;
     dynWriteEnergy += (C_bl + 2*C_drain_sense_amp_iso + C_sense_amp_latch) *
@@ -1081,7 +1288,7 @@ double Mat::compute_bitline_delay(double inrisetime)
           num_act_mats_hor_dir * C_bl) * g_tp.sram_cell.Vdd * g_tp.sram_cell.Vdd*2;
 
     }
-    tstep = tau * log(V_b_pre / (V_b_pre - dp.V_b_sense));
+    tstep = tau * log(V_b_pre / (V_b_pre - dp.V_b_sense)); // [한국어] RC 충방전 시간 계산을 위한 로그 연산
     power_bitline.readOp.leakage =
       leak_power_cc_inverters_sram_cell +
       leak_power_acc_tr_RW_or_WR_port_sram_cell +
@@ -1102,11 +1309,11 @@ double Mat::compute_bitline_delay(double inrisetime)
   double m = V_wl / inrisetime;
   if (tstep <= (0.5 * (V_wl - v_th_mem_cell) / m))
   {
-    delay_bitline = sqrt(2 * tstep * (V_wl - v_th_mem_cell)/ m);
+    delay_bitline = sqrt(2 * tstep * (V_wl - v_th_mem_cell)/ m); // [한국어] 세부 지연 항목 갱신 [s]
   }
   else
   {
-    delay_bitline = tstep + (V_wl - v_th_mem_cell) / (2 * m);
+    delay_bitline = tstep + (V_wl - v_th_mem_cell) / (2 * m); // [한국어] 세부 지연 항목 갱신 [s]
   }
 
   bool is_fa = (dp.fully_assoc) ? true : false;
@@ -1123,6 +1330,21 @@ double Mat::compute_bitline_delay(double inrisetime)
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_sa_delay - 센스앰프 지연 및 전력 계산
+ *
+ * @inrisetime: 비트라인이 SA 입력에 도달한 후의 rise time [s]
+ * @return    : SA 출력 확정 후의 rise time [s]
+ *
+ * SA의 iso/enable/n/p 트랜지스터 누설 전류를 바탕으로 open/closed page 상태의
+ * 누설 전력을 계산하고, SA 출력 부하 커패시턴스(C_ld)와 gm_sense_amp_latch로
+ * 재생(regeneration) 지연 tau를 구한다. delay_sa = tau * ln(Vdd/V_b_sense),
+ * 동적 에너지는 C_ld * Vdd^2 형태로 계산된다.
+ *
+ * 호출 체인: Mat::compute_delays() → [compute_sa_delay()]
+ */
 double Mat::compute_sa_delay(double inrisetime)
 {
   //int num_sa_subarray = subarray.num_cols / deg_bl_muxing; //in a subarray
@@ -1145,13 +1367,13 @@ double Mat::compute_sa_delay(double inrisetime)
   // sense amplifier has to drive logic in "data out driver" and sense precharge load.
   // load seen by sense amp. New delay model for sense amp that is sensitive to both the output time
   //constant as well as the magnitude of input differential voltage.
-  double C_ld = gate_C(g_tp.w_sense_p + g_tp.w_sense_n, 0, is_dram) +
-    drain_C_(g_tp.w_sense_n, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) +
-    drain_C_(g_tp.w_sense_p, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) +
-    drain_C_(g_tp.w_iso,PCH,1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) +
-    drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram);
+  double C_ld = gate_C(g_tp.w_sense_p + g_tp.w_sense_n, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_sense_n, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_sense_p, PCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_iso,PCH,1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
   double tau = C_ld / g_tp.gm_sense_amp_latch;
-  delay_sa = tau * log(g_tp.peri_global.Vdd / dp.V_b_sense);
+  delay_sa = tau * log(g_tp.peri_global.Vdd / dp.V_b_sense); // [한국어] 세부 지연 항목 갱신 [s]
   power_sa.readOp.dynamic = C_ld * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd /* num_sa_subarray
                             num_subarrays_per_mat * num_act_mats_hor_dir*/;
   power_sa.readOp.leakage = lkgIdle * g_tp.peri_global.Vdd;
@@ -1162,62 +1384,77 @@ double Mat::compute_sa_delay(double inrisetime)
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_subarray_out_drv - 서브어레이 출력 드라이버 지연·전력 계산
+ *
+ * @inrisetime: SA 출력 신호의 rise time [s]
+ * @return    : 출력 드라이버를 통과한 후의 rise time [s]
+ *
+ * SA mux pass 트랜지스터 → 인버터 버퍼 → 2차 SA mux pass 트랜지스터 →
+ * 최종 출력 드라이버로 이어지는 4단계 지연을 Horowitz 모델로 누적한다.
+ * 각 단의 커패시턴스와 트랜지스터 온-저항을 기반으로 동적 에너지와
+ * 누설/게이트 누설 전력을 power_subarray_out_drv에 누적한다.
+ *
+ * 호출 체인: Mat::compute_delays() → [compute_subarray_out_drv()]
+ */
 double Mat::compute_subarray_out_drv(double inrisetime)
 {
   double C_ld, rd, tf, this_delay;
-  double p_to_n_sz_r = pmos_to_nmos_sz_ratio(is_dram);
+  double p_to_n_sz_r = pmos_to_nmos_sz_ratio(is_dram); // [한국어] PMOS/NMOS 폭 비율 계산
 
   // delay of signal through pass-transistor of first level of sense-amp mux to input of inverter-buffer.
-  rd = tr_R_on(g_tp.w_nmos_sa_mux, NCH, 1, is_dram);
-  C_ld = dp.Ndsam_lev_1 * drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) +
-    gate_C(g_tp.min_w_nmos_ + p_to_n_sz_r * g_tp.min_w_nmos_, 0.0, is_dram);
+  rd = tr_R_on(g_tp.w_nmos_sa_mux, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  C_ld = dp.Ndsam_lev_1 * drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    gate_C(g_tp.min_w_nmos_ + p_to_n_sz_r * g_tp.min_w_nmos_, 0.0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * C_ld;
-  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
+  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   delay_subarray_out_drv += this_delay;
   inrisetime = this_delay/(1.0 - 0.5);
   power_subarray_out_drv.readOp.dynamic += C_ld * 0.5 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
   power_subarray_out_drv.readOp.leakage += 0;  // for now, let leakage of the pass transistor be 0
-  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.w_nmos_sa_mux, 0, 1, nmos)* g_tp.peri_global.Vdd;
+  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.w_nmos_sa_mux, 0, 1, nmos)* g_tp.peri_global.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
   // delay of signal through inverter-buffer to second level of sense-amp mux.
   // internal delay of buffer
-  rd = tr_R_on(g_tp.min_w_nmos_, NCH, 1, is_dram);
-  C_ld = drain_C_(g_tp.min_w_nmos_, NCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    drain_C_(p_to_n_sz_r * g_tp.min_w_nmos_, PCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    gate_C(g_tp.min_w_nmos_ + p_to_n_sz_r * g_tp.min_w_nmos_, 0.0, is_dram);
+  rd = tr_R_on(g_tp.min_w_nmos_, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  C_ld = drain_C_(g_tp.min_w_nmos_, NCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(p_to_n_sz_r * g_tp.min_w_nmos_, PCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    gate_C(g_tp.min_w_nmos_ + p_to_n_sz_r * g_tp.min_w_nmos_, 0.0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * C_ld;
-  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
+  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   delay_subarray_out_drv += this_delay;
   inrisetime = this_delay/(1.0 - 0.5);
   power_subarray_out_drv.readOp.dynamic      += C_ld * 0.5 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
-  power_subarray_out_drv.readOp.leakage      += cmos_Isub_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv, is_dram)* g_tp.peri_global.Vdd;
-  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd;
+  power_subarray_out_drv.readOp.leakage      += cmos_Isub_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv, is_dram)* g_tp.peri_global.Vdd; // [한국어] 서브-임계 누설 전류 계산 [A]
+  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
   // inverter driving drain of pass transistor of second level of sense-amp mux.
-  rd = tr_R_on(g_tp.min_w_nmos_, NCH, 1, is_dram);
-  C_ld = drain_C_(g_tp.min_w_nmos_, NCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    drain_C_(p_to_n_sz_r * g_tp.min_w_nmos_, PCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing * dp.Ndsam_lev_1 / (RWP + ERP + SCHP), is_dram);
+  rd = tr_R_on(g_tp.min_w_nmos_, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  C_ld = drain_C_(g_tp.min_w_nmos_, NCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(p_to_n_sz_r * g_tp.min_w_nmos_, PCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing * dp.Ndsam_lev_1 / (RWP + ERP + SCHP), is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
   tf = rd * C_ld;
-  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
+  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   delay_subarray_out_drv += this_delay;
   inrisetime = this_delay/(1.0 - 0.5);
   power_subarray_out_drv.readOp.dynamic      += C_ld * 0.5 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
-  power_subarray_out_drv.readOp.leakage      += cmos_Isub_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd;
-  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd;
+  power_subarray_out_drv.readOp.leakage      += cmos_Isub_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd; // [한국어] 서브-임계 누설 전류 계산 [A]
+  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.min_w_nmos_, p_to_n_sz_r * g_tp.min_w_nmos_, 1, inv)* g_tp.peri_global.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
 
   // delay of signal through pass-transistor to input of subarray output driver.
-  rd = tr_R_on(g_tp.w_nmos_sa_mux, NCH, 1, is_dram);
-  C_ld = dp.Ndsam_lev_2 * drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing * dp.Ndsam_lev_1 / (RWP + ERP + SCHP), is_dram) +
+  rd = tr_R_on(g_tp.w_nmos_sa_mux, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
+  C_ld = dp.Ndsam_lev_2 * drain_C_(g_tp.w_nmos_sa_mux, NCH, 1, 0, camFlag? cam_cell.w:cell.w * deg_bl_muxing * dp.Ndsam_lev_1 / (RWP + ERP + SCHP), is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
     //gate_C(subarray_out_wire->repeater_size * g_tp.min_w_nmos_ * (1 + p_to_n_sz_r), 0.0, is_dram);
-    gate_C(subarray_out_wire->repeater_size *(subarray_out_wire->wire_length/subarray_out_wire->repeater_spacing) * g_tp.min_w_nmos_ * (1 + p_to_n_sz_r), 0.0, is_dram);
+    gate_C(subarray_out_wire->repeater_size *(subarray_out_wire->wire_length/subarray_out_wire->repeater_spacing) * g_tp.min_w_nmos_ * (1 + p_to_n_sz_r), 0.0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   tf = rd * C_ld;
-  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE);
+  this_delay = horowitz(inrisetime, tf, 0.5, 0.5, RISE); // [한국어] Horowitz 모델로 단계 전파 지연 계산 [s]
   delay_subarray_out_drv += this_delay;
   inrisetime = this_delay/(1.0 - 0.5);
   power_subarray_out_drv.readOp.dynamic += C_ld * 0.5 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
   power_subarray_out_drv.readOp.leakage += 0;  // for now, let leakage of the pass transistor be 0
-  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.w_nmos_sa_mux, 0, 1, nmos)* g_tp.peri_global.Vdd;
+  power_subarray_out_drv.readOp.gate_leakage += cmos_Ig_leakage(g_tp.w_nmos_sa_mux, 0, 1, nmos)* g_tp.peri_global.Vdd; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
 
   return inrisetime;
@@ -1225,6 +1462,21 @@ double Mat::compute_subarray_out_drv(double inrisetime)
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_comparator_delay - 집합 연관 태그 비교기 지연·전력 계산
+ *
+ * @inrisetime: 비교기 입력 신호의 rise time [s]
+ * @return    : 비교기 출력 신호의 rise time [s]
+ *
+ * 4개의 quarter comparator를 병렬로 사용하는 XOR-기반 태그 비교기의
+ * 4단 인버터 체인 + NOR 가상 접지 평가 단계 지연을 계산한다.
+ * 연관도(A)와 태그 비트 수(tagbits_)를 반영하여 동적/누설/게이트 누설
+ * 전력을 power_comparator에 누적한다.
+ *
+ * 호출 체인: Mat::compute_delays() → [compute_comparator_delay()]
+ */
 double Mat::compute_comparator_delay(double inrisetime)
 {
   int A = g_ip->tag_assoc;
@@ -1233,64 +1485,64 @@ double Mat::compute_comparator_delay(double inrisetime)
   // a multiple of 4.
 
   /* First Inverter */
-  double Ceq = gate_C(g_tp.w_comp_inv_n2+g_tp.w_comp_inv_p2, 0, is_dram) +
-               drain_C_(g_tp.w_comp_inv_p1, PCH, 1, 1, g_tp.cell_h_def, is_dram) +
-               drain_C_(g_tp.w_comp_inv_n1, NCH, 1, 1, g_tp.cell_h_def, is_dram);
-  double Req = tr_R_on(g_tp.w_comp_inv_p1, PCH, 1, is_dram);
+  double Ceq = gate_C(g_tp.w_comp_inv_n2+g_tp.w_comp_inv_p2, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
+               drain_C_(g_tp.w_comp_inv_p1, PCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+               drain_C_(g_tp.w_comp_inv_n1, NCH, 1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  double Req = tr_R_on(g_tp.w_comp_inv_p1, PCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   double tf  = Req*Ceq;
-  double st1del = horowitz(inrisetime,tf,VTHCOMPINV,VTHCOMPINV,FALL);
+  double st1del = horowitz(inrisetime,tf,VTHCOMPINV,VTHCOMPINV,FALL); // [한국어] Horowitz RC 지연 모델 적용
   double nextinputtime = st1del/VTHCOMPINV;
   power_comparator.readOp.dynamic += 0.5 * Ceq * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd * 4 * A;
 
   //For each degree of associativity
   //there are 4 such quarter comparators
-  double lkgCurrent   = cmos_Isub_leakage(g_tp.w_comp_inv_n1, g_tp.w_comp_inv_p1, 1, inv, is_dram)* 4 * A;
-  double gatelkgCurrent = cmos_Ig_leakage(g_tp.w_comp_inv_n1, g_tp.w_comp_inv_p1, 1, inv, is_dram)* 4 * A;
+  double lkgCurrent   = cmos_Isub_leakage(g_tp.w_comp_inv_n1, g_tp.w_comp_inv_p1, 1, inv, is_dram)* 4 * A; // [한국어] 서브-임계 누설 전류 계산 [A]
+  double gatelkgCurrent = cmos_Ig_leakage(g_tp.w_comp_inv_n1, g_tp.w_comp_inv_p1, 1, inv, is_dram)* 4 * A; // [한국어] 게이트 절연막 누설 전류 계산 [A]
   /* Second Inverter */
-  Ceq = gate_C(g_tp.w_comp_inv_n3+g_tp.w_comp_inv_p3, 0, is_dram) +
-    drain_C_(g_tp.w_comp_inv_p2, PCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    drain_C_(g_tp.w_comp_inv_n2, NCH, 1, 1, g_tp.cell_h_def, is_dram);
-  Req = tr_R_on(g_tp.w_comp_inv_n2, NCH, 1, is_dram);
+  Ceq = gate_C(g_tp.w_comp_inv_n3+g_tp.w_comp_inv_p3, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_comp_inv_p2, PCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_comp_inv_n2, NCH, 1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  Req = tr_R_on(g_tp.w_comp_inv_n2, NCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   tf = Req*Ceq;
-  double st2del = horowitz(nextinputtime,tf,VTHCOMPINV,VTHCOMPINV,RISE);
+  double st2del = horowitz(nextinputtime,tf,VTHCOMPINV,VTHCOMPINV,RISE); // [한국어] Horowitz RC 지연 모델 적용
   nextinputtime = st2del/(1.0-VTHCOMPINV);
   power_comparator.readOp.dynamic += 0.5 * Ceq * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd * 4 * A;
-  lkgCurrent += cmos_Isub_leakage(g_tp.w_comp_inv_n2, g_tp.w_comp_inv_p2, 1, inv, is_dram)* 4 * A;
-  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_comp_inv_n2, g_tp.w_comp_inv_p2, 1, inv, is_dram)* 4 * A;
+  lkgCurrent += cmos_Isub_leakage(g_tp.w_comp_inv_n2, g_tp.w_comp_inv_p2, 1, inv, is_dram)* 4 * A; // [한국어] 서브-임계 누설 전류 계산 [A]
+  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_comp_inv_n2, g_tp.w_comp_inv_p2, 1, inv, is_dram)* 4 * A; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
   /* Third Inverter */
-  Ceq = gate_C(g_tp.w_eval_inv_n+g_tp.w_eval_inv_p, 0, is_dram) +
-    drain_C_(g_tp.w_comp_inv_p3, PCH, 1, 1, g_tp.cell_h_def, is_dram) +
-    drain_C_(g_tp.w_comp_inv_n3, NCH, 1, 1, g_tp.cell_h_def, is_dram);
-  Req = tr_R_on(g_tp.w_comp_inv_p3, PCH, 1, is_dram);
+  Ceq = gate_C(g_tp.w_eval_inv_n+g_tp.w_eval_inv_p, 0, is_dram) + // [한국어] 게이트 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_comp_inv_p3, PCH, 1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_comp_inv_n3, NCH, 1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  Req = tr_R_on(g_tp.w_comp_inv_p3, PCH, 1, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   tf = Req*Ceq;
-  double st3del = horowitz(nextinputtime,tf,VTHCOMPINV,VTHEVALINV,FALL);
+  double st3del = horowitz(nextinputtime,tf,VTHCOMPINV,VTHEVALINV,FALL); // [한국어] Horowitz RC 지연 모델 적용
   nextinputtime = st3del/(VTHEVALINV);
   power_comparator.readOp.dynamic += 0.5 * Ceq * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd * 4 * A;
-  lkgCurrent += cmos_Isub_leakage(g_tp.w_comp_inv_n3, g_tp.w_comp_inv_p3, 1, inv, is_dram)* 4 * A;
-  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_comp_inv_n3, g_tp.w_comp_inv_p3, 1, inv, is_dram)* 4 * A;
+  lkgCurrent += cmos_Isub_leakage(g_tp.w_comp_inv_n3, g_tp.w_comp_inv_p3, 1, inv, is_dram)* 4 * A; // [한국어] 서브-임계 누설 전류 계산 [A]
+  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_comp_inv_n3, g_tp.w_comp_inv_p3, 1, inv, is_dram)* 4 * A; // [한국어] 게이트 절연막 누설 전류 계산 [A]
 
   /* Final Inverter (virtual ground driver) discharging compare part */
-  double r1 = tr_R_on(g_tp.w_comp_n,NCH,2, is_dram);
+  double r1 = tr_R_on(g_tp.w_comp_n,NCH,2, is_dram); // [한국어] 트랜지스터 온-저항 계산 [Ohm]
   double r2 = tr_R_on(g_tp.w_eval_inv_n,NCH,1, is_dram); /* was switch */
-  double c2 = (tagbits_)*(drain_C_(g_tp.w_comp_n,NCH,1, 1, g_tp.cell_h_def, is_dram) +
-                   drain_C_(g_tp.w_comp_n,NCH,2, 1, g_tp.cell_h_def, is_dram)) +
-       drain_C_(g_tp.w_eval_inv_p,PCH,1, 1, g_tp.cell_h_def, is_dram) +
-       drain_C_(g_tp.w_eval_inv_n,NCH,1, 1, g_tp.cell_h_def, is_dram);
-  double c1 = (tagbits_)*(drain_C_(g_tp.w_comp_n,NCH,1, 1, g_tp.cell_h_def, is_dram) +
-                          drain_C_(g_tp.w_comp_n,NCH,2, 1, g_tp.cell_h_def, is_dram)) +
-    drain_C_(g_tp.w_comp_p,PCH,1, 1, g_tp.cell_h_def, is_dram) +
-    gate_C(WmuxdrvNANDn+WmuxdrvNANDp,0, is_dram);
+  double c2 = (tagbits_)*(drain_C_(g_tp.w_comp_n,NCH,1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+                   drain_C_(g_tp.w_comp_n,NCH,2, 1, g_tp.cell_h_def, is_dram)) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+       drain_C_(g_tp.w_eval_inv_p,PCH,1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+       drain_C_(g_tp.w_eval_inv_n,NCH,1, 1, g_tp.cell_h_def, is_dram); // [한국어] 드레인/확산 커패시턴스 계산 [F]
+  double c1 = (tagbits_)*(drain_C_(g_tp.w_comp_n,NCH,1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+                          drain_C_(g_tp.w_comp_n,NCH,2, 1, g_tp.cell_h_def, is_dram)) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    drain_C_(g_tp.w_comp_p,PCH,1, 1, g_tp.cell_h_def, is_dram) + // [한국어] 드레인/확산 커패시턴스 계산 [F]
+    gate_C(WmuxdrvNANDn+WmuxdrvNANDp,0, is_dram); // [한국어] 게이트 커패시턴스 계산 [F]
   power_comparator.readOp.dynamic += 0.5 * c2 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd * 4 * A;
   power_comparator.readOp.dynamic += c1 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd *  (A - 1);
-  lkgCurrent += cmos_Isub_leakage(g_tp.w_eval_inv_n, g_tp.w_eval_inv_p, 1, inv, is_dram)* 4 * A;
+  lkgCurrent += cmos_Isub_leakage(g_tp.w_eval_inv_n, g_tp.w_eval_inv_p, 1, inv, is_dram)* 4 * A; // [한국어] 서브-임계 누설 전류 계산 [A]
   lkgCurrent += cmos_Isub_leakage(g_tp.w_comp_n, g_tp.w_comp_n, 1, inv, is_dram)* 4 * A;  // stack factor of 0.2
 
-  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_eval_inv_n, g_tp.w_eval_inv_p, 1, inv, is_dram)* 4 * A;
+  gatelkgCurrent += cmos_Ig_leakage(g_tp.w_eval_inv_n, g_tp.w_eval_inv_p, 1, inv, is_dram)* 4 * A; // [한국어] 게이트 절연막 누설 전류 계산 [A]
   gatelkgCurrent += cmos_Ig_leakage(g_tp.w_comp_n, g_tp.w_comp_n, 1, inv, is_dram)* 4 * A;//for gate leakage this equals to a inverter
 
   /* time to go to threshold of mux driver */
-  double tstep = (r2*c2+(r1+r2)*c1)*log(1.0/VTHMUXNAND);
+  double tstep = (r2*c2+(r1+r2)*c1)*log(1.0/VTHMUXNAND); // [한국어] RC 충방전 시간 계산을 위한 로그 연산
   /* take into account non-zero input rise time */
   double m = g_tp.peri_global.Vdd/nextinputtime;
   double Tcomparatorni;
@@ -1300,13 +1552,13 @@ double Mat::compute_comparator_delay(double inrisetime)
     double a = m;
     double b = 2*((g_tp.peri_global.Vdd*VTHEVALINV)-g_tp.peri_global.Vth);
     double c = -2*(tstep)*(g_tp.peri_global.Vdd-g_tp.peri_global.Vth)+1/m*((g_tp.peri_global.Vdd*VTHEVALINV)-g_tp.peri_global.Vth)*((g_tp.peri_global.Vdd*VTHEVALINV)-g_tp.peri_global.Vth);
-    Tcomparatorni = (-b+sqrt(b*b-4*a*c))/(2*a);
+    Tcomparatorni = (-b+sqrt(b*b-4*a*c))/(2*a); // [한국어] 제곱근 연산 (반복기 최적화 등)
   }
   else
   {
     Tcomparatorni = (tstep) + (g_tp.peri_global.Vdd+g_tp.peri_global.Vth)/(2*m) - (g_tp.peri_global.Vdd*VTHEVALINV)/m;
   }
-  delay_comparator = Tcomparatorni+st1del+st2del+st3del;
+  delay_comparator = Tcomparatorni+st1del+st2del+st3del; // [한국어] 세부 지연 항목 갱신 [s]
   power_comparator.readOp.leakage = lkgCurrent * g_tp.peri_global.Vdd;
   power_comparator.readOp.gate_leakage = gatelkgCurrent * g_tp.peri_global.Vdd;
 
@@ -1315,6 +1567,26 @@ double Mat::compute_comparator_delay(double inrisetime)
 
 
 
+
+/*
+ * [한국어]
+ * Mat::compute_power_energy - mat 내 모든 서브회로의 전력 집계
+ *
+ * @return: (void) — Component::power에 동적/누설/게이트 누설 전력 저장
+ *
+ * 동작 과정:
+ *   1) 예비디코더(predecoder) 동적 에너지를 power.readOp.dynamic에 누적한다.
+ *   2) SRAM/DRAM 모드: 비트라인 프리차지, SA, 비트라인, 서브어레이 출력 드라이버,
+ *      행/비트/SA mux 디코더, 비교기의 동적 에너지를 mat 단위로 스케일링해 합산한다.
+ *   3) FA 모드: 일반 읽기/쓰기 에너지와 더불어 CAM 검색 관련 에너지
+ *      (searchline, matchline, precharge, ml_to_ram_wl_drv)를 searchOp에 집계한다.
+ *   4) pure_cam 모드: CAM 검색 에너지만 searchOp에, 일반 읽기/쓰기는 readOp에
+ *      기록한다.
+ *   5) 누설 전력과 게이트 누설 전력도 동일하게 모드별로 스케일링하여 합산한다.
+ *
+ * 호출 체인:
+ *   UCA::compute_power_energy() → [Mat::compute_power_energy()]
+ */
 void Mat::compute_power_energy()
 {
 	//for cam and FA, power.readOp is the plain read power, power.searchOp is the associative search related power
@@ -1322,7 +1594,7 @@ void Mat::compute_power_energy()
 	//when plain read/write only one subarray in a single mat is active.
 
     // add energy consumed in predecoder drivers. This unit is shared by all subarrays in a mat.
-  power.readOp.dynamic += r_predec->power.readOp.dynamic +
+  power.readOp.dynamic += r_predec->power.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
                           b_mux_predec->power.readOp.dynamic +
                           sa_mux_lev_1_predec->power.readOp.dynamic +
                           sa_mux_lev_2_predec->power.readOp.dynamic;
@@ -1352,12 +1624,12 @@ void Mat::compute_power_energy()
 	  power_subarray_out_drv.readOp.dynamic =
 		  (power_subarray_out_drv.readOp.dynamic + subarray_out_wire->power.readOp.dynamic) * num_do_b_mat;
 
-	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic +
+	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          power_sa.readOp.dynamic +
 	                          power_bitline.readOp.dynamic +
 	                          power_subarray_out_drv.readOp.dynamic;
 
-	  power.readOp.dynamic += power_row_decoders.readOp.dynamic +
+	  power.readOp.dynamic += power_row_decoders.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          bit_mux_dec->power.readOp.dynamic +
 	                          sa_mux_lev_1_dec->power.readOp.dynamic +
 	                          sa_mux_lev_2_dec->power.readOp.dynamic +
@@ -1392,12 +1664,12 @@ void Mat::compute_power_energy()
 		  (power_subarray_out_drv.readOp.dynamic + subarray_out_wire->power.readOp.dynamic) * num_do_b_mat;
 
 
-	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic +
+	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          power_sa.readOp.dynamic +
 	                          power_bitline.readOp.dynamic +
 	                          power_subarray_out_drv.readOp.dynamic;
 
-	  power.readOp.dynamic += power_row_decoders.readOp.dynamic +
+	  power.readOp.dynamic += power_row_decoders.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          bit_mux_dec->power.readOp.dynamic +
 	                          sa_mux_lev_1_dec->power.readOp.dynamic +
 	                          sa_mux_lev_2_dec->power.readOp.dynamic +
@@ -1419,7 +1691,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.dynamic +=power_searchline.searchOp.dynamic;
 	  power_cam_all_active.searchOp.dynamic +=power_matchline_precharge.searchOp.dynamic;
 
-	  power.searchOp.dynamic += power_cam_all_active.searchOp.dynamic;
+	  power.searchOp.dynamic += power_cam_all_active.searchOp.dynamic; // [한국어] 검색 동작(searchOp) 동적 에너지 누적 [J]
 	  //power.searchOp.dynamic += ml_to_ram_wl_drv->power.readOp.dynamic;
 
   }
@@ -1445,12 +1717,12 @@ void Mat::compute_power_energy()
 	  power_subarray_out_drv.readOp.dynamic =
 	  		  (power_subarray_out_drv.readOp.dynamic + subarray_out_wire->power.readOp.dynamic) * num_do_b_mat;
 
-	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic +
+	  power.readOp.dynamic += power_bl_precharge_eq_drv.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          power_sa.readOp.dynamic +
 	                          power_bitline.readOp.dynamic +
 	                          power_subarray_out_drv.readOp.dynamic;
 
-	  power.readOp.dynamic += power_row_decoders.readOp.dynamic +
+	  power.readOp.dynamic += power_row_decoders.readOp.dynamic + // [한국어] 읽기 동작 동적 에너지 누적 [J]
 	                          bit_mux_dec->power.readOp.dynamic +
 	                          sa_mux_lev_1_dec->power.readOp.dynamic +
 	                          sa_mux_lev_2_dec->power.readOp.dynamic +
@@ -1473,7 +1745,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.dynamic +=power_searchline.searchOp.dynamic;
 	  power_cam_all_active.searchOp.dynamic +=power_matchline_precharge.searchOp.dynamic;
 
-	  power.searchOp.dynamic += power_cam_all_active.searchOp.dynamic;
+	  power.searchOp.dynamic += power_cam_all_active.searchOp.dynamic; // [한국어] 검색 동작(searchOp) 동적 에너지 누적 [J]
 	  //power.searchOp.dynamic += ml_to_ram_wl_drv->power.readOp.dynamic;
 
   }
@@ -1494,14 +1766,14 @@ void Mat::compute_power_energy()
       (power_subarray_out_drv.readOp.leakage + subarray_out_wire->power.readOp.leakage) *
       number_output_drivers_subarray * num_subarrays_per_mat * (RWP + ERP);
 
-    power.readOp.leakage += power_bitline.readOp.leakage +
+    power.readOp.leakage += power_bitline.readOp.leakage + // [한국어] 읽기 동작 누설 전력 누적 [W]
                             power_bl_precharge_eq_drv.readOp.leakage +
                             power_sa.readOp.leakage +
                             power_subarray_out_drv.readOp.leakage;
     //cout<<"leakage"<<power.readOp.leakage<<endl;
 
     power_comparator.readOp.leakage *= num_do_b_mat * (RWP + ERP);
-    power.readOp.leakage += power_comparator.readOp.leakage;
+    power.readOp.leakage += power_comparator.readOp.leakage; // [한국어] 읽기 동작 누설 전력 누적 [W]
 
     //cout<<"leakage1"<<power.readOp.leakage<<endl;
 
@@ -1511,7 +1783,7 @@ void Mat::compute_power_energy()
     power_sa_mux_lev_1_decoders.readOp.leakage = sa_mux_lev_1_dec->power.readOp.leakage * dp.Ndsam_lev_1;
     power_sa_mux_lev_2_decoders.readOp.leakage = sa_mux_lev_2_dec->power.readOp.leakage * dp.Ndsam_lev_2;
 
-    power.readOp.leakage += r_predec->power.readOp.leakage +
+    power.readOp.leakage += r_predec->power.readOp.leakage + // [한국어] 읽기 동작 누설 전력 누적 [W]
                           b_mux_predec->power.readOp.leakage +
                           sa_mux_lev_1_predec->power.readOp.leakage +
                           sa_mux_lev_2_predec->power.readOp.leakage +
@@ -1531,14 +1803,14 @@ void Mat::compute_power_energy()
       (power_subarray_out_drv.readOp.gate_leakage + subarray_out_wire->power.readOp.gate_leakage) *
       number_output_drivers_subarray * num_subarrays_per_mat * (RWP + ERP);
 
-    power.readOp.gate_leakage += power_bitline.readOp.gate_leakage +
+    power.readOp.gate_leakage += power_bitline.readOp.gate_leakage + // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
                             power_bl_precharge_eq_drv.readOp.gate_leakage +
                             power_sa.readOp.gate_leakage +
                             power_subarray_out_drv.readOp.gate_leakage;
     //cout<<"leakage"<<power.readOp.leakage<<endl;
 
     power_comparator.readOp.gate_leakage *= num_do_b_mat * (RWP + ERP);
-    power.readOp.gate_leakage += power_comparator.readOp.gate_leakage;
+    power.readOp.gate_leakage += power_comparator.readOp.gate_leakage; // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
 
     //cout<<"leakage1"<<power.readOp.gate_leakage<<endl;
 
@@ -1548,7 +1820,7 @@ void Mat::compute_power_energy()
     power_sa_mux_lev_1_decoders.readOp.gate_leakage = sa_mux_lev_1_dec->power.readOp.gate_leakage * dp.Ndsam_lev_1;
     power_sa_mux_lev_2_decoders.readOp.gate_leakage = sa_mux_lev_2_dec->power.readOp.gate_leakage * dp.Ndsam_lev_2;
 
-    power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage +
+    power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage + // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
                           b_mux_predec->power.readOp.gate_leakage +
                           sa_mux_lev_1_predec->power.readOp.gate_leakage +
                           sa_mux_lev_2_predec->power.readOp.gate_leakage +
@@ -1573,7 +1845,7 @@ void Mat::compute_power_energy()
 		  (power_subarray_out_drv.readOp.leakage + subarray_out_wire->power.readOp.leakage) *
 		  number_output_drivers_subarray * num_subarrays_per_mat * (RWP + ERP + SCHP);
 
-	  power.readOp.leakage += power_bitline.readOp.leakage +
+	  power.readOp.leakage += power_bitline.readOp.leakage + // [한국어] 읽기 동작 누설 전력 누적 [W]
 	                          power_bl_precharge_eq_drv.readOp.leakage +
 	                          power_bl_precharge_eq_drv.searchOp.leakage +
 	                          power_sa.readOp.leakage +
@@ -1583,7 +1855,7 @@ void Mat::compute_power_energy()
 
 	  // leakage power
 	  power_row_decoders.readOp.leakage = row_dec->power.readOp.leakage * subarray.num_rows * num_subarrays_per_mat;
-	  power.readOp.leakage += r_predec->power.readOp.leakage +
+	  power.readOp.leakage += r_predec->power.readOp.leakage + // [한국어] 읽기 동작 누설 전력 누적 [W]
 	                          power_row_decoders.readOp.leakage;
 
 	  //cout<<"leakage5"<<power.readOp.leakage<<endl;
@@ -1595,7 +1867,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.leakage +=ml_precharge_drv->power.readOp.dynamic;
 	  power_cam_all_active.searchOp.leakage *= num_subarrays_per_mat;
 
-	  power.readOp.leakage += power_cam_all_active.searchOp.leakage;
+	  power.readOp.leakage += power_cam_all_active.searchOp.leakage; // [한국어] 읽기 동작 누설 전력 누적 [W]
 
 //	  cout<<"leakage6"<<power.readOp.leakage<<endl;
 
@@ -1612,7 +1884,7 @@ void Mat::compute_power_energy()
 		  (power_subarray_out_drv.readOp.gate_leakage + subarray_out_wire->power.readOp.gate_leakage) *
 		  number_output_drivers_subarray * num_subarrays_per_mat * (RWP + ERP + SCHP);
 
-	  power.readOp.gate_leakage += power_bitline.readOp.gate_leakage +
+	  power.readOp.gate_leakage += power_bitline.readOp.gate_leakage + // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
 	  power_bl_precharge_eq_drv.readOp.gate_leakage +
 	  power_bl_precharge_eq_drv.searchOp.gate_leakage +
 	  power_sa.readOp.gate_leakage +
@@ -1622,7 +1894,7 @@ void Mat::compute_power_energy()
 
 	  // gate_leakage power
 	  power_row_decoders.readOp.gate_leakage = row_dec->power.readOp.gate_leakage * subarray.num_rows * num_subarrays_per_mat;
-	  power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage +
+	  power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage + // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
 	  power_row_decoders.readOp.gate_leakage;
 
 	  //cout<<"leakage5"<<power.readOp.gate_leakage<<endl;
@@ -1634,7 +1906,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.gate_leakage +=ml_precharge_drv->power.readOp.dynamic;
 	  power_cam_all_active.searchOp.gate_leakage *= num_subarrays_per_mat;
 
-	  power.readOp.gate_leakage += power_cam_all_active.searchOp.gate_leakage;
+	  power.readOp.gate_leakage += power_cam_all_active.searchOp.gate_leakage; // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
 
   }
   else
@@ -1659,7 +1931,7 @@ void Mat::compute_power_energy()
 
 	  // leakage power
 	  power_row_decoders.readOp.leakage = row_dec->power.readOp.leakage * subarray.num_rows * num_subarrays_per_mat*(RWP + ERP + EWP);
-	  power.readOp.leakage += r_predec->power.readOp.leakage +
+	  power.readOp.leakage += r_predec->power.readOp.leakage + // [한국어] 읽기 동작 누설 전력 누적 [W]
 	                          power_row_decoders.readOp.leakage;
 
 	  //inside cam
@@ -1669,7 +1941,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.leakage +=ml_precharge_drv->power.readOp.dynamic;
 	  power_cam_all_active.searchOp.leakage *= num_subarrays_per_mat;
 
-	  power.readOp.leakage += power_cam_all_active.searchOp.leakage;
+	  power.readOp.leakage += power_cam_all_active.searchOp.leakage; // [한국어] 읽기 동작 누설 전력 누적 [W]
 
 	  //+++Below is gate leakage
 	  power_bl_precharge_eq_drv.searchOp.gate_leakage = cam_bl_precharge_eq_drv->power.readOp.gate_leakage * num_subarrays_per_mat;
@@ -1688,7 +1960,7 @@ void Mat::compute_power_energy()
 
 	  // gate_leakage power
 	  power_row_decoders.readOp.gate_leakage = row_dec->power.readOp.gate_leakage * subarray.num_rows * num_subarrays_per_mat*(RWP + ERP + EWP);
-	  power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage +
+	  power.readOp.gate_leakage += r_predec->power.readOp.gate_leakage + // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
 	                          power_row_decoders.readOp.gate_leakage;
 
 	  //inside cam
@@ -1698,7 +1970,7 @@ void Mat::compute_power_energy()
 	  power_cam_all_active.searchOp.gate_leakage +=ml_precharge_drv->power.readOp.dynamic;
 	  power_cam_all_active.searchOp.gate_leakage *= num_subarrays_per_mat;
 
-	  power.readOp.gate_leakage += power_cam_all_active.searchOp.gate_leakage;
+	  power.readOp.gate_leakage += power_cam_all_active.searchOp.gate_leakage; // [한국어] 읽기 동작 게이트 누설 전력 누적 [W]
   }
 }
 

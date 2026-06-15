@@ -35,13 +35,63 @@
  *University of British Columbia         * Ahmed ElTantawy, University of
  *British Columbia             *
  ********************************************************************/
-#include "logic.h"
-#define SP_BASE_POWER 0
-#define SFU_BASE_POWER 0
+/*
+ * [한국어 설명] AccelWattch 논리 회로/기능 유닛 전력 모델 구현 (logic.cc)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 McPAT 스타일의 디지털 논리 블록들 — Issue Window 선택 논리,
+ * 의존성/자원 충돌 검사기, DFF 셀, 파이프라인 레지스터, 기능 유닛(FPU/ALU/MUL),
+ * 미분화 코어(UndiffCore), 명령어 디코더 — 의 동적/정적 전력을 트랜지스터
+ * 수준에서 추정한다. CACTI의 gate_C/drain_C_ 함수와 cmos_Isub_leakage/
+ * cmos_Ig_leakage 함수를 사용해 0.8um/65nm/90nm 등의 공정 기준 데이터를
+ * 대상 기술 노드로 스케일링한다. AccelWattch에서 GPU SM 코어의 ALU/FPU/MUL,
+ * 파이프라인, 디코더 등의 전력이 이 파일을 통해 계산된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * Core 클래스가 이 파일의 클래스 객체를 멤버로 생성하여 개별 코어 전력을 구성한다.
+ *   Core::Core() → selection_logic, dep_resource_conflict_check, Pipeline,
+ *                   FunctionalUnit(FPU/ALU/MUL), inst_decoder, UndiffCore 등 생성
+ *   Core::computeEnergy() → 각 멤버의 computeEnergy()/compute() 호출
+ * 실행 컨텍스트: 호스트 유저스페이스, 시뮬레이션 초기화 단계 및 주기적 전력 집계.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: logic.h(클스 선언), XML_Parse.h(ParseXML, CoreDynParam),
+ *       basic_components.h(powerDef, Component, longer_channel_device_reduction),
+ *       cacti/basic_circuit.h(cmos_Isub_leakage, gate_C, drain_C_, Decoder, Predec 등),
+ *       cacti/parameter.h(InputParameter, g_tp, g_ip, init_interface).
+ * 의존 받음: core.cc(Core의 구성 요소), processor.cc(최종 집계).
+ * 데이터 흐름: XML/코어 파라미터 → 생성자 → 면적/누설/기준 동적 에너지 산출
+ *             → computeEnergy()에서 stats_t 접근수(access)를 곱해 TDP/런타임 전력 산출.
+ *
+ * === 주요 함수/클례스 요약 ===
+ * selection_logic::selection_power()      — issue-window 선택기의 OR/arbiter 전력.
+ * dep_resource_conflict_check             — Scoreboard/CAM 스타일 비교기 충돌 검사.
+ * DFFCell                                  — NAND2 기반 D 플립플롭 셀 전력.
+ * Pipeline                                 — 코어/비코어 파이프라인 레지스터 전력.
+ * FunctionalUnit                           — FPU/ALU/MUL/SFU 전력 (AccelWattch GPU 핵심).
+ * UndiffCore                               — 코어 공통 로직(front-end/back-end 등) 전력.
+ * inst_decoder                             — n-to-2^n 디코더 및 x86 시퀀서 전력.
+ * leakage_feedback()                      — 온도 변화에 따른 누설 재계산.
+ */
+#include "logic.h"           // [한국어] logic.h 클래스 선언 (selection_logic, FunctionalUnit 등)
+#define SP_BASE_POWER 0  // [한국어] AccelWattch GPU SP base power off/placeholder
+#define SFU_BASE_POWER 0  // [한국어] AccelWattch GPU SFU base power off/placeholder
 //.67
 
 // extern double exClockRate;
 // selection_logic
+/*
+ * [한국어]
+ * selection_logic::selection_logic - Issue Window 선택 논리 생성자
+ *
+ * @configure_interface: CACTI InputParameter (공정/전압/온도).
+ * @device_ty_, core_ty_: 장치/코어 유형 — 장채널 누설 보정에 사용.
+ * @return: (생성자) — power.readOp에 동적/누설/게이트 누설 저장.
+ *
+ * 설정값을 복사하고 CACTI를 초기화한 뒤, selection_power()로 선택 논리의
+ * OR/arbiter/encoder 전력을 계산한다. 소켓 효과(sckt_co_eff)와 장채널
+ * 누설 보정을 적용한다.
+ */
 selection_logic::selection_logic(bool _is_default, int win_entries_,
                                  int issue_width_,
                                  const InputParameter *configure_interface,
@@ -59,8 +109,8 @@ selection_logic::selection_logic(bool _is_default, int win_entries_,
   // init_tech_params(l_ip.F_sz_um, false);
   // win_entries=numIBEntries;//IQentries;
   // issue_width=issueWidth;
-  selection_power();
-  double sckRation = g_tp.sckt_co_eff;
+  selection_power();  // [한국어] 선택 논리(우선순위 인코더 + OR) 전력 계산
+  double sckRation = g_tp.sckt_co_eff;  // [한국어] 소켓/IO 드라이버 오버헤드 계수
   power.readOp.dynamic *= sckRation;
   power.writeOp.dynamic *= sckRation;
   power.searchOp.dynamic *= sckRation;
@@ -71,12 +121,23 @@ selection_logic::selection_logic(bool _is_default, int win_entries_,
       power.readOp.leakage * long_channel_device_reduction;
 }
 
+/*
+ * [한국어]
+ * selection_logic::selection_power - 비용 효율적인 슈퍼스칼라 선택기 전력
+ *
+ * TR pp.27-31 기반: 4입력 OR(anyreq), 4비트 우선순위 인코더, enable/grant
+ * 인버터 체인의 캐패시턴스를 합산하여 동적 에너지를 산출한다. win_entries가
+ * 4를 초과하면 트리 arbiter 개수(num_arbiter)를 증가시킨다.
+ * 동적 에너지에 2를 곱하는 이유는 arbitration 신호가 왕복(round trip)하기
+ * 때문이다.
+ */
 void selection_logic::selection_power() {  // based on cost effective
                                            // superscalar processor TR pp27-31
   double Ctotal, Cor, Cpencode;
   int num_arbiter;
   double WSelORn, WSelORprequ, WSelPn, WSelPp, WSelEnn, WSelEnp;
 
+  // [한국어] 아래 트랜지스터 폭은 0.8um 공정 기준값을 현재 기술 노드(F_sz_um)로 비례 스케일링한 것이다.
   // TODO: the 0.8um process data is used.
   WSelORn =
       12.5 * l_ip.F_sz_um;  // this was 10 micron for the 0.8 micron process
@@ -90,8 +151,9 @@ void selection_logic::selection_power() {  // based on cost effective
   WSelEnp =
       12.5 * l_ip.F_sz_um;  // this was 10 micron for the 0.8 micron process
 
-  Ctotal = 0;
+  Ctotal = 0;  // [한국어] 누적 캐패시턴스 초기화
   num_arbiter = 1;
+  // [한국어] 발행 가능 슬롯 수가 4를 초과하면 4진 트리 우선순위 arbiter 추가
   while (win_entries > 4) {
     win_entries = (int)ceil((double)win_entries / 4.0);
     num_arbiter += win_entries;
@@ -119,12 +181,12 @@ void selection_logic::selection_power() {  // based on cost effective
       (2 * 4 + 2 * 3 + 2 * 2 + 2) *
           gate_C(WSelPn + WSelPp, 10.0);  // requests signal
 
-  Ctotal += issue_width * num_arbiter * (Cor + Cpencode);
+  Ctotal += issue_width * num_arbiter * (Cor + Cpencode);  // [한국어] issue_width×arbiter 수×(OR+encoder cap)
 
-  power.readOp.dynamic =
+  power.readOp.dynamic =  // [한국어] 동적 에너지 = Ctotal × Vdd² × 2(왕복)
       Ctotal * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd *
       2;  // 2 means the abitration signal need to travel round trip
-  power.readOp.leakage =
+  power.readOp.leakage =  // [한국어] 누설 전력 = issue_width×arbiter 수 × (grant/enable/inverter NOR 누설 합) × Vdd
       issue_width * num_arbiter *
       (cmos_Isub_leakage(
            WSelPn, WSelPp, 2,
@@ -152,6 +214,18 @@ void selection_logic::selection_power() {  // based on cost effective
       g_tp.peri_global.Vdd;
 }
 
+/*
+ * [한국어]
+ * dep_resource_conflict_check::dep_resource_conflict_check - 의존성/자원 충돌 검사기 생성자
+ *
+ * @configure_interface: CACTI InputParameter.
+ * @dyn_p_: 코어 동적 파라미터 (decodeW, core_ty 등).
+ * @compare_bits_: 비교할 비트 수. Inorder/OOO 모두 opcode+reg_tag 비트 추가.
+ * @return: (생성자) — conflict_check_power()로 전력 산출.
+ *
+ * 트랜지스터 폭을 0.8um 기준에서 현재 공정으로 스케일링하고, Inorder/OOO에
+ * 따라 compare_bits에 opcode/tag 비트를 추가한 뒤 충돌 검사 전력을 계산한다.
+ */
 dep_resource_conflict_check::dep_resource_conflict_check(
     const InputParameter *configure_interface, const CoreDynParam &dyn_p_,
     int compare_bits_, bool _is_default)
@@ -174,22 +248,33 @@ dep_resource_conflict_check::dep_resource_conflict_check(
 
   local_result = init_interface(&l_ip);
 
+  // [한국어] Inorder/OOO 모두 opcode(16) + shared resource(8) + REG TAG(8) 비트 추가
   if (coredynp.core_ty == Inorder)
+    // [한국어] 비교 비트에 opcode + shared resource + register tag 추가
     compare_bits += 16 + 8 + 8;  // TODO: opcode bits + log(shared resources) +
                                  // REG TAG BITS-->opcode comparator
   else
     compare_bits += 16 + 8 + 8;
 
-  conflict_check_power();
+  conflict_check_power();  // [한국어] 비교기/충돌 검사 전력 계산
   double sckRation = g_tp.sckt_co_eff;
   power.readOp.dynamic *= sckRation;
   power.writeOp.dynamic *= sckRation;
   power.searchOp.dynamic *= sckRation;
 }
 
+/*
+ * [한국어]
+ * dep_resource_conflict_check::conflict_check_power - Scoreboard/CAM 스타일 충돌 검사 전력
+ *
+ * 비교기 수는 decodeW 기준으로 source-to-dest 2(N²-N) + dest-to-dest (N²-N)로
+ * 계산한다. 각 비교기는 compare_bits×2개의 NMOS를 포함하며, 누설은
+ * simplified_nmos_leakage()로, 게이트 누설은 cmos_Ig_leakage()로 산출한다.
+ */
 void dep_resource_conflict_check::conflict_check_power() {
   double Ctotal;
   int num_comparators;
+  // [한국어] 비교기 수 = 3×(decodeW² - decodeW) (source→dest 2배 + dest→dest 1배)
   num_comparators =
       3 *
       ((coredynp.decodeW) * (coredynp.decodeW) -
@@ -197,9 +282,10 @@ void dep_resource_conflict_check::conflict_check_power() {
                            // (N*N-N) is used for dest to dest comparision.
   // When decode-width ==1, no dcl logic
 
-  Ctotal = num_comparators * compare_cap();
+  Ctotal = num_comparators * compare_cap();  // [한국어] 총 부하 = 비교기 수 × 단일 비교기 용량
   // printf("%i,%s\n",XML_interface->sys.core[0].predictor.predictor_entries,XML_interface->sys.core[0].predictor.prediction_scheme);
 
+  // [한국어] 동적 에너지 = Ctotal × Vdd² (AF/주파수는 외부 적용)
   power.readOp.dynamic =
       Ctotal * /*CLOCKRATE*/ g_tp.peri_global.Vdd * g_tp.peri_global.Vdd /*AF*/;
   power.readOp.leakage = num_comparators * compare_bits * 2 *
@@ -215,6 +301,13 @@ void dep_resource_conflict_check::conflict_check_power() {
 
 /* estimate comparator power consumption (this comparator is similar
    to the tag-match structure in a CAM */
+/*
+ * [한국어]
+ * dep_resource_conflict_check::compare_cap - CAM/tag-매치 스타일 비교기 용량
+ *
+ * 비교기 하단(비교 트랜지스터)과 상단(NOR match)의 드레인/게이트 용량을 합산.
+ * fan-in에 따라 큰 NOR 게이트의 WNORp를 재조정한다.
+ */
 double dep_resource_conflict_check::compare_cap() {
   double c1, c2;
 
@@ -236,6 +329,13 @@ double dep_resource_conflict_check::compare_cap() {
   return (c1 + c2);
 }
 
+/*
+ * [한국어]
+ * dep_resource_conflict_check::leakage_feedback - 온도 변화에 따른 누설 재계산
+ *
+ * @temperature: 새 절대 온도(K). 10K 단위로 반올림하여 CACTI 파라미터 갱신.
+ * @return: void — power.readOp.leakage, longer_channel_leakage, gate_leakage 갱신.
+ */
 void dep_resource_conflict_check::leakage_feedback(double temperature) {
   l_ip.temp = (unsigned int)round(temperature / 10.0) * 10;
   uca_org_t init_result = init_interface(&l_ip);  // init_result is dummy
@@ -259,6 +359,14 @@ void dep_resource_conflict_check::leakage_feedback(double temperature) {
 
 // TODO: add inverter and transmission gate base DFF.
 
+/*
+ * [한국어]
+ * DFFCell::DFFCell - NAND2 기반 D 플립플롭 셀 생성자
+ *
+ * 5개의 NAND2 + 1개의 NAND3 면적으로 DFF 면적을 추정한다. cell_load는
+ * 다음 단에 구동할 부하 캐패시턴스이며, compute_DFF_cell()에서 동적/정적
+ * 전력을 계산한다.
+ */
 DFFCell::DFFCell(bool _is_dram, double _WdecNANDn, double _WdecNANDp,
                  double _cell_load, const InputParameter *configure_interface)
     : is_dram(_is_dram),
@@ -272,6 +380,13 @@ DFFCell::DFFCell(bool _is_dram, double _WdecNANDn, double _WdecNANDp,
       compute_gate_area(NAND, 2, WdecNANDn, WdecNANDn, g_tp.cell_h_def));
 }
 
+/*
+ * [한국어]
+ * DFFCell::fpfp_node_cap - DFF 남부 노드 총 캐패시턴스
+ *
+ * @fan_in, fan_out: 입력/출력 팬 수.
+ * @return: 드레인 캡 + fan_out×게이트 캡.
+ */
 double DFFCell::fpfp_node_cap(unsigned int fan_in, unsigned int fan_out) {
   double Ctotal = 0;
   // printf("WdecNANDn = %E\n", WdecNANDn);
@@ -286,6 +401,14 @@ double DFFCell::fpfp_node_cap(unsigned int fan_in, unsigned int fan_out) {
   return Ctotal;
 }
 
+/*
+ * [한국어]
+ * DFFCell::compute_DFF_cell - DFF 남 남부/게이트/클록/유지 전력 계산
+ *
+ * 6개 남(NAND2×5 + NAND3×1)의 캐패시턴스를 계산하고, 0→1 전이(switch),
+ * 1 유지(keep_1), 0 유지(keep_0), 클록 충전(e_clock)별 에너지를 분리한다.
+ * 정적 전력은 NAND2 5개 + NAND3 1개의 누설/게이트 누설을 합산한다.
+ */
 void DFFCell::compute_DFF_cell() {
   double c1, c2, c3, c4, c5, c6;
   /* node 5 and node 6 are identical to node 1 in capacitance */
@@ -296,7 +419,8 @@ void DFFCell::compute_DFF_cell() {
 
   // cap-load of the clock signal in each Dff, actually the clock signal only
   // connected to one NAND2
-  clock_cap = 2 * gate_C(WdecNANDn + WdecNANDp, 0, is_dram);
+  clock_cap = 2 * gate_C(WdecNANDn + WdecNANDp, 0, is_dram);  // [한국어] 클록이 한 NAND2의 두 입력에 연결됨
+  // [한국어] 스위칭 에너지 = 6개 남 총합 × 0.5 × Vdd² + 2×외부 부하
   e_switch.readOp.dynamic += (c4 + c1 + c2 + c3 + c5 + c6 + 2 * cell_load) *
                              0.5 * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd;
   ;
@@ -323,6 +447,15 @@ void DFFCell::compute_DFF_cell() {
   // printf("leakage =%E\n",cmos_Ileak(1, is_dram) );
 }
 
+/*
+ * [한국어]
+ * Pipeline::Pipeline - 파이프라인 레지스터 생성자
+ *
+ * 코어 파이프라인(is_core_pipeline)이면 파이프라인 단계별 비트 수를
+ * CoreDynParam에서 추정(compute_stage_vector). 비코어 파이프라인이면
+ * XML pipeline_stages/per_stage_vector를 직접 사용한다.
+ * Embedded 프로세서가 아닐 경우 고성능 트랜지스터 폭을 사용한다.
+ */
 Pipeline::Pipeline(const InputParameter *configure_interface,
                    const CoreDynParam &dyn_p_, enum Device_ty device_ty_,
                    bool _is_core_pipeline, bool _is_default)
@@ -335,6 +468,7 @@ Pipeline::Pipeline(const InputParameter *configure_interface,
 
 {
   local_result = init_interface(&l_ip);
+  // [한국어] Embedded가 아니면 고성능 트랜지스터 폭 사용
   if (!coredynp.Embedded)
     process_ind = true;
   else
@@ -349,9 +483,17 @@ Pipeline::Pipeline(const InputParameter *configure_interface,
                      pmos_to_nmos_sz_ratio();  // this was  30 micron for the
                                                // 0.8 micron process
   load_per_pipeline_stage = 2 * gate_C(WNANDn + WNANDp, 0, false);
-  compute();
+  compute();  // [한국어] 파이프라인 레지스터 수 및 전력 최종 계산
 }
 
+/*
+ * [한국어]
+ * Pipeline::compute - 파이프라인 레지스터 면적·전력 합산
+ *
+ * 단일 DFF 셀 전력을 num_piperegs로 확장. McPAT은 최악의 경우를 가정해
+ * switch/keep_0/keep_1 상태를 평균(1/3)으로 처리한다. 소켓 효과와
+ * 매크로 레이아웃 오버헤드를 적용한다.
+ */
 void Pipeline::compute() {
   compute_stage_vector();
   DFFCell pipe_reg(false, WNANDn, WNANDp, load_per_pipeline_stage, &l_ip);
@@ -363,6 +505,7 @@ void Pipeline::compute() {
   // is to consider the harming distance of two consecutive signals, However
   // McPAT does not have plan to do this in near future as it focuses on worst
   // case power.
+  // [한국어] 파이프라인 레지스터 전력 = num_piperegs×(switch+keep0+keep1)/3 + 클록
   double pipe_reg_power =
       num_piperegs *
           (pipe_reg.e_switch.readOp.dynamic + pipe_reg.e_keep_0.readOp.dynamic +
@@ -375,7 +518,7 @@ void Pipeline::compute() {
   power.readOp.dynamic += pipe_reg_power;
   power.readOp.leakage += pipe_reg_leakage;
   power.readOp.gate_leakage += pipe_reg_gate_leakage;
-  area.set_area(num_piperegs * pipe_reg.area.get_area());
+  area.set_area(num_piperegs * pipe_reg.area.get_area());  // [한국어] DFF 면적 × 레지스터 수
 
   double long_channel_device_reduction =
       longer_channel_device_reduction(device_ty, coredynp.core_ty);
@@ -391,18 +534,29 @@ void Pipeline::compute() {
     area.set_area(area.get_area() * macro_layout_overhead);
 }
 
+/*
+ * [한국어]
+ * Pipeline::compute_stage_vector - 코어 파이프라인 단계별 비트 수 추정
+ *
+ * Inorder는 6단계, OOO는 12단계로 고정. 각 단계를 지나는 PC, 명령어,
+ * 물리/논리 레지스터 번호, opcode decode 신호(2^opcode_length) 등의 비트를
+ * 더하고, 제어/인터럽트 레지스터를 50% 추가 가정한 뒤 사용자가 지정한
+ * pipeline_stages로 재조정한다.
+ */
 void Pipeline::compute_stage_vector() {
   double num_stages, tot_stage_vector, per_stage_vector;
   int opcode_length =
       coredynp.x86 ? coredynp.micro_opcode_length : coredynp.opcode_length;
   // Hthread = thread_clock_gated? 1:num_thread;
 
+  // [한국어] 비코어 파이프라인: 사용자가 지정한 stages × per_stage_vector
   if (!is_core_pipeline) {
     num_piperegs = l_ip.pipeline_stages *
                    l_ip.per_stage_vector;  // The number of pipeline stages are
                                            // calculated based on the achievable
                                            // throughput and required throughput
   } else {
+    // [한국어] Inorder 코어: 6단계 파이프라인 (IF→ID→ThreadSEL→EXE→MEM→WB)
     if (coredynp.core_ty == Inorder) {
       /* assume 6 pipe stages and try to estimate bits per pipe stage */
       /* pipe stage 0/IF */
@@ -445,6 +599,7 @@ void Pipeline::compute_stage_vector() {
       num_stages = 6;
 
     } else {
+      // [한국어] OOO 코어: 12단계 파이프라인 (Fetch→Decode→Rename→IssueQ→Dispatch→RegRead→EXE→MEM→WB→CM)
       /* assume 12 stage pipe stages and try to estimate bits per pipe stage */
       /*OOO: Fetch, decode, rename, IssueQ, dispatch, regread, EXE, MEM, WB, CM
        */
@@ -512,7 +667,7 @@ void Pipeline::compute_stage_vector() {
 
     /* assume 50% extra in control registers and interrupt registers (rule of
      * thumb) */
-    num_piperegs = num_piperegs * 1.5;
+    num_piperegs = num_piperegs * 1.5;  // [한국어] 제어/인터럽트 레지스터 50% 추가
     tot_stage_vector = num_piperegs;
     per_stage_vector = tot_stage_vector / num_stages;
 
@@ -527,6 +682,19 @@ void Pipeline::compute_stage_vector() {
   }
 }
 
+/*
+ * [한국어]
+ * FunctionalUnit::FunctionalUnit - FPU/ALU/MUL 기능 유닛 생성자
+ *
+ * @fu_type_: FPU, ALU, MUL 중 하나. GPU SM의 SP/DP/SFU/INT ALU 모델링에 사용.
+ * @exClockRate: 실행 유닛 클록(Hz).
+ * @return: (생성자) — area_t, leakage, gate_leakage, per_access_energy, base_energy 초기화.
+ *
+ * Embedded 프로세서와 일반(고성능) 프로세서의 면적/누설 계수를 구분한다.
+ * FPU의 경우 2개 DP FPU가 1개 SP FPU로 결합되도록 num_fu/=2 처리.
+ * AccelWattch GPU 모드에서는 SP/ALU/SFU 전력 상수(SP_BASE_POWER,
+ * SFU_BASE_POWER)가 base_energy로 사용된다.
+ */
 FunctionalUnit::FunctionalUnit(ParseXML *XML_interface, int ithCore_,
                                InputParameter *interface_ip_,
                                const CoreDynParam &dyn_p_,
@@ -545,6 +713,7 @@ FunctionalUnit::FunctionalUnit(ParseXML *XML_interface, int ithCore_,
   // XML_interface=_XML_interface;
   uca_org_t result2;
   result2 = init_interface(&interface_ip);
+  // [한국어] Embedded CPU 모드와 고성능 CPU/GPU 모드 분기
   if (XML->sys.Embedded) {
     if (fu_type == FPU) {
       num_fu = coredynp.num_fpus;
@@ -585,6 +754,7 @@ FunctionalUnit::FunctionalUnit(ParseXML *XML_interface, int ithCore_,
       // FPU power from Sandia's processor sizing tech report
       FU_height =
           (18667 * num_fu) * interface_ip.F_sz_um;  // FPU from Sun's data
+    // [한국어] 정수 ALU: 71.85×71.85 um² 기준 × num_fu × logic scaling
     } else if (fu_type == ALU) {
       num_fu = coredynp.num_alus;
       // FIXME: The first area_t = is from updated McAPAT, the second is from
@@ -619,6 +789,7 @@ FunctionalUnit::FunctionalUnit(ParseXML *XML_interface, int ithCore_,
       // per_access_energy*=3;
       FU_height = (6222 * num_fu) * interface_ip.F_sz_um;  // integer ALU
 
+    // [한국어] 곱셈/나눗셈 유닛: divider/mul Sun 데이터 기반
     } else if (fu_type == MUL) {
       num_fu = coredynp.num_muls;
       area_t =
@@ -818,28 +989,40 @@ FunctionalUnit::FunctionalUnit(ParseXML *XML_interface, int ithCore_,
   //  C_ALU	  = 0.025e-9;//F
   //  C_EXEU  = 0.05e-9; //F
   //  C_FPU	  = 0.35e-9;//F
-  area.set_area(area_t * num_fu);
-  leakage *= num_fu;
+  area.set_area(area_t * num_fu);  // [한국어] 단위 FU 면적 × FU 개수
+  leakage *= num_fu;  // [한국어] 단위 누설 × FU 개수
   gate_leakage *= num_fu;
   double macro_layout_overhead = g_tp.macro_layout_overhead;
   //	if (!XML->sys.Embedded)
   area.set_area(area.get_area() * macro_layout_overhead);
 }
 
+/*
+ * [한국어]
+ * FunctionalUnit::computeEnergy - TDP/런타임 FU 전력 계산
+ *
+ * @is_tdp: true이면 TDP(peak) 모드, false이면 런타임 모드.
+ * @return: void — power/rt_power에 저장.
+ *
+ * TDP 모드에서는 FU 개수(num_fu)와 duty_cycle을, 런타임 모드에서는
+ * XML->sys.core[ithCore].{fpu,ialu,mul}_accesses를 사용. GPU 모드에서
+ * inactive lane 보정을 위해 FPU/SFU에 base_energy×(32-active_lanes)를
+ * 추가한다.
+ */
 void FunctionalUnit::computeEnergy(bool is_tdp) {
   executionTime =
       XML->sys.total_cycles / (XML->sys.target_core_clockrate * 1e6);  // Syed
   double pppm_t[4] = {1, 1, 1, 1};
   double FU_duty_cycle;
   if (is_tdp) {
-    set_pppm(pppm_t, 2, 2, 2, 2);  // 2 means two source operands needs to be
+    set_pppm(pppm_t, 2, 2, 2, 2);  // [한국어] 정수 명령당 2개 소스 오퍼랜드 전달 가정  // 2 means two source operands needs to be
                                    // passed for each int instruction.
     if (fu_type == FPU) {
       stats_t.readAc.access = num_fu;
       tdp_stats = stats_t;
       // Syed: FPU power numbers are already average
       // so activity factor is already accounted for
-      FU_duty_cycle = coredynp.FPU_duty_cycle;
+      FU_duty_cycle = coredynp.FPU_duty_cycle;  // [한국어] FPU 활성률
     } else if (fu_type == ALU) {
       stats_t.readAc.access = 1 * num_fu;
       tdp_stats = stats_t;
@@ -852,6 +1035,7 @@ void FunctionalUnit::computeEnergy(bool is_tdp) {
 
     // power.readOp.dynamic = base_energy/clockRate +
     // energy*stats_t.readAc.access;
+    // [한국어] 피크 동적 전력 = per_access_energy×접근수 + base_energy/clockRate
     power.readOp.dynamic =
         per_access_energy * stats_t.readAc.access + base_energy / clockRate;
     double sckRation = g_tp.sckt_co_eff;
@@ -870,15 +1054,18 @@ void FunctionalUnit::computeEnergy(bool is_tdp) {
     if (fu_type == FPU) {
       // Each access activates an equililant of a double-precision unit
       // so divide accesses into half
+      // [한국어] GPU FPU 실제 접근 수 → inactive lane 보정에 사용
       stats_t.readAc.access = XML->sys.core[ithCore].fpu_accesses;
       rtp_stats = stats_t;
       // cout<<"FPU: --accesses "<<stats_t.readAc.access <<endl;
 
     } else if (fu_type == ALU) {
+      // [한국어] GPU/CPU 정수 ALU 실제 접근 수
       stats_t.readAc.access = XML->sys.core[ithCore].ialu_accesses;
       rtp_stats = stats_t;
       // cout<<"ALU: --accesses "<<stats_t.readAc.access <<endl;
     } else if (fu_type == MUL) {
+      // [한국어] GPU/CPU 곱셈 유닛 실제 접근 수
       stats_t.readAc.access = XML->sys.core[ithCore].mul_accesses;
       rtp_stats = stats_t;
       // cout<<"MUL: --accesses "<<stats_t.readAc.access <<endl;
@@ -887,6 +1074,7 @@ void FunctionalUnit::computeEnergy(bool is_tdp) {
     // rt_power.readOp.dynamic = base_energy*executionTime +
     // energy*stats_t.readAc.access;
 
+    // [한국어] ALU 런타임 전력: per_access_energy×access + base_energy×실행시간
     if (fu_type == ALU) {
       rt_power.readOp.dynamic = per_access_energy * stats_t.readAc.access +
                                 base_energy * executionTime;
@@ -900,11 +1088,13 @@ void FunctionalUnit::computeEnergy(bool is_tdp) {
     rt_power.searchOp.dynamic *= sckRation;
     // cout<<"Power: "<<rt_power.readOp.dynamic<<endl;
     if (fu_type == FPU) {
+      // [한국어] FPU inactive lane 보정: 32개 lane 중 비활성 lane만큼 base_energy 추가
       rt_power.readOp.dynamic +=
           base_energy * executionTime *
           (32 - XML->sys.core[ithCore].sp_average_active_lanes);
     }
     if (fu_type == MUL) {
+      // [한국어] SFU inactive lane 보정
       if (XML->sys.core[ithCore].sfu_average_active_lanes >= 1)
         rt_power.readOp.dynamic +=
             base_energy * executionTime *
@@ -914,6 +1104,14 @@ void FunctionalUnit::computeEnergy(bool is_tdp) {
   } /* else */
 }
 
+/*
+ * [한국어]
+ * FunctionalUnit::displayEnergy - FPU/ALU/MUL 전력·면적 출력
+ *
+ * fu_type에 따라 "Floating Point Units", "Integer ALUs", "Complex ALUs"
+ * 헤더를 출력하고 면적, 피크 동적 전력, 누설, 게이트 누설, 런타임 전력을
+ * 보여준다.
+ */
 void FunctionalUnit::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   string indent_str(indent, ' ');
   string indent_str_next(indent + 2, ' ');
@@ -994,6 +1192,13 @@ void FunctionalUnit::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * FunctionalUnit::leakage_feedback - 온도 변화에 따른 FU 누설 재계산
+ *
+ * Embedded 모드와 유사한 면적 기준으로 FPU/ALU/MUL leakage/gate_leakage를
+ * 다시 계산하고 power에 저장한다.
+ */
 void FunctionalUnit::leakage_feedback(double temperature) {
   // Update the temperature and initialize the global interfaces.
   interface_ip.temp = (unsigned int)round(temperature / 10.0) * 10;
@@ -1061,6 +1266,15 @@ void FunctionalUnit::leakage_feedback(double temperature) {
       longer_channel_device_reduction(Core_device, coredynp.core_ty);
 }
 
+/*
+ * [한국어]
+ * UndiffCore::UndiffCore - 미분화 코어(undifferentiated core) 전력 모델
+ *
+ * 코어에서 ALU/FPU/레지스터 파일 등으로 명시 모델링되지 않는 나머지
+ * 로직(front-end, OoO 스케줄링, 제어 로직 등)의 면적과 누설 전력을
+ * 다항식/로그 피팅(Niagara, Merom, Penryn 등)으로 추정한다.
+ * 존재하지 않는 코어(exist==false)면 즉시 리턴.
+ */
 UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
                        InputParameter *interface_ip_,
                        const CoreDynParam &dyn_p_, bool exist_, bool embedded_)
@@ -1076,7 +1290,7 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
       exist(exist_)
 // is_default(_is_default)
 {
-  if (!exist) return;
+  if (!exist) return;  // [한국어] 해당 코어가 비활성이면 전력 계산 생략
   double undifferentiated_core = 0;
   double core_tx_density = 0;
   double pmos_to_nmos_sizing_r = pmos_to_nmos_sz_ratio();
@@ -1086,16 +1300,19 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
   result2 = init_interface(&interface_ip);
 
   // Compute undifferentiated core area at 90nm.
+  // [한국어] 고성능 코어: 다이 측정 기반 피팅 공식
   if (embedded == false) {
     // Based on the results of polynomial/log curve fitting based on
     // undifferentiated core of Niagara, Niagara2, Merom, Penyrn, Prescott,
     // Opteron die measurements
+    // [한국어] OOO 코어: pipeline_stage에 대한 로그 피팅
     if (core_ty == OOO) {
       // undifferentiated_core = (0.0764*pipeline_stage*pipeline_stage
       // -2.3685*pipeline_stage + 10.405);//OOO
       undifferentiated_core = (3.57 * log(pipeline_stage) - 1.2643) > 0
                                   ? (3.57 * log(pipeline_stage) - 1.2643)
                                   : 0;
+    // [한국어] Inorder 코어: pipeline_stage에 대한 로그 피팅
     } else if (core_ty == Inorder) {
       // undifferentiated_core = (0.1238*pipeline_stage + 7.2572)*0.9;//inorder
       undifferentiated_core = (-2.19 * log(pipeline_stage) + 6.55) > 0
@@ -1105,7 +1322,7 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
       cout << "invalid core type" << endl;
       exit(0);
     }
-    undifferentiated_core *= (1 + logtwo(num_hthreads) * 0.0716);
+    undifferentiated_core *= (1 + logtwo(num_hthreads) * 0.0716);  // [한국어] 하드웨어 스레드 수에 따른 면적 증가
   } else {
     // Based on the results in paper "parametrized processor models" Sandia Labs
     if (XML->sys.opt_clockrate)
@@ -1117,12 +1334,14 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
     undifferentiated_core *= (1 + logtwo(num_hthreads) * 0.0426);
   }
 
+  // [한국어] mm² → um² 변환 및 논리 면적 스케일링
   undifferentiated_core *= g_tp.scaling_factor.logic_scaling_co_eff *
                            1e6;  // change from mm^2 to um^2
   core_tx_density = g_tp.scaling_factor.core_tx_density;
   // undifferentiated_core 		    = 3*1e6;
   // undifferentiated_core			*=
   // g_tp.scaling_factor.logic_scaling_co_eff;//(g_ip->F_sz_um*g_ip->F_sz_um/0.09/0.09)*;
+  // [한국어] 미분화 코어 누설 = 면적 × 트랜지스터 밀도 × 단위 누설 × Vdd
   power.readOp.leakage =
       undifferentiated_core *
       (core_tx_density)*cmos_Isub_leakage(
@@ -1142,7 +1361,7 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
       power.readOp.leakage * long_channel_device_reduction;
   area.set_area(undifferentiated_core);
 
-  scktRatio = g_tp.sckt_co_eff;
+  scktRatio = g_tp.sckt_co_eff;  // [한국어] 소켓 오버헤드
   power.readOp.dynamic *= scktRatio;
   power.writeOp.dynamic *= scktRatio;
   power.searchOp.dynamic *= scktRatio;
@@ -1176,6 +1395,13 @@ UndiffCore::UndiffCore(ParseXML *XML_interface, int ithCore_,
   //		cout<<power.readOp.sc << "sc" << endl;
 }
 
+/*
+ * [한국어]
+ * UndiffCore::displayEnergy - 미분화 코어 전력·면적 출력
+ *
+ * TDP와 런타임 모드 모두에서 area, peak dynamic, leakage, gate leakage를
+ * 출력한다.
+ */
 void UndiffCore::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   string indent_str(indent, ' ');
   string indent_str_next(indent + 2, ' ');
@@ -1216,6 +1442,15 @@ void UndiffCore::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * inst_decoder::inst_decoder - 명령어 디코더 생성자
+ *
+ * RISC 디코더는 n-to-2^n 디코더로 근사하고, x86 CISC 디코더는 시퀀서가
+ * 2회 통과(squencer_passes=2)하도록 모델링한다. opcode_length가 18비트를
+ * 초과하면 세그먼트를 분할(num_decoder_segments)하고, Decoder/Predec 객체를
+ * 생성하여 면적/전력을 계산한다.
+ */
 inst_decoder::inst_decoder(bool _is_default,
                            const InputParameter *configure_interface,
                            int opcode_length_, int num_decoders_, bool x86_,
@@ -1260,16 +1495,17 @@ inst_decoder::inst_decoder(bool _is_default,
   cell.h = g_tp.cell_h_def;
   cell.w = g_tp.cell_h_def;
 
-  num_decoder_segments = (int)ceil(opcode_length / 18.0);
+  num_decoder_segments = (int)ceil(opcode_length / 18.0);  // [한국어] 18비트 이상이면 디코더 세그먼트 분할
   if (opcode_length > 18) opcode_length = 18;
-  num_decoded_signals = (int)pow(2.0, opcode_length);
+  num_decoded_signals = (int)pow(2.0, opcode_length);  // [한국어] 디코딩된 신호 수 = 2^opcode_length
   pmos_to_nmos_sizing_r = pmos_to_nmos_sz_ratio();
   load_nmos_width = g_tp.max_w_nmos_ / 2;
   load_pmos_width = g_tp.max_w_nmos_ * pmos_to_nmos_sizing_r;
+  // [한국어] 디코더 구동 부하: 1024개 게이트로 가정 (TODO: 재검토 필요)
   C_driver_load =
       1024 * gate_C(load_nmos_width + load_pmos_width, 0,
                     is_dram);  // TODO: this number 1024 needs to be revisited
-  R_wire_load = 3000 * l_ip.F_sz_um * g_tp.wire_outside_mat.R_per_um;
+  R_wire_load = 3000 * l_ip.F_sz_um * g_tp.wire_outside_mat.R_per_um;  // [한국어] 외부 와이어 저항
 
   final_dec = new Decoder(num_decoded_signals, false, C_driver_load,
                           R_wire_load, false /*is_fa*/, false /*is_dram*/,
@@ -1294,6 +1530,7 @@ inst_decoder::inst_decoder(bool _is_default,
 
   pre_dec = new Predec(predec_blk_drv1, predec_blk_drv2);
 
+  // [한국어] 최종 디코더 면적 = 단위 면적 × 신호 수 × 세그먼트 × 디코더 수
   double area_decoder = final_dec->area.get_area() * num_decoded_signals *
                         num_decoder_segments * num_decoders;
   // double w_decoder    = area_decoder / area.get_h();
@@ -1306,7 +1543,7 @@ inst_decoder::inst_decoder(bool _is_default,
   double chip_PR_overhead = g_tp.chip_layout_overhead;
   area.set_area(area.get_area() * macro_layout_overhead * chip_PR_overhead);
 
-  inst_decoder_delay_power();
+  inst_decoder_delay_power();  // [한국어] 디코더 동적/누설 전력 산출
 
   double sckRation = g_tp.sckt_co_eff;
   power.readOp.dynamic *= sckRation;
@@ -1319,6 +1556,13 @@ inst_decoder::inst_decoder(bool _is_default,
       power.readOp.leakage * long_channel_device_reduction;
 }
 
+/*
+ * [한국어]
+ * inst_decoder::inst_decoder_delay_power - 최종/사전 디코더 전력 합산
+ *
+ * set_pppm()으로 Predec/Final Decoder의 접근 패턴(ppcm)을 조정한 뒤
+ * power에 더한다. x86은 squencer_passes=2.
+ */
 void inst_decoder::inst_decoder_delay_power() {
   double pppm_t[4] = {1, 1, 1, 1};
   double squencer_passes = x86 ? 2 : 1;
@@ -1332,6 +1576,13 @@ void inst_decoder::inst_decoder_delay_power() {
            squencer_passes * num_decoder_segments);
   power = power + final_dec->power * pppm_t;
 }
+/*
+ * [한국어]
+ * inst_decoder::leakage_feedback - 온도 변화에 따른 디코더 누설 재계산
+ *
+ * Predec/Final Decoder의 leakage_feedback()을 호출한 뒤, TDP와 동일한
+ * ppcm 가중치로 power를 재구성한다.
+ */
 void inst_decoder::leakage_feedback(double temperature) {
   l_ip.temp = (unsigned int)round(temperature / 10.0) * 10;
   uca_org_t init_result = init_interface(&l_ip);  // init_result is dummy
@@ -1364,6 +1615,12 @@ void inst_decoder::leakage_feedback(double temperature) {
       power.readOp.leakage * long_channel_device_reduction;
 }
 
+/*
+ * [한국어]
+ * inst_decoder::~inst_decoder - 디코더 객체 메모리 해제
+ *
+ * CACTI uca_org_t cleanup과 Decoder/Predec 동적 할당 객체를 삭제한다.
+ */
 inst_decoder::~inst_decoder() {
   local_result.cleanup();
 

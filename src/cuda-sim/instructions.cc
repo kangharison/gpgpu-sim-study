@@ -297,10 +297,54 @@ int acc_float_offset(int index, int wmma_layout, int stride) {
 
 /* [한국어] 전방선언 — 이 파일 내에서 함수 정의보다 먼저 호출될 수 있는 함수들을 미리 선언.
  * C++ 컴파일러가 호출 지점에서 시그니처를 알 수 있도록 하기 위해 필요하다. */
+
+/*
+ * [한국어]
+ * inst_not_implemented - 구현되지 않은 PTX 명령어 처리 공통 함수
+ *
+ * @pI: 실행 중인 PTX 명령어
+ *
+ * 아직 구현되지 않은 명령어를 만났을 때 오류 메시지를 출력하고 abort()로 시뮬레이션을 중단한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ */
+
 void inst_not_implemented(const ptx_instruction *pI);  // [한국어] 미구현 명령어 처리 — 오류 메시지 출력 후 abort
+
+/*
+ * [한국어]
+ * srcOperandModifiers - 소스 피연산자 수정자 처리 (메모리/lohi/neg)
+ *
+ * @opData: 원본 소스 피연산자 값
+ * @opInfo: 소스 오퍼랜드 정보
+ * @dstInfo: 목적지 오퍼랜드 정보
+ * @type: PTX 데이터 타입
+ * @thread: 현재 실행 중인 PTX 스레드
+ * @return: 수정자가 적용된 피연산자 값
+ *
+ * 소스 오퍼랜드가 메모리 참조(global/shared/const)일 경우 메모리에서 값을 읽고,
+ * .lo/.hi 수식어에 따라 16비트를 추출하거나, .neg 수식어 시 부동소수점 부호를 반전한다.
+ * 실행 컨텍스트: 일부 명령어의 피연산자 준비 단계 (현재는 주석 처리된 곳이 많음).
+ */
+
 ptx_reg_t srcOperandModifiers(ptx_reg_t opData, operand_info opInfo,
                               operand_info dstInfo, unsigned type,
                               ptx_thread_info *thread);  // [한국어] 소스 피연산자 수식자 적용 (abs, neg 등) 후 값 반환
+
+/*
+ * [한국어]
+ * video_mem_instruction - PTX 비디오 메모리 명령어(vmax/vmin)의 공통 구현
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ * @op_code: VMAX(0) 또는 VMIN(1)
+ *
+ * PTX 비디오 메모리 연산 vmax/vmin을 S32 타입에 대해 처리한다.
+ * 두 피연산자의 max/min을 취한 뒤, atomic 옵션(max/min)이 있으면 c와 다시 비교한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   vmax_impl/vmin_impl → [video_mem_instruction] → set_operand_value()
+ */
 
 void video_mem_instruction(const ptx_instruction *pI, ptx_thread_info *thread,
                            int op_code);  // [한국어] 비디오 명령어(vabsdiff, vmin 등) 디스패처
@@ -4956,6 +5000,38 @@ void isspacep_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 }
 
 /*
+ * ============================================================================
+ * [한국어 설명] src/cuda-sim/instructions.cc lines 5001-8677: 잔여 PTX 명령어 구현
+ * ============================================================================
+ *
+ * 이 범위는 GPGPU-Sim 기능 시뮬레이션의 PTX 명령어 시맨틱 중 후반부를 담당한다.
+ * 앞선 범위(1-5000)에서 산술/비트/분기/변환/메모리 헬퍼 등을 다루었다면,
+ * 여기서는 다음 명령어들과 각종 보조 함수들을 구현한다:
+ *
+ *   - 메모리/Tensor Core: decode_space, ld_exec, ld/ldu, mma_st/mma_ld
+ *   - 수학/곱셈: lg2, mad24, mad/madp/madc/mad_def, mul24, mul, rcp, rsqrt,
+ *              sad, sin, sqrt
+ *   - 선택/비교: max, min, selp, setp, set, slct
+ *   - 데이터 이동/비트: mov, neg, nandn, norn, not, or, orn, popc, prmt, shf,
+ *                     shl, shr, xor
+ *   - 제어/동기화: membar, ret/retp, ssy, sst, st, sub/subc, nop
+ *   - 서피스/텍스처/비디오/투표: suld/sured/sust/suq, tex/txq,
+ *                              vabsdiff/vadd/vmad/vmax/vmin/vset/vshl/vshr/vsub,
+ *                              vote, activemask
+ *   - 공통 헬퍼: isFloat, CmpOp, isNaN, read_byte, prmt_mode_present,
+ *              reduce_precision, wrap/clamp, tex_linf_sampling,
+ *              textureNormalizeOutput, srcOperandModifiers,
+ *              video_mem_instruction, inst_not_implemented
+ *
+ * 대부분의 명령어는 단일 스레드 관점에서 기능적 결과를 생성하며,
+ * 실제 사이클-레벨 동작(파이프라인 레이턴시, 메모리 타이밍, 베리어 동기화 등)은
+ * 상위 타이밍 모델(src/gpgpu-sim/shader.cc 등)에서 처리한다.
+ * 명령어별 레이턴스는 gpgpusim.config의 -ptx_opcode_latency_* / -ptx_opcode_initiation_*
+ * 옵션군으로 설정된다.
+ * ============================================================================
+ */
+
+/*
  * [한국어]
  * decode_space - 메모리 공간 타입을 실제 memory_space 객체와 HW 주소로 해석
  *
@@ -6144,21 +6220,40 @@ void min_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, d, i_type, thread, pI); // [한국어] 최소값 결과를 목적지 레지스터에 기록
 }
 
+/*
+ * [한국어]
+ * mov_impl - PTX `mov` 명령어 구현: 레지스터/상수/벡터 간 데이터 이동 및 pack/unpack
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입, 벡터 수식어 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `mov.type d, a` 명령어를 구현한다. 레지스터 값 복사, 상수 로드, 벡터 pack/unpack,
+ * predicate 리터럴 변환을 처리한다.
+ *   - 일반 mov: 소스 값을 그대로 목적지 레지스터에 복사한다.
+ *   - 벡터 mov: 여러 좁은 정수 요소(B8/B16/B32)를 하나의 B16/B32/B64 레지스터로 pack하거나
+ *     반대로 unpack한다.
+ *   - predicate 리터럴: PTX에서 0=false, 1=true이나 PTXPlus zero-flag 규칙에 따라 반전한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [mov_impl] → get_operand_value() / set_operand_value()
+ */
+
 void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  ptx_reg_t data;
+  ptx_reg_t data;  // [한국어] 결과를 저장할 레지스터 선언
 
-  const operand_info &dst = pI->dst();
-  const operand_info &src1 = pI->src1();
-  unsigned i_type = pI->get_type();
-  assert(src1.is_param_local() == 0);
+  const operand_info &dst = pI->dst();  // [한국어] 목적지 레지스터
+  const operand_info &src1 = pI->src1();  // [한국어] 소스 오퍼랜드
+  unsigned i_type = pI->get_type();  // [한국어] PTX 데이터 타입
+  assert(src1.is_param_local() == 0);  // [한국어] 로컬 param 직접 이동은 미지원
 
-  if ((src1.is_vector() || dst.is_vector()) && (i_type != BB64_TYPE) &&
+  if ((src1.is_vector() || dst.is_vector()) && (i_type != BB64_TYPE) &&  // [한국어] 벡터 pack/unpack 분기
       (i_type != BB128_TYPE) && (i_type != FF64_TYPE)) {
-    // pack or unpack operation
+    // pack or unpack operation  // [한국어] 벡터 pack 또는 unpack 연산
     unsigned nbits_to_move;
     ptx_reg_t tmp_bits;
 
-    switch (pI->get_type()) {
+    switch (pI->get_type()) {  // [한국어] pack/unpack 요소 크기 분기
       case B16_TYPE:
         nbits_to_move = 16;
         break;
@@ -6176,22 +6271,22 @@ void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
         break;
     }
 
-    if (src1.is_vector()) {
-      unsigned nelem = src1.get_vect_nelem();
+    if (src1.is_vector()) {  // [한국어] 소스가 벡터인 경우 pack
+      unsigned nelem = src1.get_vect_nelem();  // [한국어] 소스 벡터 요소 수
       ptx_reg_t v[4];
-      thread->get_vector_operand_values(src1, v, nelem);
+      thread->get_vector_operand_values(src1, v, nelem);  // [한국어] 벡터 요소 읽기
 
-      unsigned bits_per_src_elem = nbits_to_move / nelem;
+      unsigned bits_per_src_elem = nbits_to_move / nelem;  // [한국어] 소스 요소당 비트 수
       for (unsigned i = 0; i < nelem; i++) {
         switch (bits_per_src_elem) {
           case 8:
-            tmp_bits.u64 |= ((unsigned long long)(v[i].u8) << (8 * i));
+            tmp_bits.u64 |= ((unsigned long long)(v[i].u8) << (8 * i));  // [한국어] 요소를 누적 비트에 삽입
             break;
           case 16:
-            tmp_bits.u64 |= ((unsigned long long)(v[i].u16) << (16 * i));
+            tmp_bits.u64 |= ((unsigned long long)(v[i].u16) << (16 * i));  // [한국어] 요소를 누적 비트에 삽입
             break;
           case 32:
-            tmp_bits.u64 |= ((unsigned long long)(v[i].u32) << (32 * i));
+            tmp_bits.u64 |= ((unsigned long long)(v[i].u32) << (32 * i));  // [한국어] 요소를 누적 비트에 삽입
             break;
           default:
             printf(
@@ -6202,9 +6297,9 @@ void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
         }
       }
     } else {
-      data = thread->get_operand_value(src1, dst, i_type, thread, 1);
+      data = thread->get_operand_value(src1, dst, i_type, thread, 1);  // [한국어] 스칼라 소스 값 읽기
 
-      switch (pI->get_type()) {
+      switch (pI->get_type()) {  // [한국어] pack/unpack 요소 크기 분기
         case B16_TYPE:
           tmp_bits.u16 = data.u16;
           break;
@@ -6220,7 +6315,7 @@ void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       }
     }
 
-    if (dst.is_vector()) {
+    if (dst.is_vector()) {  // [한국어] 목적지가 벡터인 경우 unpack
       unsigned nelem = dst.get_vect_nelem();
       ptx_reg_t v[4];
       unsigned bits_per_dst_elem = nbits_to_move / nelem;
@@ -6245,7 +6340,7 @@ void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
             break;
         }
       }
-      thread->set_vector_operand_values(dst, v[0], v[1], v[2], v[3]);
+      thread->set_vector_operand_values(dst, v[0], v[1], v[2], v[3]);  // [한국어] 벡터 레지스터에 기록
     } else {
       thread->set_operand_value(dst, tmp_bits, i_type, thread, pI);
     }
@@ -6253,17 +6348,35 @@ void mov_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     // in ptx, literal input translate to predicate as 0 = false and 1 = true
     // we have adopted the opposite to simplify implementation of zero flags in
     // ptxplus
-    data = thread->get_operand_value(src1, dst, i_type, thread, 1);
+    data = thread->get_operand_value(src1, dst, i_type, thread, 1);  // [한국어] 스칼라 소스 값 읽기
 
     ptx_reg_t finaldata;
     finaldata.pred = (data.u32 == 0) ? 1 : 0;  // setting zero-flag in predicate
-    thread->set_operand_value(dst, finaldata, i_type, thread, pI);
+    thread->set_operand_value(dst, finaldata, i_type, thread, pI);  // [한국어] predicate 결과 기록
   } else {
-    data = thread->get_operand_value(src1, dst, i_type, thread, 1);
+    data = thread->get_operand_value(src1, dst, i_type, thread, 1);  // [한국어] 스칼라 소스 값 읽기
 
     thread->set_operand_value(dst, data, i_type, thread, pI);
   }
 }
+
+/*
+ * [한국어]
+ * mul24_impl - PTX `mul24` 명령어 구현: 24비트 곱셈
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, .hi/.lo, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `mul24.{hi|lo}.{s32|u32} d, a, b` 명령어를 구현한다.
+ * 실제 GPU는 24비트 입력을 사용하는 고속 곱셈 유닛을 사용하지만,
+ * GPGPU-Sim은 하위 24비트를 마스크한 뒤 32/64비트 곱셈으로 에뮬레이션한다.
+ * S32의 경우 부호 확장을 위해 비트 23을 기준으로 상위 비트를 채운다.
+ * .hi 모드는 결과를 16비트 우시프트, .lo 모드는 하위 32비트를 반환한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [mul24_impl] → mask_and/mask_or → set_operand_value()
+ */
 
 void mul24_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -6279,17 +6392,17 @@ void mul24_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // src1_data = srcOperandModifiers(src1_data, src1, dst, i_type, thread);
   // src2_data = srcOperandModifiers(src2_data, src2, dst, i_type, thread);
 
-  src1_data.mask_and(0, 0x00FFFFFF);
-  src2_data.mask_and(0, 0x00FFFFFF);
+  src1_data.mask_and(0, 0x00FFFFFF);  // [한국어] 하위 24비트 마스크
+  src2_data.mask_and(0, 0x00FFFFFF);  // [한국어] 하위 24비트 마스크
 
   switch (i_type) {
     case S32_TYPE:
-      if (src1_data.get_bit(23)) src1_data.mask_or(0xFFFFFFFF, 0xFF000000);
-      if (src2_data.get_bit(23)) src2_data.mask_or(0xFFFFFFFF, 0xFF000000);
-      data.s64 = src1_data.s64 * src2_data.s64;
+      if (src1_data.get_bit(23)) src1_data.mask_or(0xFFFFFFFF, 0xFF000000);  // [한국어] S32 부호 확장
+      if (src2_data.get_bit(23)) src2_data.mask_or(0xFFFFFFFF, 0xFF000000);  // [한국어] S32 부호 확장
+      data.s64 = src1_data.s64 * src2_data.s64;  // [한국어] 24비트 signed 곱셈
       break;
     case U32_TYPE:
-      data.u64 = src1_data.u64 * src2_data.u64;
+      data.u64 = src1_data.u64 * src2_data.u64;  // [한국어] 24비트 unsigned 곱셈
       break;
     default:
       printf(
@@ -6298,15 +6411,34 @@ void mul24_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       break;
   }
 
-  if (pI->is_hi()) {
-    data.u64 = data.u64 >> 16;
-    data.mask_and(0, 0xFFFFFFFF);
+  if (pI->is_hi()) {  // [한국어] 상위 16비트 선택
+    data.u64 = data.u64 >> 16;  // [한국어] 상위 16비트 추출
+    data.mask_and(0, 0xFFFFFFFF);  // [한국어] 하위 32비트 마스크
   } else if (pI->is_lo()) {
-    data.mask_and(0, 0xFFFFFFFF);
+    data.mask_and(0, 0xFFFFFFFF);  // [한국어] 하위 32비트 마스크
   }
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * mul_impl - PTX `mul` 명령어 구현: 곱셈
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입, .hi/.lo/.wide, 반올림/포화 모드 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `mul.{hi|lo|wide}.{type} d, a, b` 명령어를 구현한다. d = a * b.
+ * 정수 타입(S16/S32/S64/U16/U32/U64)은 .hi/.lo/.wide에 따라 곱 결과의 일부를 반환하고,
+ * 부동소수 타입(F16/F32/F64)은 C FP 반올림 모드를 일시적으로 PTX 모드로 변경 후 곱셈을 수행한다.
+ * .sat 수식어 시 결과를 [0,1]로 포화(clamp)한다.
+ * 타이밍 모델에서 이 명령어의 레이턴시는 gpgpusim.config의
+ * -ptx_opcode_latency_int/fp/dp/sfu 옵션으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [mul_impl] → fesetround() → set_operand_value()
+ */
 
 void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t data;
@@ -6320,10 +6452,10 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a = thread->get_operand_value(src1, dst, i_type, thread, 1);
   ptx_reg_t b = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
-  unsigned rounding_mode = pI->rounding_mode();
+  unsigned rounding_mode = pI->rounding_mode();  // [한국어] PTX 반올림 모드
 
   switch (i_type) {
-    case S16_TYPE:
+    case S16_TYPE:  // [한국어] S16 곱셈 분기
       t.s32 = ((int)a.s16) * ((int)b.s16);
       if (pI->is_wide())
         d.s32 = t.s32;
@@ -6334,7 +6466,7 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       else
         assert(0);
       break;
-    case S32_TYPE:
+    case S32_TYPE:  // [한국어] S32 곱셈 분기
       t.s64 = ((long long)a.s32) * ((long long)b.s32);
       if (pI->is_wide())
         d.s64 = t.s64;
@@ -6345,13 +6477,13 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       else
         assert(0);
       break;
-    case S64_TYPE:
+    case S64_TYPE:  // [한국어] S64 곱셈 분기
       t.s64 = a.s64 * b.s64;
       assert(!pI->is_wide());
       // assert(!pI->is_hi());
       d.s64 = t.s64;
       break;
-    case U16_TYPE:
+    case U16_TYPE:  // [한국어] U16 곱셈 분기
       t.u32 = ((unsigned)a.u16) * ((unsigned)b.u16);
       if (pI->is_wide())
         d.u32 = t.u32;
@@ -6362,7 +6494,7 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       else
         assert(0);
       break;
-    case U32_TYPE:
+    case U32_TYPE:  // [한국어] U32 곱셈 분기
       t.u64 = ((unsigned long long)a.u32) * ((unsigned long long)b.u32);
       if (pI->is_wide())
         d.u64 = t.u64;
@@ -6373,7 +6505,7 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       else
         assert(0);
       break;
-    case U64_TYPE:
+    case U64_TYPE:  // [한국어] U64 곱셈 분기
       t.u64 = a.u64 * b.u64;
       assert(!pI->is_wide());
       assert(!pI->is_hi());
@@ -6382,77 +6514,77 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       else
         assert(0);
       break;
-    case F16_TYPE: {
+    case F16_TYPE: {  // [한국어] F16 곱셈 분기
       // assert(0);
       // break;
-      int orig_rm = fegetround();
+      int orig_rm = fegetround();  // [한국어] 현재 FP 반올림 모드 저장
       switch (rounding_mode) {
         case RN_OPTION:
           break;
         case RZ_OPTION:
-          fesetround(FE_TOWARDZERO);
+          fesetround(FE_TOWARDZERO);  // [한국어] RZ(0 방향) 반올림 모드 설정
           break;
         default:
           assert(0);
           break;
       }
 
-      d.f16 = a.f16 * b.f16;
+      d.f16 = a.f16 * b.f16;  // [한국어] F16 곱셈 수행
 
-      if (pI->saturation_mode()) {
+      if (pI->saturation_mode()) {  // [한국어] 포화(.sat) 모드 분기
         if (d.f16 < 0)
           d.f16 = 0;
         else if (d.f16 > 1.0f)
           d.f16 = 1.0f;
       }
-      fesetround(orig_rm);
+      fesetround(orig_rm);  // [한국어] 원래 FP 반올림 모드 복원
       break;
     }
-    case F32_TYPE: {
-      int orig_rm = fegetround();
+    case F32_TYPE: {  // [한국어] F32 곱셈 분기
+      int orig_rm = fegetround();  // [한국어] 현재 FP 반올림 모드 저장
       switch (rounding_mode) {
         case RN_OPTION:
           break;
         case RZ_OPTION:
-          fesetround(FE_TOWARDZERO);
+          fesetround(FE_TOWARDZERO);  // [한국어] RZ(0 방향) 반올림 모드 설정
           break;
         default:
           assert(0);
           break;
       }
 
-      d.f32 = a.f32 * b.f32;
+      d.f32 = a.f32 * b.f32;  // [한국어] F32 곱셈 수행
 
-      if (pI->saturation_mode()) {
+      if (pI->saturation_mode()) {  // [한국어] 포화(.sat) 모드 분기
         if (d.f32 < 0)
           d.f32 = 0;
         else if (d.f32 > 1.0f)
           d.f32 = 1.0f;
       }
-      fesetround(orig_rm);
+      fesetround(orig_rm);  // [한국어] 원래 FP 반올림 모드 복원
       break;
     }
-    case F64_TYPE:
+    case F64_TYPE:  // [한국어] F64 곱셈 분기
     case FF64_TYPE: {
-      int orig_rm = fegetround();
+      int orig_rm = fegetround();  // [한국어] 현재 FP 반올림 모드 저장
       switch (rounding_mode) {
         case RN_OPTION:
           break;
         case RZ_OPTION:
-          fesetround(FE_TOWARDZERO);
+          fesetround(FE_TOWARDZERO);  // [한국어] RZ(0 방향) 반올림 모드 설정
           break;
         default:
           assert(0);
           break;
       }
-      d.f64 = a.f64 * b.f64;
-      if (pI->saturation_mode()) {
+      d.f64 = a.f64 * b.f64;  // [한국어] F64 곱셈 수행
+      if (pI->saturation_mode()) {  // [한국어] 포화(.sat) 모드 분기
         if (d.f64 < 0)
           d.f64 = 0;
         else if (d.f64 > 1.0f)
           d.f64 = 1.0;
       }
-      fesetround(orig_rm);
+      fesetround(orig_rm);  // [한국어] 원래 FP 반올림 모드 복원
       break;
     }
     default:
@@ -6462,6 +6594,22 @@ void mul_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * neg_impl - PTX `neg` 명령어 구현: 부호 반전
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `neg.type d, a` 명령어를 구현한다. d = -a.
+ * signed 정수와 부동소수 타입만 지원하며, unsigned 정수는 정의되지 않아 assert로 처리한다.
+ * 정수의 경우 0에서 빼는 방식으로 부호를 반전한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [neg_impl] → set_operand_value()
+ */
 
 void neg_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -6473,30 +6621,30 @@ void neg_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src1_data = thread->get_operand_value(src1, dst, to_type, thread, 1);
 
   switch (to_type) {
-    case S8_TYPE:
+    case S8_TYPE:  // [한국어] signed 정수 분기
     case S16_TYPE:
     case S32_TYPE:
     case S64_TYPE:
-      data.s64 = 0 - src1_data.s64;
+      data.s64 = 0 - src1_data.s64;  // [한국어] 0에서 빼서 부호 반전
       break;  // seems buggy, but not (just ignore higher bits)
-    case U8_TYPE:
+    case U8_TYPE:  // [한국어] unsigned 정수는 미지원
     case U16_TYPE:
     case U32_TYPE:
     case U64_TYPE:
-      assert(0);
+      assert(0);  // [한국어] unsigned neg는 정의되지 않음
       break;
     case F16_TYPE:
-      data.f16 = 0.0f - src1_data.f16;
+      data.f16 = 0.0f - src1_data.f16;  // [한국어] F16 부호 반전
       break;  // assert(0); break;
     case F32_TYPE:
-      data.f32 = 0.0f - src1_data.f32;
+      data.f32 = 0.0f - src1_data.f32;  // [한국어] F32 부호 반전
       break;
     case F64_TYPE:
     case FF64_TYPE:
-      data.f64 = 0.0f - src1_data.f64;
+      data.f64 = 0.0f - src1_data.f64;  // [한국어] F64 부호 반전
       break;
     default:
-      assert(0);
+      assert(0);  // [한국어] unsigned neg는 정의되지 않음
       break;
   }
 
@@ -6505,6 +6653,22 @@ void neg_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
 // nandn bitwise negates second operand then bitwise nands with the first
 // operand
+
+/*
+ * [한국어]
+ * nandn_impl - PTX `nandn` 명령어 구현: NOT-AND (두 번째 피연산자를 NOT 후 AND)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `nandn.type d, a, b` 명령어를 구현한다. d = ~(a & ~b).
+ * predicate 타입인 경우 PTXPlus 규칙(1=false, 0=true)에 맞춰 비트 연산을 수행한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [nandn_impl] → set_operand_value()
+ */
+
 void nandn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
 
@@ -6517,15 +6681,31 @@ void nandn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
   // the way ptxplus handles predicates: 1 = false and 0 = true
-  if (i_type == PRED_TYPE)
-    data.pred = (~src1_data.pred & src2_data.pred);
+  if (i_type == PRED_TYPE)  // [한국어] predicate 타입 분기
+    data.pred = (~src1_data.pred & src2_data.pred);  // [한국어] PTXPlus 규칙으로 NANDN
   else
-    data.u64 = ~(src1_data.u64 & ~src2_data.u64);
+    data.u64 = ~(src1_data.u64 & ~src2_data.u64);  // [한국어] 비트 NANDN
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
 
 // norn bitwise negates first operand then bitwise ands with the second operand
+
+/*
+ * [한국어]
+ * norn_impl - PTX `norn` 명령어 구현: NOT-OR (첫 번째 피연산자를 NOT 후 OR)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `norn.type d, a, b` 명령어를 구현한다. d = ~a | b.
+ * predicate 타입은 PTXPlus zero-flag 규칙에 따라 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [norn_impl] → set_operand_value()
+ */
+
 void norn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
 
@@ -6538,13 +6718,28 @@ void norn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
   // the way ptxplus handles predicates: 1 = false and 0 = true
-  if (i_type == PRED_TYPE)
-    data.pred = ~(src1_data.pred & ~(src2_data.pred));
+  if (i_type == PRED_TYPE)  // [한국어] predicate 타입 분기
+    data.pred = ~(src1_data.pred & ~(src2_data.pred));  // [한국어] PTXPlus 규칙으로 NORN
   else
-    data.u64 = ~(src1_data.u64) & src2_data.u64;
+    data.u64 = ~(src1_data.u64) & src2_data.u64;  // [한국어] 비트 NORN
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * not_impl - PTX `not` 명령어 구현: 비트/프레디케이트 NOT
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `not.type d, a` 명령어를 구현한다. d = ~a.
+ * predicate, B16, B32, B64 타입을 지원한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [not_impl] → set_operand_value()
+ */
 
 void not_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b, d;
@@ -6555,17 +6750,17 @@ void not_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   a = thread->get_operand_value(src1, dst, i_type, thread, 1);
 
   switch (i_type) {
-    case PRED_TYPE:
-      d.pred = (~(a.pred) & 0x000F);
+    case PRED_TYPE:  // [한국어] predicate NOT 분기
+      d.pred = (~(a.pred) & 0x000F);  // [한국어] predicate 비트 반전
       break;
     case B16_TYPE:
-      d.u16 = ~a.u16;
+      d.u16 = ~a.u16;  // [한국어] B16 비트 반전
       break;
     case B32_TYPE:
-      d.u32 = ~a.u32;
+      d.u32 = ~a.u32;  // [한국어] B32 비트 반전
       break;
     case B64_TYPE:
-      d.u64 = ~a.u64;
+      d.u64 = ~a.u64;  // [한국어] B64 비트 반전
       break;
     default:
       printf("Execution error: type mismatch with instruction\n");
@@ -6575,6 +6770,21 @@ void not_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * or_impl - PTX `or` 명령어 구현: 비트/프레디케이트 OR
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `or.type d, a, b` 명령어를 구현한다. d = a | b.
+ * predicate 타입은 PTXPlus zero-flag 규칙(1=false, 0=true)을 고려하여 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [or_impl] → set_operand_value()
+ */
 
 void or_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -6587,13 +6797,28 @@ void or_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
   // the way ptxplus handles predicates: 1 = false and 0 = true
-  if (i_type == PRED_TYPE)
-    data.pred = ~(~(src1_data.pred) | ~(src2_data.pred));
+  if (i_type == PRED_TYPE)  // [한국어] predicate 타입 분기
+    data.pred = ~(~(src1_data.pred) | ~(src2_data.pred));  // [한국어] PTXPlus 규칙으로 OR
   else
-    data.u64 = src1_data.u64 | src2_data.u64;
+    data.u64 = src1_data.u64 | src2_data.u64;  // [한국어] 비트 OR
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * orn_impl - PTX `orn` 명령어 구현: OR-NOT (두 번째 피연산자를 NOT 후 OR)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `orn.type d, a, b` 명령어를 구현한다. d = a | ~b.
+ * predicate 타입은 PTXPlus zero-flag 규칙에 따라 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [orn_impl] → set_operand_value()
+ */
 
 void orn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -6606,17 +6831,44 @@ void orn_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
   // the way ptxplus handles predicates: 1 = false and 0 = true
-  if (i_type == PRED_TYPE)
-    data.pred = ~(~(src1_data.pred) | (src2_data.pred));
+  if (i_type == PRED_TYPE)  // [한국어] predicate 타입 분기
+    data.pred = ~(~(src1_data.pred) | (src2_data.pred));  // [한국어] PTXPlus 규칙으로 ORN
   else
-    data.u64 = src1_data.u64 | ~src2_data.u64;
+    data.u64 = src1_data.u64 | ~src2_data.u64;  // [한국어] 비트 ORN
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * pmevent_impl - PTX `pmevent` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `pmevent`는 성능 모니터링 이벤트를 기록하는 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void pmevent_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * popc_impl - PTX `popc` 명령어 구현: 1비트 개수 세기
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `popc.type d, a` 명령어를 구현한다. d = population_count(a).
+ * B32/B64 타입을 지원하며 std::bitset::count()로 1의 개수를 센다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [popc_impl] → set_operand_value()
+ */
+
 void popc_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src_data, data;
   const operand_info &dst = pI->dst();
@@ -6642,12 +6894,47 @@ void popc_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * prefetch_impl - PTX `prefetch` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `prefetch`는 메모리 프리페치 힌트 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void prefetch_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * prefetchu_impl - PTX `prefetchu` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `prefetchu`는 uniform 프리페치 힌트 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void prefetchu_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * prmt_mode_present - prmt 명령어의 특수 모드 여부 확인 헬퍼
+ *
+ * @mode: prmt 모드 값
+ * @return: 특수 모드(F4E/B4E/RC8/RC16/ECL/ECR)이면 1, 아니면 0
+ *
+ * PTX `prmt`의 제어 워드가 특수 모드를 지정하는지 확인한다.
+ * 실행 컨텍스트: prmt_impl 낶부.
+ */
 
 int prmt_mode_present(int mode) {
   int returnval = 0;
@@ -6665,6 +6952,22 @@ int prmt_mode_present(int mode) {
   }
   return returnval;
 }
+
+/*
+ * [한국어]
+ * read_byte - prmt 명령어를 위한 1바이트 선택/변환 헬퍼
+ *
+ * @mode: prmt 모드
+ * @control: 4비트 선택 제어 값
+ * @d_sel_index: 목적지 바이트 인덱스(0~3)
+ * @value: 64비트 소스 값 (src1 | (src2 << 32))
+ * @return: 선택된 바이트를 d_sel_index 위치로 시프트한 32비트 값
+ *
+ * prmt의 다양한 모드(F4E, B4E, RC8, RC16, ECL, ECR)에 따라 8비트 값을 선택하거나
+ * 모드별 테이블로 변환한다. 일반 모드에서는 control이 직접 바이트 선택자로 사용된다.
+ * 실행 컨텍스트: prmt_impl 낶부.
+ */
+
 int read_byte(int mode, int control, int d_sel_index, signed long long value) {
   int returnval = 0;
   int prmt_f4e_mode[4][4] = {
@@ -6714,6 +7017,22 @@ int read_byte(int mode, int control, int d_sel_index, signed long long value) {
   return (returnval << 8 * d_sel_index);
 }
 
+/*
+ * [한국어]
+ * prmt_impl - PTX `prmt` 명령어 구현: 바이트 순열(permute)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, src3(제어), 모드 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `prmt.mode.b32 d, a, b, c` 명령어를 구현한다.
+ * 두 32비트 소스 a, b를 64비트로 연결한 뒤, c의 4비트 필드 4개로 각 목적지 바이트를 선택한다.
+ * 특수 모드(mode)가 있으면 제어 값의 하위 2비트를 모든 바이트 선택에 사용한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [prmt_impl] → read_byte() → set_operand_value()
+ */
+
 void prmt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, src3_data, tmpdata, data;
   const operand_info &dst = pI->dst();
@@ -6753,6 +7072,22 @@ void prmt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * rcp_impl - PTX `rcp` 명령어 구현: 역수 (reciprocal)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `rcp.approx.{f32|f64} d, a` 명령어를 구현한다. d = 1 / a.
+ * SFU(Special Function Unit)에서 근사적으로 계산되며, 타이밍 모델의 레이턴시는
+ * gpgpusim.config의 -ptx_opcode_latency_sfu 옵션으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [rcp_impl] → set_operand_value()
+ */
+
 void rcp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
   const operand_info &dst = pI->dst();
@@ -6762,12 +7097,12 @@ void rcp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src1_data = thread->get_operand_value(src1, dst, i_type, thread, 1);
 
   switch (i_type) {
-    case F32_TYPE:
-      data.f32 = 1.0f / src1_data.f32;
+    case F32_TYPE:  // [한국어] F32 역수
+      data.f32 = 1.0f / src1_data.f32;  // [한국어] F32 역수 계산
       break;
-    case F64_TYPE:
+    case F64_TYPE:  // [한국어] F64 역수
     case FF64_TYPE:
-      data.f64 = 1.0f / src1_data.f64;
+      data.f64 = 1.0f / src1_data.f64;  // [한국어] F64 역수 계산
       break;
     default:
       printf("Execution error: type mismatch with instruction\n");
@@ -6778,9 +7113,35 @@ void rcp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * red_impl - PTX `red` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `red`는 메모리상 원자적 축소(atomic reduction) 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void red_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * rem_impl - PTX `rem` 명령어 구현: 나머지
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `rem.type d, a, b` 명령어를 구현한다. d = a % b.
+ * S32/S64/U32/U64 타입을 지원한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [rem_impl] → set_operand_value()
+ */
 
 void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -6814,8 +7175,50 @@ void rem_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * ret_impl - PTX `ret` 명령어 구현: 서브루틴 복귀
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `ret` 명령어를 구현한다. 현재 스레드의 호출 스택에서 한 프레임을 pop하고,
+ * 스택이 비면 스레드를 종료 처리한다(set_done/exitCore/registerExit).
+ * 이는 SIMT 함수 호출의 복귀 메커니즘을 지원한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [ret_impl] → callstack_pop()
+ */
+
 void ret_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  bool empty = thread->callstack_pop();
+  bool empty = thread->callstack_pop();  // [한국어] 호출 스택에서 한 프레임 pop
+  if (empty) {  // [한국어] 호출 스택이 비었으면 스레드 종료
+    thread->set_done();  // [한국어] 스레드 완료 표시
+    thread->exitCore();  // [한국어] 코어에서 스레드 제거
+    thread->registerExit();  // [한국어] 스레드 종료 등록
+  }
+}
+
+// Ptxplus version of ret instruction.
+
+/*
+ * [한국어]
+ * retp_impl - PTXPlus `ret` 명령어 구현: PTXPlus 서브루틴 복귀
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTXPlus 버전의 ret 명령어로, callstack_pop_plus()를 사용하여 복귀한다.
+ * 호출 스택이 비면 스레드를 종료 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [retp_impl] → callstack_pop_plus()
+ */
+
+void retp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
+  bool empty = thread->callstack_pop_plus();  // [한국어] PTXPlus 호출 스택 pop
   if (empty) {
     thread->set_done();
     thread->exitCore();
@@ -6823,15 +7226,21 @@ void ret_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   }
 }
 
-// Ptxplus version of ret instruction.
-void retp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  bool empty = thread->callstack_pop_plus();
-  if (empty) {
-    thread->set_done();
-    thread->exitCore();
-    thread->registerExit();
-  }
-}
+/*
+ * [한국어]
+ * rsqrt_impl - PTX `rsqrt` 명령어 구현: 역제곱근
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `rsqrt.approx.{f32|f64} d, a` 명령어를 구현한다. d = 1 / sqrt(a).
+ * 음수 입력 시 NaN, 0 입력 시 +Inf를 반환한다.
+ * SFU 연산으로, 타이밍 레이턴시는 -ptx_opcode_latency_sfu 옵션으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [rsqrt_impl] → set_operand_value()
+ */
 
 void rsqrt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, d;
@@ -6843,25 +7252,25 @@ void rsqrt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   switch (i_type) {
     case F32_TYPE:
-      if (a.f32 < 0) {
+      if (a.f32 < 0) {  // [한국어] 음수 입력 처리
         d.u64 = 0;
-        d.u64 = 0x7fc00000;  // NaN
-      } else if (a.f32 == 0) {
+        d.u64 = 0x7fc00000;  // NaN  // [한국어] 음수 입력 시 NaN 반환
+      } else if (a.f32 == 0) {  // [한국어] 0 입력 처리
         d.u64 = 0;
-        d.u32 = 0x7f800000;  // Inf
+        d.u32 = 0x7f800000;  // Inf  // [한국어] 0 입력 시 Inf 반환
       } else
-        d.f32 = cuda_math::__internal_accurate_fdividef(1.0f, sqrtf(a.f32));
+        d.f32 = cuda_math::__internal_accurate_fdividef(1.0f, sqrtf(a.f32));  // [한국어] F32 역제곱근 근사
       break;
     case F64_TYPE:
     case FF64_TYPE:
-      if (a.f32 < 0) {
+      if (a.f32 < 0) {  // [한국어] 음수 입력 처리
         d.u64 = 0;
         d.u32 = 0x7fc00000;  // NaN
         float x = d.f32;
         d.f64 = (double)x;
-      } else if (a.f32 == 0) {
+      } else if (a.f32 == 0) {  // [한국어] 0 입력 처리
         d.u64 = 0;
-        d.u32 = 0x7f800000;  // Inf
+        d.u32 = 0x7f800000;  // Inf  // [한국어] 0 입력 시 Inf 반환
         float x = d.f32;
         d.f64 = (double)x;
       } else
@@ -6878,6 +7287,21 @@ void rsqrt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
 #define SAD(d, a, b, c) d = c + ((a < b) ? (b - a) : (a - b))
 
+/*
+ * [한국어]
+ * sad_impl - PTX `sad` 명령어 구현: 절대차 합 (Sum of Absolute Difference)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, src3, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sad.type d, a, b, c` 명령어를 구현한다. d = c + |a - b|.
+ * 정수/부동소수 타입을 모두 지원하며, 영상 처리/머신러닝에서 자주 사용된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [sad_impl] → SAD 매크로 → set_operand_value()
+ */
+
 void sad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b, c, d;
   const operand_info &dst = pI->dst();
@@ -6892,10 +7316,10 @@ void sad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   switch (i_type) {
     case U16_TYPE:
-      SAD(d.u16, a.u16, b.u16, c.u16);
+      SAD(d.u16, a.u16, b.u16, c.u16);  // [한국어] U16 SAD
       break;
     case U32_TYPE:
-      SAD(d.u32, a.u32, b.u32, c.u32);
+      SAD(d.u32, a.u32, b.u32, c.u32);  // [한국어] U32 SAD
       break;
     case U64_TYPE:
       SAD(d.u64, a.u64, b.u64, c.u64);
@@ -6910,7 +7334,7 @@ void sad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       SAD(d.s64, a.s64, b.s64, c.s64);
       break;
     case F32_TYPE:
-      SAD(d.f32, a.f32, b.f32, c.f32);
+      SAD(d.f32, a.f32, b.f32, c.f32);  // [한국어] F32 SAD
       break;
     case F64_TYPE:
     case FF64_TYPE:
@@ -6924,6 +7348,21 @@ void sad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * selp_impl - PTX `selp` 명령어 구현: 조건 선택
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, src3(조건 predicate) 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `selp.type d, a, b, p` 명령어를 구현한다. p가 true이면 d=a, 아니면 d=b.
+ * PTXPlus zero-flag 규칙에 따라 predicate의 최하위 비트를 반전하여 평가한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [selp_impl] → set_operand_value()
+ */
 
 void selp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   const operand_info &dst = pI->dst();
@@ -6941,10 +7380,21 @@ void selp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // predicate value was changed so the lowest bit being set means the zero flag
   // is set. As a result, the value of c.pred must be inverted to get proper
   // behavior
-  d = (!(c.pred & 0x0001)) ? a : b;
+  d = (!(c.pred & 0x0001)) ? a : b;  // [한국어] predicate 반전 후 조건 선택
 
   thread->set_operand_value(dst, d, PRED_TYPE, thread, pI);
 }
+
+/*
+ * [한국어]
+ * isFloat - 타입이 부동소수점 타입인지 확인하는 헬퍼
+ *
+ * @type: PTX 데이터 타입 enum
+ * @return: F16/F32/F64/FF64 타입이면 true, 아니면 false
+ *
+ * set_impl 등에서 목적지 타입에 따라 1.0f/0xFFFFFFFF 등의 결과 형태를 결정할 때 사용한다.
+ * 실행 컨텍스트: 비교/설정 명령어 낶부.
+ */
 
 bool isFloat(int type) {
   switch (type) {
@@ -6957,6 +7407,23 @@ bool isFloat(int type) {
       return false;
   }
 }
+
+/*
+ * [한국어]
+ * CmpOp - PTX set/setp 명령어용 비교 연산 헬퍼
+ *
+ * @type: 피연산자의 PTX 데이터 타입
+ * @a: 첫 번째 피연산자 값
+ * @b: 두 번째 피연산자 값
+ * @cmpop: 비교 연산 옵션 (EQ/NE/LT/LE/GT/GE/EQU/NEU/LTU/LEU/GTU/GEU/NUM/NAN/LO/LS/HI/HS)
+ * @return: 비교 결과 bool
+ *
+ * 정수/비트/부동소수점 타입에 따라 다양한 비교 연산을 수행한다.
+ * 부동소수점은 NaN 처리가 필요하여 unordered 비교 옵션(EQU/NEU/...)과 NUM/NAN을 별도 처리한다.
+ * 정수 unsigned 비교는 LO/LS/HI/HS 옵션을 추가로 지원한다.
+ * B16/B32/B64은 EQ/NE만 지원한다.
+ * 실행 컨텍스트: setp_impl, set_impl 낶부.
+ */
 
 bool CmpOp(int type, ptx_reg_t a, ptx_reg_t b, unsigned cmpop) {
   bool t = false;
@@ -7287,6 +7754,21 @@ bool CmpOp(int type, ptx_reg_t a, ptx_reg_t b, unsigned cmpop) {
   return t;
 }
 
+/*
+ * [한국어]
+ * setp_impl - PTX `setp` 명령어 구현: 비교 결과를 predicate에 설정
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지 predicate, src1, src2, 비교 옵션 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `setp.cmp.type p, a, b` 명령어를 구현한다. p = (a cmp b).
+ * CmpOp()으로 비교한 뒤 PTXPlus zero-flag 규칙에 따라 predicate 값을 반전하여 저장한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [setp_impl] → CmpOp() → set_operand_value()
+ */
+
 void setp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b;
 
@@ -7295,15 +7777,15 @@ void setp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   const operand_info &src1 = pI->src1();
   const operand_info &src2 = pI->src2();
 
-  assert(pI->get_num_operands() <
+  assert(pI->get_num_operands() <  // [한국어] 4번째 boolean 연산 피연산자는 아직 미지원
          4);  // or need to deal with "c" operand / boolOp
 
   unsigned type = pI->get_type();
-  unsigned cmpop = pI->get_cmpop();
+  unsigned cmpop = pI->get_cmpop();  // [한국어] 비교 연산 옵션
   a = thread->get_operand_value(src1, dst, type, thread, 1);
   b = thread->get_operand_value(src2, dst, type, thread, 1);
 
-  t = CmpOp(type, a, b, cmpop);
+  t = CmpOp(type, a, b, cmpop);  // [한국어] 비교 연산 수행
 
   ptx_reg_t data;
 
@@ -7314,6 +7796,22 @@ void setp_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, data, PRED_TYPE, thread, pI);
 }
+
+/*
+ * [한국어]
+ * set_impl - PTX `set` 명령어 구현: 비교 결과를 일반 레지스터에 설정
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 비교 옵션, .abs 수식어 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `set.cmp.type d, a, b` 명령어를 구현한다. d = (a cmp b) ? true_value : false_value.
+ * .abs 수식어가 있으면 첫 번째 피연산자의 절댓값을 취한 뒤 비교한다.
+ * 목적지가 float 타입이면 1.0f/0.0f, 정수 타입이면 0xFFFFFFFF/0을 저장한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [set_impl] → CmpOp() → set_operand_value()
+ */
 
 void set_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b;
@@ -7333,7 +7831,7 @@ void set_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   b = thread->get_operand_value(src2, dst, src_type, thread, 1);
 
   // Take abs of first operand if needed
-  if (pI->is_abs()) {
+  if (pI->is_abs()) {  // [한국어] .abs 수식어: 첫 피연산자 절댓값
     switch (src_type) {
       case S16_TYPE:
         a.s16 = my_abs(a.s16);
@@ -7367,31 +7865,50 @@ void set_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
     }
   }
 
-  t = CmpOp(src_type, a, b, cmpop);
+  t = CmpOp(src_type, a, b, cmpop);  // [한국어] 비교 연산 수행
 
   ptx_reg_t data;
-  if (isFloat(pI->get_type())) {
-    data.f32 = (t != 0) ? 1.0f : 0.0f;
+  if (isFloat(pI->get_type())) {  // [한국어] 목적지가 float 타입인지 확인
+    data.f32 = (t != 0) ? 1.0f : 0.0f;  // [한국어] float 결과: true=1.0f, false=0.0f
   } else {
-    data.u32 = (t != 0) ? 0xFFFFFFFF : 0;
+    data.u32 = (t != 0) ? 0xFFFFFFFF : 0;  // [한국어] 정수 결과: true=0xFFFFFFFF, false=0
   }
 
   thread->set_operand_value(dst, data, pI->get_type(), thread, pI);
 }
 
+/*
+ * [한국어]
+ * shfl_impl - PTX `shfl` 명령어 구현: 워프 내 레인 간 레지스터 셔플
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1(데이터), src2(오프셋), src3(마스크), 모드 포함)
+ * @core: SM(core_t) 객체 — 워프 내 스레드 정보 접근
+ * @inst: warp_inst_t 참조 — 활성 스레드 마스크 제공
+ *
+ * PTX `shfl.mode.b32 d, a, b, c` 명령어를 구현한다.
+ * 워프 내에서 한 레인의 레지스터 값을 다른 레인으로 복사한다.
+ * 모드: UP/DOWN/BFLY/IDX. c의 마스크 필드로 대상 레인 범위를 제한한다.
+ * 활성(active) 소스 레인이 아니면 경고를 출력하고 0을 반환한다.
+ * warp_info의 done_threads 카운터를 사용하여 워프 단위로 완료를 추적한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 — 워프 내 레인 단위.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [shfl_impl] → get_operand_value() → set_operand_value()
+ */
+
 void shfl_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
   unsigned i_type = pI->get_type();
   int tid;
 
-  if (core->get_gpu()->is_functional_sim())
-    tid = inst.warp_id_func() * core->get_warp_size();
+  if (core->get_gpu()->is_functional_sim())  // [한국어] 기능/타이밍 시뮬레이션 모드 분기
+    tid = inst.warp_id_func() * core->get_warp_size();  // [한국어] 기능 시뮬레이션 워프 ID 사용
   else
-    tid = inst.warp_id() * core->get_warp_size();
+    tid = inst.warp_id() * core->get_warp_size();  // [한국어] 타이밍 시뮬레이션 워프 ID 사용
 
   ptx_thread_info *thread = core->get_thread_info()[tid];
   ptx_warp_info *warp_info = thread->m_warp_info;
-  int lane = warp_info->get_done_threads();
-  thread = core->get_thread_info()[tid + lane];
+  int lane = warp_info->get_done_threads();  // [한국어] 현재 처리 중인 레인 인덱스
+  thread = core->get_thread_info()[tid + lane];  // [한국어] 현재 레인 스레드 선택
 
   const operand_info &dst = pI->dst();
   const operand_info &src1 = pI->src1();
@@ -7400,28 +7917,28 @@ void shfl_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
   int bval = (thread->get_operand_value(src2, dst, i_type, thread, 1)).u32;
   int cval = (thread->get_operand_value(src3, dst, i_type, thread, 1)).u32;
   int mask = cval >> 8;
-  bval &= 0x1F;
-  cval &= 0x1F;
+  bval &= 0x1F;  // [한국어] 오프셋 하위 5비트 추출
+  cval &= 0x1F;  // [한국어] 마스크 하위 5비트 추출
 
-  int maxLane = (lane & mask) | (cval & ~mask);
-  int minLane = lane & mask;
+  int maxLane = (lane & mask) | (cval & ~mask);  // [한국어] 최대 레인 계산
+  int minLane = lane & mask;  // [한국어] 최소 레인 계산
 
   int src_idx;
   unsigned p;
-  switch (pI->shfl_op()) {
-    case UP_OPTION:
+  switch (pI->shfl_op()) {  // [한국어] shfl 모드 분기
+    case UP_OPTION:  // [한국어] 위쪽 레인으로 이동
       src_idx = lane - bval;
       p = (src_idx >= maxLane);
       break;
-    case DOWN_OPTION:
+    case DOWN_OPTION:  // [한국어] 아래쪽 레인으로 이동
       src_idx = lane + bval;
       p = (src_idx <= maxLane);
       break;
-    case BFLY_OPTION:
+    case BFLY_OPTION:  // [한국어] XOR 기반 버터플라이 셔플
       src_idx = lane ^ bval;
       p = (src_idx <= maxLane);
       break;
-    case IDX_OPTION:
+    case IDX_OPTION:  // [한국어] 지정 인덱스 셔플
       src_idx = minLane | (bval & ~mask);
       p = (src_idx <= maxLane);
       break;
@@ -7431,18 +7948,18 @@ void shfl_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
       break;
   }
   // copy from own lane
-  if (!p) src_idx = lane;
+  if (!p) src_idx = lane;  // [한국어] 범위 밖이면 자기 레인 사용
 
   // copy input from lane src_idx
   ptx_reg_t data;
-  if (inst.active(src_idx)) {
-    ptx_thread_info *source = core->get_thread_info()[tid + src_idx];
+  if (inst.active(src_idx)) {  // [한국어] 활성 소스 레인 여부 확인
+    ptx_thread_info *source = core->get_thread_info()[tid + src_idx];  // [한국어] 소스 레인 스레드 선택
     data = source->get_operand_value(src1, dst, i_type, source, 1);
   } else {
     printf(
         "GPGPU-Sim PTX: WARNING: shfl input value unpredictable for inactive "
         "threads in a warp\n");
-    data.u32 = 0;
+    data.u32 = 0;  // [한국어] 비활성 레인이면 0 사용
   }
   thread->set_operand_value(dst, data, i_type, thread, pI);
 
@@ -7456,11 +7973,27 @@ void shfl_impl(const ptx_instruction *pI, core_t *core, warp_inst_t inst) {
   */
 
   // keep track of the number of threads that have executed in the warp
-  warp_info->inc_done_threads();
-  if (warp_info->get_done_threads() == inst.active_count()) {
+  warp_info->inc_done_threads();  // [한국어] 워프 완료 카운터 증가
+  if (warp_info->get_done_threads() == inst.active_count()) {  // [한국어] 모든 활성 레인 완료 시 리셋
     warp_info->reset_done_threads();
   }
 }
+
+/*
+ * [한국어]
+ * shf_impl - PTX `shf` 명령어 구현: 64비트 연결 시프트 (funnel shift)
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1(하위), src2(상위), src3(시프트량), .left/.right, .clamp 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `shf.l|r.clamp.b32 d, a, b, c` 명령어를 구현한다.
+ * src2(상위 32비트)와 src1(하위 32비트)를 연결한 64비트 값을 c만큼 좌/우 시프트하여
+ * 32비트 결과를 반환한다. .clamp 수식어에 따라 시프트량을 0~31로 클램핑한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [shf_impl] → set_operand_value()
+ */
 
 void shf_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b, c, d;
@@ -7469,30 +8002,46 @@ void shf_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   const operand_info &src2 = pI->src2();
   const operand_info &src3 = pI->src3();
 
-  // Only b32 is allowed
+  // Only b32 is allowed  // [한국어] shf는 B32 타입만 허용
   unsigned i_type = pI->get_type();
   a = thread->get_operand_value(src1, dst, i_type, thread, 1);
   b = thread->get_operand_value(src2, dst, i_type, thread, 1);
   c = thread->get_operand_value(src3, dst, i_type, thread, 1);
 
-  if (i_type != B32_TYPE)
+  if (i_type != B32_TYPE)  // [한국어] 타입 검증
     printf("Only the b32 data_type is allowed per the ISA\n");
 
-  unsigned clamp_mode = pI->clamp_mode();
-  unsigned n = c.u32 & 0x1f;
-  if (clamp_mode) {
+  unsigned clamp_mode = pI->clamp_mode();  // [한국어] clamp 모드 확인
+  unsigned n = c.u32 & 0x1f;  // [한국어] 시프트량 하위 5비트
+  if (clamp_mode) {  // [한국어] clamp 모드 시 시프트량 제한
     if (c.u32 < 32)
       n = c;
     else
       n = 32;
   }
-  if (pI->left_mode())
-    d.u32 = (b.u32 << n) | (a.u32 >> (32 - n));
+  if (pI->left_mode())  // [한국어] 좌/우 시프트 분기
+    d.u32 = (b.u32 << n) | (a.u32 >> (32 - n));  // [한국어] 좌측 funnel shift
   else
-    d.u32 = (b.u32 << (32 - n)) | (a.u32 >> n);
+    d.u32 = (b.u32 << (32 - n)) | (a.u32 >> n);  // [한국어] 우측 funnel shift
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * shl_impl - PTX `shl` 명령어 구현: 논리/부호 없는 좌시프트
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2(시프트량), 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `shl.type d, a, b` 명령어를 구현한다. d = a << b.
+ * 시프트량이 타입 비트 수 이상이면 결과를 0으로 한다.
+ * B16/B32/B64 및 U16/U32/U64 타입을 지원한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [shl_impl] → set_operand_value()
+ */
 
 void shl_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b, d;
@@ -7534,6 +8083,22 @@ void shl_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * shr_impl - PTX `shr` 명령어 구현: 우시프트
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2(시프트량), 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `shr.type d, a, b` 명령어를 구현한다.
+ * unsigned/boolean 타입은 논리 우시프트(0 채움), signed 타입은 산술 우시프트(부호 비트 채움)를 수행한다.
+ * 시프트량이 타입 비트 수 이상이면 signed는 부호에 따라 0/-1, unsigned는 0을 반환한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [shr_impl] → set_operand_value()
+ */
 
 void shr_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, b, d;
@@ -7614,6 +8179,21 @@ void shr_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * sin_impl - PTX `sin` 명령어 구현: 사인 근사
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sin.approx.f32 d, a` 명령어를 구현한다. d = sin(a).
+ * SFU 연산으로, 타이밍 레이턴시는 -ptx_opcode_latency_sfu 옵션으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [sin_impl] → set_operand_value()
+ */
+
 void sin_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, d;
   const operand_info &dst = pI->dst();
@@ -7634,6 +8214,21 @@ void sin_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * slct_impl - PTX `slct` 명령어 구현: 부호/비교 기반 선택
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, src3(조건), 타입1/타입2 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `slct.type d, a, b, c` 명령어를 구현한다. c >= 0이면 d=a, 아니면 d=b.
+ * 조건(c)의 타입은 S32 또는 F32이며, 결과 타입은 다양한 16/32/64비트 타입을 지원한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [slct_impl] → set_operand_value()
+ */
 
 void slct_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   const operand_info &dst = pI->dst();
@@ -7687,6 +8282,21 @@ void slct_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
 
+/*
+ * [한국어]
+ * sqrt_impl - PTX `sqrt` 명령어 구현: 제곱근
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sqrt.approx.{f32|f64} d, a` 명령어를 구현한다. d = sqrt(a).
+ * 음수 입력 시 NaN을 반환한다. SFU 연산이며 레이턴시는 -ptx_opcode_latency_sfu 옵션으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [sqrt_impl] → set_operand_value()
+ */
+
 void sqrt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t a, d;
   const operand_info &dst = pI->dst();
@@ -7717,6 +8327,22 @@ void sqrt_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 
   thread->set_operand_value(dst, d, i_type, thread, pI);
 }
+
+/*
+ * [한국어]
+ * sst_impl - PTX `sst` (sparse store) 명령어 구현: 희소 배열 저장
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTXPlus 확장 명령어로 보이는 sst를 구현한다.
+ * 스레드들의 값을 sstarr 공간에 모은 뒤 0이 아닌 항목과 인덱스를 글로벌 메모리에 기록하고,
+ * 남은 공간을 0으로 채운다. CTA 내 모든 스레드가 참여하는 bar_id 16 동기화를 사용한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 — CTA 단위 협력적 동작.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [sst_impl] → decode_space() → mem->write/read()
+ */
 
 void sst_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_instruction *cpI = const_cast<ptx_instruction *>(pI);  // constant
@@ -7803,15 +8429,44 @@ void sst_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   }
 }
 
+/*
+ * [한국어]
+ * ssy_impl - PTX `ssy` 명령어 구현 (TODO)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `ssy`는 동기화/재합류 지점을 표시하는 명령어이다.
+ * 현재 GPGPU-Sim에서는 no-op으로 처리되며 TODO 주석이 남아 있다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ */
+
 void ssy_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // printf("Execution Warning: unimplemented ssy instruction is treated as a
   // nop\n");
   // TODO: add implementation
 }
 
+/*
+ * [한국어]
+ * st_impl - PTX `st` 명령어 구현: 메모리에 저장
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지(주소), src1(데이터), 메모리 공간, 타입, 벡터 수식어 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `st.{space}.{type} [a], b` 명령어를 구현한다.
+ * decode_space()로 메모리 공간과 실제 HW 주소를 해석한 뒤 mem->write()로 데이터를 기록한다.
+ * 벡터(V2/V3/V4) 저장 시 연속 주소에 각 요소를 기록한다.
+ * m_last_effective_address와 m_last_memory_space를 갱신하여 타이밍 모델이 메모리 접근을 추적한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [st_impl] → decode_space() → mem->write()
+ */
+
 void st_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  const operand_info &dst = pI->dst();
-  const operand_info &src1 = pI->src1();  // may be scalar or vector of regs
+  const operand_info &dst = pI->dst();  // [한국어] 저장 대상 주소 오퍼랜드
+  const operand_info &src1 = pI->src1();  // may be scalar or vector of regs  // [한국어] 저장할 데이터 오퍼랜드
   unsigned type = pI->get_type();
   ptx_reg_t addr_reg = thread->get_operand_value(dst, dst, type, thread, 1);
   ptx_reg_t data;
@@ -7821,19 +8476,19 @@ void st_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   memory_space *mem = NULL;
   addr_t addr = addr_reg.u32;
 
-  decode_space(space, thread, dst, mem, addr);
+  decode_space(space, thread, dst, mem, addr);  // [한국어] 메모리 공간/주소 해석
 
   size_t size;
   int t;
   type_info_key::type_decode(type, size, t);
 
   if (!vector_spec) {
-    data = thread->get_operand_value(src1, dst, type, thread, 1);
-    mem->write(addr, size / 8, &data.s64, thread, pI);
+    data = thread->get_operand_value(src1, dst, type, thread, 1);  // [한국어] 스칼라 데이터 읽기
+    mem->write(addr, size / 8, &data.s64, thread, pI);  // [한국어] 메모리에 스칼라 기록
   } else {
     if (vector_spec == V2_TYPE) {
       ptx_reg_t *ptx_regs = new ptx_reg_t[2];
-      thread->get_vector_operand_values(src1, ptx_regs, 2);
+      thread->get_vector_operand_values(src1, ptx_regs, 2);  // [한국어] V2 벡터 데이터 읽기
       mem->write(addr, size / 8, &ptx_regs[0].s64, thread, pI);
       mem->write(addr + size / 8, size / 8, &ptx_regs[1].s64, thread, pI);
       delete[] ptx_regs;
@@ -7856,14 +8511,31 @@ void st_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       delete[] ptx_regs;
     }
   }
-  thread->m_last_effective_address = addr;
-  thread->m_last_memory_space = space;
+  thread->m_last_effective_address = addr;  // [한국어] 타이밍 모델용 효과 주소 기록
+  thread->m_last_memory_space = space;  // [한국어] 타이밍 모델용 메모리 공간 기록
 }
+
+/*
+ * [한국어]
+ * sub_impl - PTX `sub` 명령어 구현: 뺄셈
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sub.type d, a, b` 명령어를 구현한다. d = a - b.
+ * 정수 타입은 캐리/오버플로우 플래그를 계산하여 CC 레지스터 업데이트에 사용한다.
+ * 뺄셈은 2의 보수 덧셈으로 구현되며, 캐리 비트가 올바르게 설정되도록 상수(2^n)를 더한다.
+ * 부동소수 타입은 단순히 float 값을 뺀다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [sub_impl] → set_operand_value(overflow, carry)
+ */
 
 void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t data;
-  int overflow = 0;
-  int carry = 0;
+  int overflow = 0;  // [한국어] 오버플로우 플래그 초기화
+  int carry = 0;  // [한국어] 캐리 플래그 초기화
 
   const operand_info &dst = pI->dst();
   const operand_info &src1 = pI->src1();
@@ -7878,11 +8550,11 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // properly.
   switch (i_type) {
     case S8_TYPE:
-      data.s64 = (src1_data.s64 & 0xFF) - (src2_data.s64 & 0xFF) + 0x100;
+      data.s64 = (src1_data.s64 & 0xFF) - (src2_data.s64 & 0xFF) + 0x100;  // [한국어] S8 2의 보수 뺄셈
       if (((src1_data.s64 & 0x80) - (src2_data.s64 & 0x80)) != 0) {
-        overflow = ((src1_data.s64 & 0x80) - (data.s64 & 0x80)) == 0 ? 0 : 1;
+        overflow = ((src1_data.s64 & 0x80) - (data.s64 & 0x80)) == 0 ? 0 : 1;  // [한국어] 부호 오버플로우 검출
       }
-      carry = (data.s32 & 0x100) >> 8;
+      carry = (data.s32 & 0x100) >> 8;  // [한국어] S8 캐리 추출
       break;
     case S16_TYPE:
       data.s64 = (src1_data.s64 & 0xFFFF) - (src2_data.s64 & 0xFFFF) + 0x10000;
@@ -7900,7 +8572,7 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
                        ? 0
                        : 1;
       }
-      carry = ((data.u64) >> 32) & 0x0001;
+      carry = ((data.u64) >> 32) & 0x0001;  // [한국어] S32 캐리 추출
       break;
     case S64_TYPE:
       data.s64 = src1_data.s64 - src2_data.s64;
@@ -7929,7 +8601,7 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       data.f16 = src1_data.f16 - src2_data.f16;
       break;  // assert(0); break;
     case F32_TYPE:
-      data.f32 = src1_data.f32 - src2_data.f32;
+      data.f32 = src1_data.f32 - src2_data.f32;  // [한국어] F32 뺄셈
       break;
     case F64_TYPE:
     case FF64_TYPE:
@@ -7940,25 +8612,95 @@ void sub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       break;
   }
 
-  thread->set_operand_value(dst, data, i_type, thread, pI, overflow, carry);
+  thread->set_operand_value(dst, data, i_type, thread, pI, overflow, carry);  // [한국어] 결과 및 플래그 기록
 }
+
+/*
+ * [한국어]
+ * nop_impl - PTX `nop` 명령어 구현: 아무 동작 안 함
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `nop`은 no-operation이다. 파이프라인에서 한 슬롯을 소비하지만 기능적으로는 아무것도 하지 않는다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ */
 
 void nop_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // Do nothing
 }
 
+/*
+ * [한국어]
+ * subc_impl - PTX `subc` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `subc`는 캐리를 고려한 뺄셈 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void subc_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * suld_impl - PTX `suld` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `suld`는 서피스 메모리 로드 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void suld_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * sured_impl - PTX `sured` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sured`는 서피스 메모리 원자적 축소 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void sured_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * sust_impl - PTX `sust` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `sust`는 서피스 메모리 저장 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void sust_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * suq_impl - PTX `suq` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `suq`는 서피스 메모리 쿼리 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void suq_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
@@ -7967,6 +8709,19 @@ union intfloat {
   int a;
   float b;
 };
+
+/*
+ * [한국어]
+ * reduce_precision - float 가수부(mantissa) 정밀도를 줄이는 텍스처 헬퍼
+ *
+ * @x: 원본 float 값
+ * @bits: 남길 가수부 하위 비트 수
+ * @return: 정밀도가 감소된 float 값
+ *
+ * 텍스처 선형 보간(linear sampling)에서 사용되는 NVIDIA HW 특화 근사값을 에뮬레이션한다.
+ * 지정된 비트 수만큼 가수부 하위 비트를 마스크하여 근사한다.
+ * 실행 컨텍스트: tex_linf_sampling 낶부.
+ */
 
 float reduce_precision(float x, unsigned bits) {
   intfloat tmp;
@@ -7980,12 +8735,38 @@ float reduce_precision(float x, unsigned bits) {
   return result;
 }
 
+/*
+ * [한국어]
+ * wrap - 텍스처 좌표 래핑(wrap) 주소 계산
+ *
+ * @x, @y: 텍셀 좌표
+ * @mx, @my: 텍스처 너비/높이
+ * @elem_size: 요소 크기(바이트)
+ * @return: 1D 선형 배열 인덱스
+ *
+ * 좌표가 경계를 넘어가면 modulo 연산으로 반대편으로 돌아간다.
+ * 실행 컨텍스트: tex_linf_sampling 낶부.
+ */
+
 unsigned wrap(unsigned x, unsigned y, unsigned mx, unsigned my,
               size_t elem_size) {
   unsigned nx = (mx + x) % mx;
   unsigned ny = (my + y) % my;
   return nx + mx * ny;
 }
+
+/*
+ * [한국어]
+ * clamp - 텍스처 좌표 클램핑(clamp) 주소 계산
+ *
+ * @x, @y: 텍셀 좌표
+ * @mx, @my: 텍스처 너비/높이
+ * @elem_size: 요소 크기(바이트)
+ * @return: 1D 선형 배열 인덱스
+ *
+ * 좌표가 경계를 넘어가면 가장 가까운 경계 값으로 고정한다.
+ * 실행 컨텍스트: tex_linf_sampling 낶부.
+ */
 
 unsigned clamp(unsigned x, unsigned y, unsigned mx, unsigned my,
                size_t elem_size) {
@@ -7997,6 +8778,25 @@ unsigned clamp(unsigned x, unsigned y, unsigned mx, unsigned my,
 
 typedef unsigned (*texAddr_t)(unsigned x, unsigned y, unsigned mx, unsigned my,
                               size_t elem_size);
+
+/*
+ * [한국어]
+ * tex_linf_sampling - 2x2 텍셀 선형 보간 샘플링
+ *
+ * @mem: 글로벌 메모리 공간
+ * @tex_array_base: 텍스처 배열 기준 주소
+ * @x, @y: 좌표
+ * @width, @height: 텍스처 크기
+ * @elem_size: 요소 크기(바이트)
+ * @alpha, @beta: x/y 방향 보간 가중치
+ * @b_lim: 경계 처리 함수(wrap/clamp)
+ * @return: 보간된 float 샘플 값
+ *
+ * 2D 텍스처의 선형 필터링을 에뮬레이션한다. 인접한 4개 텍셀을 읽어
+ * bilinear interpolation 공식으로 합성한다.
+ * 실행 컨텍스트: tex_impl 낶부 (F32 linear 필터 모드).
+ */
+
 float tex_linf_sampling(memory_space *mem, unsigned tex_array_base, int x,
                         int y, unsigned int width, unsigned int height,
                         size_t elem_size, float alpha, float beta,
@@ -8021,6 +8821,18 @@ float tex_linf_sampling(memory_space *mem, unsigned tex_array_base, int x,
   return sample;
 }
 
+/*
+ * [한국어]
+ * textureNormalizeElementSigned - signed 정수 텍스처 요소를 [-1,1]로 정규화
+ *
+ * @element: 원본 정수 값
+ * @bits: 채널 비트 수
+ * @return: [-1.0, 1.0] 범위의 float
+ *
+ * cudaReadModeNormalizedFloat 모드에서 signed 정수 채널을 실수로 변환할 때 사용한다.
+ * 실행 컨텍스트: textureNormalizeOutput 낶부.
+ */
+
 float textureNormalizeElementSigned(int element, int bits) {
   if (bits) {
     int maxN = (1 << bits) - 1;
@@ -8036,6 +8848,18 @@ float textureNormalizeElementSigned(int element, int bits) {
   }
 }
 
+/*
+ * [한국어]
+ * textureNormalizeElementUnsigned - unsigned 정수 텍스처 요소를 [0,1]로 정규화
+ *
+ * @element: 원본 정수 값
+ * @bits: 채널 비트 수
+ * @return: [0.0, 1.0] 범위의 float
+ *
+ * cudaReadModeNormalizedFloat 모드에서 unsigned 정수 채널을 실수로 변환할 때 사용한다.
+ * 실행 컨텍스트: textureNormalizeOutput 낶부.
+ */
+
 float textureNormalizeElementUnsigned(unsigned int element, int bits) {
   if (bits) {
     unsigned int maxN = (1 << bits) - 1;
@@ -8045,6 +8869,18 @@ float textureNormalizeElementUnsigned(unsigned int element, int bits) {
     return 0.0f;
   }
 }
+
+/*
+ * [한국어]
+ * textureNormalizeOutput - 텍스처 출력 4채널 정규화
+ *
+ * @desc: cudaArray 채널 포맷 설명자
+ * @datax, @datay, @dataz, @dataw: in/out 텍스처 요소 값
+ *
+ * 채널 포맷 종류(signed/unsigned)에 따라 4개 채널을 모두 정규화한다.
+ * cudaReadModeNormalizedFloat 모드에서 tex_impl 마지막에 호출된다.
+ * 실행 컨텍스트: tex_impl 낶부.
+ */
 
 void textureNormalizeOutput(const struct cudaChannelFormatDesc &desc,
                             ptx_reg_t &datax, ptx_reg_t &datay,
@@ -8065,6 +8901,25 @@ void textureNormalizeOutput(const struct cudaChannelFormatDesc &desc,
            "integer elements");
   }
 }
+
+/*
+ * [한국어]
+ * tex_impl - PTX `tex` 명령어 구현: 텍스처 샘플링
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 텍스처 이름, 좌표, 차원, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `tex.{geom}.sampled_type d, sampler, coords` 명령어를 구현한다.
+ * 1D/2D 텍스처에 대해 좌표 변환(normalized/un-normalized), 주소 모드(clamp/wrap),
+ * 필터 모드(point/linear)를 처리하여 텍셀 데이터를 읽는다.
+ * 마지막으로 m_last_effective_address와 m_last_memory_space를 기록하여
+ * 타이밍 모델의 L1T/L2 텍스처 캐시 접근을 지원한다.
+ * 텍스처 캐시 라인 크기는 gpgpusim.config의 -gpgpu_texcache_linesize 등으로 설정된다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [tex_impl] → tex_linf_sampling() → set_vector_operand_values()
+ */
 
 void tex_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 #if (CUDART_VERSION <= 1200)
@@ -8398,18 +9253,74 @@ void tex_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 #endif
 }
 
+/*
+ * [한국어]
+ * txq_impl - PTX `txq` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `txq`는 텍스처/서피스 속성 쿼리 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void txq_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * trap_impl - PTX `trap` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `trap`은 디버거 트랩 명령어이다.
+ * 현재 GPGPU-Sim에서는 구현되어 있지 않아 inst_not_implemented()를 호출한다.
+ */
+
 void trap_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vabsdiff_impl - PTX `vabsdiff` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vabsdiff는 현재 구현되어 있지 않다.
+ */
+
 void vabsdiff_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vadd_impl - PTX `vadd` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vadd는 현재 구현되어 있지 않다.
+ */
+
 void vadd_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vmad_impl - PTX `vmad` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vmad는 현재 구현되어 있지 않다.
+ */
+
 void vmad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
@@ -8417,40 +9328,126 @@ void vmad_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
 #define VMAX 0
 #define VMIN 1
 
+/*
+ * [한국어]
+ * vmax_impl - PTX `vmax` 명령어 구현: 비디오 최대값
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `vmax`는 비디오 메모리 연산용 최대값 명령어로,
+ * video_mem_instruction()에 VMAX 연산 코드를 넘겨 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ */
+
 void vmax_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   video_mem_instruction(pI, thread, VMAX);
 }
+
+/*
+ * [한국어]
+ * vmin_impl - PTX `vmin` 명령어 구현: 비디오 최소값
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `vmin`은 비디오 메모리 연산용 최소값 명령어로,
+ * video_mem_instruction()에 VMIN 연산 코드를 넘겨 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ */
+
 void vmin_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   video_mem_instruction(pI, thread, VMIN);
 }
+
+/*
+ * [한국어]
+ * vset_impl - PTX `vset` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vset은 현재 구현되어 있지 않다.
+ */
+
 void vset_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vshl_impl - PTX `vshl` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vshl은 현재 구현되어 있지 않다.
+ */
+
 void vshl_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vshr_impl - PTX `vshr` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vshr은 현재 구현되어 있지 않다.
+ */
+
 void vshr_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
+
+/*
+ * [한국어]
+ * vsub_impl - PTX `vsub` 명령어 구현 (미구현)
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX 비디오 명령어 vsub는 현재 구현되어 있지 않다.
+ */
+
 void vsub_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   inst_not_implemented(pI);
 }
 
+/*
+ * [한국어]
+ * vote_impl - PTX `vote` 명령어 구현: 워프 내 집계 투표
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, 소스 predicate, 투표 모드 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `vote.mode.pred d, a` / `vote.ballot.b32 d, a` 명령어를 구현한다.
+ * 워프 내 모든 스레드의 predicate를 집계하여 any/all/uni/ballot 결과를 생성한다.
+ * 마지막 스레드(last_tid)가 결과를 워프 전체에 기록한다.
+ * PTXPlus zero-flag 규칙에 따라 predicate 값을 반전하여 평가한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 — 워프 단위 협력적 동작.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [vote_impl] → set_operand_value()
+ */
+
 void vote_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
-  static bool first_in_warp = true;
-  static bool and_all;
-  static bool or_all;
-  static unsigned int ballot_result;
+  static bool first_in_warp = true;  // [한국어] 워프 첫 실행 플래그
+  static bool and_all;  // [한국어] 전원 true 집계 변수
+  static bool or_all;  // [한국어] 한 명 이상 true 집계 변수
+  static unsigned int ballot_result;  // [한국어] ballot 비트 마스크
   static std::list<ptx_thread_info *> threads_in_warp;
   static unsigned last_tid;
 
-  if (first_in_warp) {
+  if (first_in_warp) {  // [한국어] 워프 첫 스레드 초기화
     first_in_warp = false;
     threads_in_warp.clear();
     and_all = true;
     or_all = false;
     ballot_result = 0;
-    int offset = 31;
+    int offset = 31;  // [한국어] 활성 스레드 최대 레인 탐색
     while ((offset >= 0) && !pI->active(offset)) offset--;
     assert(offset >= 0);
     last_tid =
@@ -8465,20 +9462,20 @@ void vote_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   // predicate value was changed so the lowest bit being set means the zero flag
   // is set. As a result, the value of src1_data.pred must be inverted to get
   // proper behavior
-  bool pred_value = !(src1_data.pred & 0x0001);
-  bool invert = src1.is_neg_pred();
+  bool pred_value = !(src1_data.pred & 0x0001);  // [한국어] predicate 반전
+  bool invert = src1.is_neg_pred();  // [한국어] negate predicate 여부
 
   threads_in_warp.push_back(thread);
-  and_all &= (invert ^ pred_value);
-  or_all |= (invert ^ pred_value);
+  and_all &= (invert ^ pred_value);  // [한국어] 전원 true 업데이트
+  or_all |= (invert ^ pred_value);  // [한국어] any true 업데이트
 
   // vote.ballot
   if (invert ^ pred_value) {
     int lane_id = thread->get_hw_tid() % pI->warp_size();
-    ballot_result |= (1 << lane_id);
+    ballot_result |= (1 << lane_id);  // [한국어] ballot 마스크 비트 설정
   }
 
-  if (thread->get_hw_tid() == last_tid) {
+  if (thread->get_hw_tid() == last_tid) {  // [한국어] 마지막 스레드가 결과 분배
     if (pI->vote_mode() == ptx_instruction::vote_ballot) {
       ptx_reg_t data = ballot_result;
       for (std::list<ptx_thread_info *>::iterator t = threads_in_warp.begin();
@@ -8490,13 +9487,13 @@ void vote_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
       bool pred_value = false;
 
       switch (pI->vote_mode()) {
-        case ptx_instruction::vote_any:
+        case ptx_instruction::vote_any:  // [한국어] any 모드
           pred_value = or_all;
           break;
-        case ptx_instruction::vote_all:
+        case ptx_instruction::vote_all:  // [한국어] all 모드
           pred_value = and_all;
           break;
-        case ptx_instruction::vote_uni:
+        case ptx_instruction::vote_uni:  // [한국어] uni 모드
           pred_value = (or_all ^ and_all);
           break;
         default:
@@ -8516,6 +9513,21 @@ void vote_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   }
 }
 
+/*
+ * [한국어]
+ * activemask_impl - PTX `activemask` 명령어 구현: 현재 워프 활성 마스크 읽기
+ *
+ * @pI: 실행 중인 PTX 명령어
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `activemask.b32 d` 명령어를 구현한다.
+ * 현재 워프에서 활성화된 스레드들의 비트 마스크를 U32 레지스터에 기록한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [activemask_impl] → set_operand_value()
+ */
+
 void activemask_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   active_mask_t l_activemask_bitset = pI->get_warp_active_mask();
   uint32_t l_activemask_uint =
@@ -8524,6 +9536,21 @@ void activemask_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   const operand_info &dst = pI->dst();
   thread->set_operand_value(dst, l_activemask_uint, U32_TYPE, thread, pI);
 }
+
+/*
+ * [한국어]
+ * xor_impl - PTX `xor` 명령어 구현: 비트/프레디케이트 XOR
+ *
+ * @pI: 실행 중인 PTX 명령어 (목적지, src1, src2, 타입 포함)
+ * @thread: 현재 실행 중인 PTX 스레드
+ *
+ * PTX `xor.type d, a, b` 명령어를 구현한다. d = a ^ b.
+ * predicate 타입은 PTXPlus zero-flag 규칙(1=false, 0=true)을 고려하여 처리한다.
+ * 실행 컨텍스트: 기능 시뮬레이션 스레드.
+ *
+ * 호출 체인:
+ *   ptx_thread_info::ptx_exec_inst() → [xor_impl] → set_operand_value()
+ */
 
 void xor_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   ptx_reg_t src1_data, src2_data, data;
@@ -8537,10 +9564,10 @@ void xor_impl(const ptx_instruction *pI, ptx_thread_info *thread) {
   src2_data = thread->get_operand_value(src2, dst, i_type, thread, 1);
 
   // the way ptxplus handles predicates: 1 = false and 0 = true
-  if (i_type == PRED_TYPE)
-    data.pred = ~(~(src1_data.pred) ^ ~(src2_data.pred));
+  if (i_type == PRED_TYPE)  // [한국어] predicate 타입 분기
+    data.pred = ~(~(src1_data.pred) ^ ~(src2_data.pred));  // [한국어] PTXPlus 규칙으로 XOR
   else
-    data.u64 = src1_data.u64 ^ src2_data.u64;
+    data.u64 = src1_data.u64 ^ src2_data.u64;  // [한국어] 비트 XOR
 
   thread->set_operand_value(dst, data, i_type, thread, pI);
 }

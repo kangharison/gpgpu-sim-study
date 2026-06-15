@@ -127,6 +127,30 @@
 #ifndef __INCLUDE_XML_NODE__
 #define __INCLUDE_XML_NODE__
 
+/*
+ * [한국어 설명] XMLParser 라이브러리 헤더 (xmlParser.h)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 McPAT/AccelWattch가 사용하는 경량 XML DOM 파서 라이브러리의
+ * 공개 인터페이스를 정의한다. XML 파일/문자열을 파싱하여 XMLNode 트리를
+ * 구성하고, 자식/속성/텍스트/주석 탐색, 수정, 직렬화, Base64 인코딩 기능을 제공한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * XML_Parse.cc::ParseXML::parse()
+ * → XMLNode::openFileHelper() / XMLNode::parseFile()
+ * → XMLNode 트리 생성 → getChildNode()/getAttribute() 등으로 접근
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: 표준 C 라이브러리 (stdlib, wchar/tchar 등)
+ * 사용: XML_Parse.cc (AccelWattch XML 파싱)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * XMLError / XMLElementType — 파싱 오류 및 노드 타입 열거형
+ * XMLNode — XML DOM 노드 클래스 (파싱/탐색/수정/직렬화)
+ * XMLAttribute / XMLClear / XMLResults / XMLNodeContents — 보조 구조체
+ * ToXMLStringTool / XMLParserBase64Tool — XML 특수문자 이스케이프 및 Base64 유틸
+ * xmlto? 함수들 — NULL-safe atoi/atof 래퍼
+ */
 #include <stdlib.h>
 
 #ifdef _UNICODE
@@ -200,6 +224,9 @@
 #endif /* TRUE */
 
 /// Enumeration for XML parse errors.
+/*
+ * [한국어] XML 파싱 중 발생할 수 있는 오류 코드 열거형
+ */
 typedef enum XMLError {
   eXMLErrorNone = 0,
   eXMLErrorMissingEndTag,
@@ -227,6 +254,9 @@ typedef enum XMLError {
 
 /// Enumeration used to manage type of data. Use in conjunction with structure
 /// XMLNodeContents
+/*
+ * [한국어] XMLNode 낮부 콘텐츠 타입(자식/속성/텍스트/주석/NULL) 열거형
+ */
 typedef enum XMLElementType {
   eNodeChild = 0,
   eNodeAttribute = 1,
@@ -236,12 +266,18 @@ typedef enum XMLElementType {
 } XMLElementType;
 
 /// Structure used to obtain error details if the parse fails.
+/*
+ * [한국어] 파싱 실패 시 줄/열 위치와 오류 코드를 담는 구조체
+ */
 typedef struct XMLResults {
   enum XMLError error;
   int nLine, nColumn;
 } XMLResults;
 
 /// Structure for XML clear (unformatted) node (usually comments)
+/*
+ * [한국어] 주석/DOCTYPE 등 unformatted clear 노드 구조체
+ */
 typedef struct XMLClear {
   XMLCSTR lpszValue;
   XMLCSTR lpszOpenTag;
@@ -249,6 +285,9 @@ typedef struct XMLClear {
 } XMLClear;
 
 /// Structure for XML attribute.
+/*
+ * [한국어] XML 속성(name=value) 구조체
+ */
 typedef struct XMLAttribute {
   XMLCSTR lpszName;
   XMLCSTR lpszValue;
@@ -270,6 +309,15 @@ struct XMLNodeContents;
  * XMLNode::openFileHelper </li> <li> XMLNode::createXMLTopNode (or
  * XMLNode::createXMLTopNode_WOSD)</li>
  * </ul> */
+/*
+ * [한국어] XMLNode — XML DOM 트리의 핵심 노드 클래스
+ *
+ * XML 파일/문자열 파싱 결과를 나타낸다.
+ * shallow copy/reference counting을 사용하며, 자식/속성/텍스트/주석에 접근하고
+ * 트리를 수정·직렬화할 수 있는 메서드를 제공한다.
+ * 첫 인스턴스는 parseString, parseFile, openFileHelper, createXMLTopNode 중
+ * 하나로 생성해야 한다.
+ */
 typedef struct XMLDLLENTRY XMLNode {
  private:
   struct XMLNodeDataTag;
@@ -670,7 +718,10 @@ typedef struct XMLDLLENTRY XMLNode {
   /** @} */
 
   /// Enumeration for XML character encoding.
-  typedef enum XMLCharEncoding {
+  /*
+ * [한국어] XML 문자 인코딩(UTF8/ShiftJIS/Big5 등) 열거형
+ */
+typedef enum XMLCharEncoding {
     char_encoding_error = 0,
     char_encoding_UTF8 = 1,
     char_encoding_legacy = 2,
@@ -805,6 +856,9 @@ typedef struct XMLDLLENTRY XMLNode {
 } XMLNode;
 
 /// This structure is given by the function XMLNode::enumContents.
+/*
+ * [한국어] enumContents()가 반환하는 노드 콘텐츠 공용체-style 구조체
+ */
 typedef struct XMLNodeContents {
   /// This dictates what's the content of the XMLNodeContent
   enum XMLElementType etype;

@@ -84,6 +84,32 @@
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 #include "xmlParser.h"
+/*
+ * [한국어 설명] XMLParser 라이브러리 구현 (xmlParser.cc)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 xmlParser.h에 선언된 XML DOM 파서의 구현체이다.
+ * 재귀 하강(recursive descent) 파서로 XML 문자열/파일을 읽어 XMLNode 트리를
+ * 구성하고, 노드 탐색·수정·직렬화·Base64 인코딩 기능을 구현한다.
+ * AccelWattch의 XML 설정 파일 파싱에 직접 사용된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * XML_Parse.cc::ParseXML::parse()
+ * → XMLNode::openFileHelper() / parseFile()
+ * → ParseXMLElement() 재귀 파싱 → XMLNode 트리 구성
+ * → getChildNode()/getAttribute()로 노드 접근
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: xmlParser.h (인터페이스), 표준 C/C++ 라이브러리
+ * 사용: XML_Parse.cc (AccelWattch 설정 파싱)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * parseString/parseFile/openFileHelper — XML 입력을 DOM 트리로 파싱
+ * ParseXMLElement — 재귀적으로 한 XML 요소를 파싱하는 핵심 함수
+ * getChildNode/getAttribute/getText — 트리 탐색 메서드
+ * addChild/updateAttribute/createXMLString — 트리 생성/수정/직렬화
+ * XMLParserBase64Tool — Base64 인코딩/디코딩
+ */
 #ifdef _XMLWINDOWS
 //#ifdef _DEBUG
 //#define _CRTDBG_MAP_ALLOC
@@ -99,10 +125,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/*
+ * [한국어] XMLNode::getVersion - XMLParser 라이브러리 버전 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::getVersion() 호출 경로
+ */
 
 XMLCSTR XMLNode::getVersion() { return _CXML("v2.39"); }
+/*
+ * [한국어] freeXMLString - XMLNode에서 할당된 문자열 메모리 해제
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   freeXMLString() 호출 경로
+ */
 void freeXMLString(XMLSTR t) {
-  if (t) free(t);
+  if (t) free(t);  // [한국어] 조건 분기
 }
 
 static XMLNode::XMLCharEncoding characterEncoding = XMLNode::char_encoding_UTF8;
@@ -152,56 +192,63 @@ static XMLCharacterEntity XMLEntities[] = {
 // The following function parses the XML errors into a user friendly string.
 // You can edit this to change the output language of the library to something
 // else.
+/*
+ * [한국어] XMLNode::getError - XMLError 코드를 사람이 읽을 수 있는 문자열로 변환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::getError() 호출 경로
+ */
 XMLCSTR XMLNode::getError(XMLError xerror) {
-  switch (xerror) {
-    case eXMLErrorNone:
-      return _CXML("No error");
-    case eXMLErrorMissingEndTag:
-      return _CXML("Warning: Unmatched end tag");
-    case eXMLErrorNoXMLTagFound:
-      return _CXML("Warning: No XML tag found");
-    case eXMLErrorEmpty:
-      return _CXML("Error: No XML data");
-    case eXMLErrorMissingTagName:
-      return _CXML("Error: Missing start tag name");
-    case eXMLErrorMissingEndTagName:
-      return _CXML("Error: Missing end tag name");
-    case eXMLErrorUnmatchedEndTag:
-      return _CXML("Error: Unmatched end tag");
-    case eXMLErrorUnmatchedEndClearTag:
-      return _CXML("Error: Unmatched clear tag end");
-    case eXMLErrorUnexpectedToken:
-      return _CXML("Error: Unexpected token found");
-    case eXMLErrorNoElements:
-      return _CXML("Error: No elements found");
-    case eXMLErrorFileNotFound:
-      return _CXML("Error: File not found");
-    case eXMLErrorFirstTagNotFound:
-      return _CXML("Error: First Tag not found");
-    case eXMLErrorUnknownCharacterEntity:
-      return _CXML("Error: Unknown character entity");
-    case eXMLErrorCharacterCodeAbove255:
-      return _CXML(
+  switch (xerror) {  // [한국어] switch 분기
+    case eXMLErrorNone:  // [한국어] case 레이블
+      return _CXML("No error");  // [한국어] 값 반환
+    case eXMLErrorMissingEndTag:  // [한국어] case 레이블
+      return _CXML("Warning: Unmatched end tag");  // [한국어] 값 반환
+    case eXMLErrorNoXMLTagFound:  // [한국어] case 레이블
+      return _CXML("Warning: No XML tag found");  // [한국어] 값 반환
+    case eXMLErrorEmpty:  // [한국어] case 레이블
+      return _CXML("Error: No XML data");  // [한국어] 값 반환
+    case eXMLErrorMissingTagName:  // [한국어] case 레이블
+      return _CXML("Error: Missing start tag name");  // [한국어] 값 반환
+    case eXMLErrorMissingEndTagName:  // [한국어] case 레이블
+      return _CXML("Error: Missing end tag name");  // [한국어] 값 반환
+    case eXMLErrorUnmatchedEndTag:  // [한국어] case 레이블
+      return _CXML("Error: Unmatched end tag");  // [한국어] 값 반환
+    case eXMLErrorUnmatchedEndClearTag:  // [한국어] case 레이블
+      return _CXML("Error: Unmatched clear tag end");  // [한국어] 값 반환
+    case eXMLErrorUnexpectedToken:  // [한국어] case 레이블
+      return _CXML("Error: Unexpected token found");  // [한국어] 값 반환
+    case eXMLErrorNoElements:  // [한국어] case 레이블
+      return _CXML("Error: No elements found");  // [한국어] 값 반환
+    case eXMLErrorFileNotFound:  // [한국어] case 레이블
+      return _CXML("Error: File not found");  // [한국어] 값 반환
+    case eXMLErrorFirstTagNotFound:  // [한국어] case 레이블
+      return _CXML("Error: First Tag not found");  // [한국어] 값 반환
+    case eXMLErrorUnknownCharacterEntity:  // [한국어] case 레이블
+      return _CXML("Error: Unknown character entity");  // [한국어] 값 반환
+    case eXMLErrorCharacterCodeAbove255:  // [한국어] case 레이블
+      return _CXML(  // [한국어] 값 반환
           "Error: Character code above 255 is forbidden in MultiByte char "
           "mode.");
-    case eXMLErrorCharConversionError:
-      return _CXML(
+    case eXMLErrorCharConversionError:  // [한국어] case 레이블
+      return _CXML(  // [한국어] 값 반환
           "Error: unable to convert between WideChar and MultiByte chars");
-    case eXMLErrorCannotOpenWriteFile:
-      return _CXML("Error: unable to open file for writing");
-    case eXMLErrorCannotWriteFile:
-      return _CXML("Error: cannot write into file");
+    case eXMLErrorCannotOpenWriteFile:  // [한국어] case 레이블
+      return _CXML("Error: unable to open file for writing");  // [한국어] 값 반환
+    case eXMLErrorCannotWriteFile:  // [한국어] case 레이블
+      return _CXML("Error: cannot write into file");  // [한국어] 값 반환
 
-    case eXMLErrorBase64DataSizeIsNotMultipleOf4:
-      return _CXML("Warning: Base64-string length is not a multiple of 4");
-    case eXMLErrorBase64DecodeTruncatedData:
-      return _CXML("Warning: Base64-string is truncated");
-    case eXMLErrorBase64DecodeIllegalCharacter:
-      return _CXML("Error: Base64-string contains an illegal character");
-    case eXMLErrorBase64DecodeBufferTooSmall:
-      return _CXML("Error: Base64 decode output buffer is too small");
+    case eXMLErrorBase64DataSizeIsNotMultipleOf4:  // [한국어] case 레이블
+      return _CXML("Warning: Base64-string length is not a multiple of 4");  // [한국어] 값 반환
+    case eXMLErrorBase64DecodeTruncatedData:  // [한국어] case 레이블
+      return _CXML("Warning: Base64-string is truncated");  // [한국어] 값 반환
+    case eXMLErrorBase64DecodeIllegalCharacter:  // [한국어] case 레이블
+      return _CXML("Error: Base64-string contains an illegal character");  // [한국어] 값 반환
+    case eXMLErrorBase64DecodeBufferTooSmall:  // [한국어] case 레이블
+      return _CXML("Error: Base64 decode output buffer is too small");  // [한국어] 값 반환
   };
-  return _CXML("Unknown");
+  return _CXML("Unknown");  // [한국어] 값 반환
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -223,40 +270,40 @@ char myIsTextWideChar(const void *b,
 #ifdef sun
   // for SPARC processors: wchar_t* buffers must always be alligned, otherwise
   // it's a char* buffer.
-  if ((((unsigned long)b) % sizeof(wchar_t)) != 0) return FALSE;
+  if ((((unsigned long)b) % sizeof(wchar_t)) != 0) return FALSE;  // [한국어] 조건 분기
 #endif
   const wchar_t *s = (const wchar_t *)b;
 
   // buffer too small:
-  if (len < (int)sizeof(wchar_t)) return FALSE;
+  if (len < (int)sizeof(wchar_t)) return FALSE;  // [한국어] 조건 분기
 
   // odd length test
-  if (len & 1) return FALSE;
+  if (len & 1) return FALSE;  // [한국어] 조건 분기
 
   /* only checks the first 256 characters */
   len = mmin(256, len / sizeof(wchar_t));
 
   // Check for the special byte order:
-  if (*((unsigned short *)s) == 0xFFFE)
-    return TRUE;  // IS_TEXT_UNICODE_REVERSE_SIGNATURE;
-  if (*((unsigned short *)s) == 0xFEFF)
-    return TRUE;  // IS_TEXT_UNICODE_SIGNATURE
+  if (*((unsigned short *)s) == 0xFFFE)  // [한국어] 조건 분기
+    return TRUE;  // IS_TEXT_UNICODE_REVERSE_SIGNATURE;  // [한국어] 값 반환
+  if (*((unsigned short *)s) == 0xFEFF)  // [한국어] 조건 분기
+    return TRUE;  // IS_TEXT_UNICODE_SIGNATURE  // [한국어] 값 반환
 
   // checks for ASCII characters in the UNICODE stream
   int i, stats = 0;
-  for (i = 0; i < len; i++)
-    if (s[i] <= (unsigned short)255) stats++;
-  if (stats > len / 2) return TRUE;
+  for (i = 0; i < len; i++)  // [한국어] 반복문
+    if (s[i] <= (unsigned short)255) stats++;  // [한국어] 조건 분기
+  if (stats > len / 2) return TRUE;  // [한국어] 조건 분기
 
   // Check for UNICODE NULL chars
-  for (i = 0; i < len; i++)
-    if (!s[i]) return TRUE;
+  for (i = 0; i < len; i++)  // [한국어] 반복문
+    if (!s[i]) return TRUE;  // [한국어] 조건 분기
 
-  return FALSE;
+  return FALSE;  // [한국어] 값 반환
 }
 #else
 char myIsTextWideChar(const void *b, int l) {
-  return (char)IsTextUnicode((CONST LPVOID)b, l, NULL);
+  return (char)IsTextUnicode((CONST LPVOID)b, l, NULL);  // [한국어] 값 반환
 };
 #endif
 #endif
@@ -267,40 +314,40 @@ char myIsTextWideChar(const void *b, int l) {
 #ifdef _XMLWIDECHAR
 wchar_t *myMultiByteToWideChar(const char *s, XMLNode::XMLCharEncoding ce) {
   int i;
-  if (ce == XMLNode::char_encoding_UTF8)
+  if (ce == XMLNode::char_encoding_UTF8)  // [한국어] 조건 분기
     i = (int)MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
   else
     i = (int)MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, s, -1, NULL, 0);
-  if (i < 0) return NULL;
+  if (i < 0) return NULL;  // [한국어] 조건 분기
   wchar_t *d = (wchar_t *)malloc((i + 1) * sizeof(XMLCHAR));
-  if (ce == XMLNode::char_encoding_UTF8)
+  if (ce == XMLNode::char_encoding_UTF8)  // [한국어] 조건 분기
     i = (int)MultiByteToWideChar(CP_UTF8, 0, s, -1, d, i);
   else
     i = (int)MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, s, -1, d, i);
   d[i] = 0;
-  return d;
+  return d;  // [한국어] 값 반환
 }
 static inline FILE *xfopen(XMLCSTR filename, XMLCSTR mode) {
-  return _wfopen(filename, mode);
+  return _wfopen(filename, mode);  // [한국어] 값 반환
 }
 static inline int xstrlen(XMLCSTR c) { return (int)wcslen(c); }
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return _wcsnicmp(c1, c2, l);
+  return _wcsnicmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstrncmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return wcsncmp(c1, c2, l);
+  return wcsncmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) { return _wcsicmp(c1, c2); }
 static inline XMLSTR xstrstr(XMLCSTR c1, XMLCSTR c2) {
-  return (XMLSTR)wcsstr(c1, c2);
+  return (XMLSTR)wcsstr(c1, c2);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrcpy(XMLSTR c1, XMLCSTR c2) {
-  return (XMLSTR)wcscpy(c1, c2);
+  return (XMLSTR)wcscpy(c1, c2);  // [한국어] 값 반환
 }
 #else
 char *myWideCharToMultiByte(const wchar_t *s) {
   UINT codePage = CP_ACP;
-  if (characterEncoding == XMLNode::char_encoding_UTF8) codePage = CP_UTF8;
+  if (characterEncoding == XMLNode::char_encoding_UTF8) codePage = CP_UTF8;  // [한국어] 조건 분기
   int i = (int)WideCharToMultiByte(codePage,  // code page
                                    0,         // performance and mapping flags
                                    s,         // wide-character string
@@ -310,7 +357,7 @@ char *myWideCharToMultiByte(const wchar_t *s) {
                                    NULL,      // default for unmappable chars
                                    NULL       // set when default char used
   );
-  if (i < 0) return NULL;
+  if (i < 0) return NULL;  // [한국어] 조건 분기
   char *d = (char *)malloc(i + 1);
   WideCharToMultiByte(codePage,  // code page
                       0,         // performance and mapping flags
@@ -322,31 +369,31 @@ char *myWideCharToMultiByte(const wchar_t *s) {
                       NULL       // set when default char used
   );
   d[i] = 0;
-  return d;
+  return d;  // [한국어] 값 반환
 }
 static inline FILE *xfopen(XMLCSTR filename, XMLCSTR mode) {
-  return fopen(filename, mode);
+  return fopen(filename, mode);  // [한국어] 값 반환
 }
 static inline int xstrlen(XMLCSTR c) { return (int)strlen(c); }
 #ifdef __BORLANDC__
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return strnicmp(c1, c2, l);
+  return strnicmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) { return stricmp(c1, c2); }
 #else
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return _strnicmp(c1, c2, l);
+  return _strnicmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) { return _stricmp(c1, c2); }
 #endif
 static inline int xstrncmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return strncmp(c1, c2, l);
+  return strncmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrstr(XMLCSTR c1, XMLCSTR c2) {
-  return (XMLSTR)strstr(c1, c2);
+  return (XMLSTR)strstr(c1, c2);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrcpy(XMLSTR c1, XMLCSTR c2) {
-  return (XMLSTR)strcpy(c1, c2);
+  return (XMLSTR)strcpy(c1, c2);  // [한국어] 값 반환
 }
 #endif
 #else
@@ -357,85 +404,85 @@ char *myWideCharToMultiByte(const wchar_t *s) { return NULL; }
 char *myWideCharToMultiByte(const wchar_t *s) {
   const wchar_t *ss = s;
   int i = (int)wcsrtombs(NULL, &ss, 0, NULL);
-  if (i < 0) return NULL;
+  if (i < 0) return NULL;  // [한국어] 조건 분기
   char *d = (char *)malloc(i + 1);
   wcsrtombs(d, &s, i, NULL);
   d[i] = 0;
-  return d;
+  return d;  // [한국어] 값 반환
 }
 #endif
 #ifdef _XMLWIDECHAR
 wchar_t *myMultiByteToWideChar(const char *s, XMLNode::XMLCharEncoding ce) {
   const char *ss = s;
   int i = (int)mbsrtowcs(NULL, &ss, 0, NULL);
-  if (i < 0) return NULL;
+  if (i < 0) return NULL;  // [한국어] 조건 분기
   wchar_t *d = (wchar_t *)malloc((i + 1) * sizeof(wchar_t));
   mbsrtowcs(d, &s, i, NULL);
   d[i] = 0;
-  return d;
+  return d;  // [한국어] 값 반환
 }
 int xstrlen(XMLCSTR c) { return wcslen(c); }
 #ifdef sun
 // for CC
 #include <widec.h>
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return wsncasecmp(c1, c2, l);
+  return wsncasecmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstrncmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return wsncmp(c1, c2, l);
+  return wsncmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) { return wscasecmp(c1, c2); }
 #else
 // for gcc
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return wcsncasecmp(c1, c2, l);
+  return wcsncasecmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstrncmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return wcsncmp(c1, c2, l);
+  return wcsncmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) {
-  return wcscasecmp(c1, c2);
+  return wcscasecmp(c1, c2);  // [한국어] 값 반환
 }
 #endif
 static inline XMLSTR xstrstr(XMLCSTR c1, XMLCSTR c2) {
-  return (XMLSTR)wcsstr(c1, c2);
+  return (XMLSTR)wcsstr(c1, c2);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrcpy(XMLSTR c1, XMLCSTR c2) {
-  return (XMLSTR)wcscpy(c1, c2);
+  return (XMLSTR)wcscpy(c1, c2);  // [한국어] 값 반환
 }
 static inline FILE *xfopen(XMLCSTR filename, XMLCSTR mode) {
   char *filenameAscii = myWideCharToMultiByte(filename);
   FILE *f;
-  if (mode[0] == _CXML('r'))
+  if (mode[0] == _CXML('r'))  // [한국어] 조건 분기
     f = fopen(filenameAscii, "rb");
   else
     f = fopen(filenameAscii, "wb");
   free(filenameAscii);
-  return f;
+  return f;  // [한국어] 값 반환
 }
 #else
 static inline FILE *xfopen(XMLCSTR filename, XMLCSTR mode) {
-  return fopen(filename, mode);
+  return fopen(filename, mode);  // [한국어] 값 반환
 }
 static inline int xstrlen(XMLCSTR c) { return strlen(c); }
 static inline int xstrnicmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return strncasecmp(c1, c2, l);
+  return strncasecmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstrncmp(XMLCSTR c1, XMLCSTR c2, int l) {
-  return strncmp(c1, c2, l);
+  return strncmp(c1, c2, l);  // [한국어] 값 반환
 }
 static inline int xstricmp(XMLCSTR c1, XMLCSTR c2) {
-  return strcasecmp(c1, c2);
+  return strcasecmp(c1, c2);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrstr(XMLCSTR c1, XMLCSTR c2) {
-  return (XMLSTR)strstr(c1, c2);
+  return (XMLSTR)strstr(c1, c2);  // [한국어] 값 반환
 }
 static inline XMLSTR xstrcpy(XMLSTR c1, XMLCSTR c2) {
-  return (XMLSTR)strcpy(c1, c2);
+  return (XMLSTR)strcpy(c1, c2);  // [한국어] 값 반환
 }
 #endif
 static inline int _strnicmp(const char *c1, const char *c2, int l) {
-  return strncasecmp(c1, c2, l);
+  return strncasecmp(c1, c2, l);  // [한국어] 값 반환
 }
 #endif
 
@@ -450,82 +497,82 @@ static inline int _strnicmp(const char *c1, const char *c2, int l) {
 // for Microsoft Visual Studio 6.0 and Microsoft Visual Studio .NET and Borland
 // C++ Builder 6.0
 char xmltob(XMLCSTR t, int v) {
-  if (t && (*t)) return (char)_wtoi(t);
-  return v;
+  if (t && (*t)) return (char)_wtoi(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 int xmltoi(XMLCSTR t, int v) {
-  if (t && (*t)) return _wtoi(t);
-  return v;
+  if (t && (*t)) return _wtoi(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 long xmltol(XMLCSTR t, long v) {
-  if (t && (*t)) return _wtol(t);
-  return v;
+  if (t && (*t)) return _wtol(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 double xmltof(XMLCSTR t, double v) {
-  if (t && (*t)) wscanf(t, "%f", &v); /*v=_wtof(t);*/
-  return v;
+  if (t && (*t)) wscanf(t, "%f", &v); /*v=_wtof(t);*/  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 #else
 #ifdef sun
 // for CC
 #include <widec.h>
 char xmltob(XMLCSTR t, int v) {
-  if (t) return (char)wstol(t, NULL, 10);
-  return v;
+  if (t) return (char)wstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 int xmltoi(XMLCSTR t, int v) {
-  if (t) return (int)wstol(t, NULL, 10);
-  return v;
+  if (t) return (int)wstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 long xmltol(XMLCSTR t, long v) {
-  if (t) return wstol(t, NULL, 10);
-  return v;
+  if (t) return wstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 #else
 // for gcc
 char xmltob(XMLCSTR t, int v) {
-  if (t) return (char)wcstol(t, NULL, 10);
-  return v;
+  if (t) return (char)wcstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 int xmltoi(XMLCSTR t, int v) {
-  if (t) return (int)wcstol(t, NULL, 10);
-  return v;
+  if (t) return (int)wcstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 long xmltol(XMLCSTR t, long v) {
-  if (t) return wcstol(t, NULL, 10);
-  return v;
+  if (t) return wcstol(t, NULL, 10);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 #endif
 double xmltof(XMLCSTR t, double v) {
-  if (t && (*t)) wscanf(t, "%f", &v); /*v=_wtof(t);*/
-  return v;
+  if (t && (*t)) wscanf(t, "%f", &v); /*v=_wtof(t);*/  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 #endif
 #else
 char xmltob(XMLCSTR t, char v) {
-  if (t && (*t)) return (char)atoi(t);
-  return v;
+  if (t && (*t)) return (char)atoi(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 int xmltoi(XMLCSTR t, int v) {
-  if (t && (*t)) return atoi(t);
-  return v;
+  if (t && (*t)) return atoi(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 long xmltol(XMLCSTR t, long v) {
-  if (t && (*t)) return atol(t);
-  return v;
+  if (t && (*t)) return atol(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 double xmltof(XMLCSTR t, double v) {
-  if (t && (*t)) return atof(t);
-  return v;
+  if (t && (*t)) return atof(t);  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 #endif
 XMLCSTR xmltoa(XMLCSTR t, XMLCSTR v) {
-  if (t) return t;
-  return v;
+  if (t) return t;  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 XMLCHAR xmltoc(XMLCSTR t, XMLCHAR v) {
-  if (t && (*t)) return *t;
-  return v;
+  if (t && (*t)) return *t;  // [한국어] 조건 분기
+  return v;  // [한국어] 값 반환
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -535,11 +582,18 @@ XMLCHAR xmltoc(XMLCSTR t, XMLCHAR v) {
 // Since each application has its own way to report and deal with errors, you
 // should modify & rewrite the following "openFileHelper" function to get an
 // "error reporting mechanism" tailored to your needs.
+/*
+ * [한국어] XMLNode::openFileHelper - XML 파일을 열고 인코딩을 추론한 뒤 DOM 트리 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::openFileHelper() 호출 경로
+ */
 XMLNode XMLNode::openFileHelper(XMLCSTR filename, XMLCSTR tag) {
   // guess the value of the global parameter "characterEncoding"
   // (the guess is based on the first 200 bytes of the file).
   FILE *f = xfopen(filename, _CXML("rb"));
-  if (f) {
+  if (f) {  // [한국어] 조건 분기
     char bb[205];
     int l = (int)fread(bb, 1, 200, f);
     setGlobalOptions(guessCharEncoding(bb, l), guessWideCharChars,
@@ -552,11 +606,11 @@ XMLNode XMLNode::openFileHelper(XMLCSTR filename, XMLCSTR tag) {
   XMLNode xnode = XMLNode::parseFile(filename, tag, &pResults);
 
   // display error message (if any)
-  if (pResults.error != eXMLErrorNone) {
+  if (pResults.error != eXMLErrorNone) {  // [한국어] 조건 분기
     // create message
     char message[2000], *s1 = (char *)"", *s3 = (char *)"";
     XMLCSTR s2 = _CXML("");
-    if (pResults.error == eXMLErrorFirstTagNotFound) {
+    if (pResults.error == eXMLErrorFirstTagNotFound) {  // [한국어] 조건 분기
       s1 = (char *)"First Tag should be '";
       s2 = tag;
       s3 = (char *)"'.\n";
@@ -569,6 +623,13 @@ XMLNode XMLNode::openFileHelper(XMLCSTR filename, XMLCSTR tag) {
             "XML Parsing error inside file '%s'.\n%s\nAt line %i, column "
             "%i.\n%s%s%s"
 #endif
+/*
+ * [한국어] XMLNode::getError - XMLError 코드를 사람이 읽을 수 있는 문자열로 변환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::getError() 호출 경로
+ */
             ,
             filename, XMLNode::getError(pResults.error), pResults.nLine,
             pResults.nColumn, s1, s2, s3);
@@ -583,7 +644,7 @@ XMLNode XMLNode::openFileHelper(XMLCSTR filename, XMLCSTR tag) {
 #endif
     exit(255);
   }
-  return xnode;
+  return xnode;  // [한국어] 값 반환
 }
 
 /////////////////////////////////////////////////////////////////////////
@@ -799,72 +860,86 @@ typedef enum Attrib { eAttribName = 0, eAttribEquals, eAttribValue } Attrib;
 // Enumeration used when parsing elements to dictate whether we are currently
 // inside a tag
 typedef enum Status { eInsideTag = 0, eOutsideTag } Status;
+/*
+ * [한국어] XMLNode::writeToFile - DOM 트리를 XML 파일로 저장
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::writeToFile() 호출 경로
+ */
 
 XMLError XMLNode::writeToFile(XMLCSTR filename, const char *encoding,
                               char nFormat) const {
-  if (!d) return eXMLErrorNone;
+  if (!d) return eXMLErrorNone;  // [한국어] 조건 분기
   FILE *f = xfopen(filename, _CXML("wb"));
-  if (!f) return eXMLErrorCannotOpenWriteFile;
+  if (!f) return eXMLErrorCannotOpenWriteFile;  // [한국어] 조건 분기
 #ifdef _XMLWIDECHAR
   unsigned char h[2] = {0xFF, 0xFE};
-  if (!fwrite(h, 2, 1, f)) return eXMLErrorCannotWriteFile;
-  if ((!isDeclaration()) &&
+  if (!fwrite(h, 2, 1, f)) return eXMLErrorCannotWriteFile;  // [한국어] 조건 분기
+  if ((!isDeclaration()) &&  // [한국어] 조건 분기
       ((d->lpszName) || (!getChildNode().isDeclaration()))) {
-    if (!fwrite(L"<?xml version=\"1.0\" encoding=\"utf-16\"?>\n",
+    if (!fwrite(L"<?xml version=\"1.0\" encoding=\"utf-16\"?>\n",  // [한국어] 조건 분기
                 sizeof(wchar_t) * 40, 1, f))
-      return eXMLErrorCannotWriteFile;
+      return eXMLErrorCannotWriteFile;  // [한국어] 값 반환
   }
 #else
-  if ((!isDeclaration()) &&
+  if ((!isDeclaration()) &&  // [한국어] 조건 분기
       ((d->lpszName) || (!getChildNode().isDeclaration()))) {
-    if (characterEncoding == char_encoding_UTF8) {
+    if (characterEncoding == char_encoding_UTF8) {  // [한국어] 조건 분기
       // header so that windows recognize the file as UTF-8:
       unsigned char h[3] = {0xEF, 0xBB, 0xBF};
-      if (!fwrite(h, 3, 1, f)) return eXMLErrorCannotWriteFile;
+      if (!fwrite(h, 3, 1, f)) return eXMLErrorCannotWriteFile;  // [한국어] 조건 분기
       encoding = "utf-8";
     } else if (characterEncoding == char_encoding_ShiftJIS)
       encoding = "SHIFT-JIS";
 
-    if (!encoding) encoding = "ISO-8859-1";
-    if (fprintf(f, "<?xml version=\"1.0\" encoding=\"%s\"?>\n", encoding) < 0)
-      return eXMLErrorCannotWriteFile;
+    if (!encoding) encoding = "ISO-8859-1";  // [한국어] 조건 분기
+    if (fprintf(f, "<?xml version=\"1.0\" encoding=\"%s\"?>\n", encoding) < 0)  // [한국어] 조건 분기
+      return eXMLErrorCannotWriteFile;  // [한국어] 값 반환
   } else {
-    if (characterEncoding == char_encoding_UTF8) {
+    if (characterEncoding == char_encoding_UTF8) {  // [한국어] 조건 분기
       unsigned char h[3] = {0xEF, 0xBB, 0xBF};
-      if (!fwrite(h, 3, 1, f)) return eXMLErrorCannotWriteFile;
+      if (!fwrite(h, 3, 1, f)) return eXMLErrorCannotWriteFile;  // [한국어] 조건 분기
     }
   }
 #endif
   int i;
   XMLSTR t = createXMLString(nFormat, &i);
-  if (!fwrite(t, sizeof(XMLCHAR) * i, 1, f)) return eXMLErrorCannotWriteFile;
-  if (fclose(f) != 0) return eXMLErrorCannotWriteFile;
+  if (!fwrite(t, sizeof(XMLCHAR) * i, 1, f)) return eXMLErrorCannotWriteFile;  // [한국어] 조건 분기
+  if (fclose(f) != 0) return eXMLErrorCannotWriteFile;  // [한국어] 조건 분기
   free(t);
-  return eXMLErrorNone;
+  return eXMLErrorNone;  // [한국어] 값 반환
 }
 
 // Duplicate a given string.
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
 XMLSTR stringDup(XMLCSTR lpszData, int cbData) {
-  if (lpszData == NULL) return NULL;
+  if (lpszData == NULL) return NULL;  // [한국어] 조건 분기
 
   XMLSTR lpszNew;
-  if (cbData == -1) cbData = (int)xstrlen(lpszData);
+  if (cbData == -1) cbData = (int)xstrlen(lpszData);  // [한국어] 조건 분기
   lpszNew = (XMLSTR)malloc((cbData + 1) * sizeof(XMLCHAR));
-  if (lpszNew) {
+  if (lpszNew) {  // [한국어] 조건 분기
     memcpy(lpszNew, lpszData, (cbData) * sizeof(XMLCHAR));
     lpszNew[cbData] = (XMLCHAR)NULL;
   }
-  return lpszNew;
+  return lpszNew;  // [한국어] 값 반환
 }
 
 XMLSTR ToXMLStringTool::toXMLUnSafe(XMLSTR dest, XMLCSTR source) {
   XMLSTR dd = dest;
   XMLCHAR ch;
   XMLCharacterEntity *entity;
-  while ((ch = *source)) {
+  while ((ch = *source)) {  // [한국어] 반복문
     entity = XMLEntities;
     do {
-      if (ch == entity->c) {
+      if (ch == entity->c) {  // [한국어] 조건 분기
         xstrcpy(dest, entity->s);
         dest += entity->l;
         source++;
@@ -875,21 +950,21 @@ XMLSTR ToXMLStringTool::toXMLUnSafe(XMLSTR dest, XMLCSTR source) {
 #ifdef _XMLWIDECHAR
     *(dest++) = *(source++);
 #else
-    switch (XML_ByteTable[(unsigned char)ch]) {
-      case 4:
+    switch (XML_ByteTable[(unsigned char)ch]) {  // [한국어] switch 분기
+      case 4:  // [한국어] case 레이블
         *(dest++) = *(source++);
-      case 3:
+      case 3:  // [한국어] case 레이블
         *(dest++) = *(source++);
-      case 2:
+      case 2:  // [한국어] case 레이블
         *(dest++) = *(source++);
-      case 1:
+      case 1:  // [한국어] case 레이블
         *(dest++) = *(source++);
     }
 #endif
   out_of_loop1:;
   }
   *dest = 0;
-  return dd;
+  return dd;  // [한국어] 값 반환
 }
 
 // private (used while rendering):
@@ -897,10 +972,10 @@ int ToXMLStringTool::lengthXMLString(XMLCSTR source) {
   int r = 0;
   XMLCharacterEntity *entity;
   XMLCHAR ch;
-  while ((ch = *source)) {
+  while ((ch = *source)) {  // [한국어] 반복문
     entity = XMLEntities;
     do {
-      if (ch == entity->c) {
+      if (ch == entity->c) {  // [한국어] 조건 분기
         r += entity->l;
         source++;
         goto out_of_loop1;
@@ -917,22 +992,22 @@ int ToXMLStringTool::lengthXMLString(XMLCSTR source) {
 #endif
   out_of_loop1:;
   }
-  return r;
+  return r;  // [한국어] 값 반환
 }
 
 ToXMLStringTool::~ToXMLStringTool() { freeBuffer(); }
 void ToXMLStringTool::freeBuffer() {
-  if (buf) free(buf);
+  if (buf) free(buf);  // [한국어] 조건 분기
   buf = NULL;
   buflen = 0;
 }
 XMLSTR ToXMLStringTool::toXML(XMLCSTR source) {
   int l = lengthXMLString(source) + 1;
-  if (l > buflen) {
+  if (l > buflen) {  // [한국어] 조건 분기
     buflen = l;
     buf = (XMLSTR)realloc(buf, l * sizeof(XMLCHAR));
   }
-  return toXMLUnSafe(buf, source);
+  return toXMLUnSafe(buf, source);  // [한국어] 값 반환
 }
 
 // private:
@@ -945,41 +1020,41 @@ XMLSTR fromXMLString(XMLCSTR s, int lo, XML *pXML) {
   //
   // in: string (s) and length (lo) of string
   // out:  new allocated string converted from xml
-  if (!s) return NULL;
+  if (!s) return NULL;  // [한국어] 조건 분기
 
   int ll = 0, j;
   XMLSTR d;
   XMLCSTR ss = s;
   XMLCharacterEntity *entity;
-  while ((lo > 0) && (*s)) {
-    if (*s == _CXML('&')) {
-      if ((lo > 2) && (s[1] == _CXML('#'))) {
+  while ((lo > 0) && (*s)) {  // [한국어] 반복문
+    if (*s == _CXML('&')) {  // [한국어] 조건 분기
+      if ((lo > 2) && (s[1] == _CXML('#'))) {  // [한국어] 조건 분기
         s += 2;
         lo -= 2;
-        if ((*s == _CXML('X')) || (*s == _CXML('x'))) {
+        if ((*s == _CXML('X')) || (*s == _CXML('x'))) {  // [한국어] 조건 분기
           s++;
           lo--;
         }
-        while ((*s) && (*s != _CXML(';')) && ((lo--) > 0)) s++;
-        if (*s != _CXML(';')) {
+        while ((*s) && (*s != _CXML(';')) && ((lo--) > 0)) s++;  // [한국어] 반복문
+        if (*s != _CXML(';')) {  // [한국어] 조건 분기
           pXML->error = eXMLErrorUnknownCharacterEntity;
-          return NULL;
+          return NULL;  // [한국어] 값 반환
         }
         s++;
         lo--;
       } else {
         entity = XMLEntities;
         do {
-          if ((lo >= entity->l) && (xstrnicmp(s, entity->s, entity->l) == 0)) {
+          if ((lo >= entity->l) && (xstrnicmp(s, entity->s, entity->l) == 0)) {  // [한국어] 조건 분기
             s += entity->l;
             lo -= entity->l;
             break;
           }
           entity++;
         } while (entity->s);
-        if (!entity->s) {
+        if (!entity->s) {  // [한국어] 조건 분기
           pXML->error = eXMLErrorUnknownCharacterEntity;
-          return NULL;
+          return NULL;  // [한국어] 값 반환
         }
       }
     } else {
@@ -998,15 +1073,15 @@ XMLSTR fromXMLString(XMLCSTR s, int lo, XML *pXML) {
 
   d = (XMLSTR)malloc((ll + 1) * sizeof(XMLCHAR));
   s = d;
-  while (ll-- > 0) {
-    if (*ss == _CXML('&')) {
-      if (ss[1] == _CXML('#')) {
+  while (ll-- > 0) {  // [한국어] 반복문
+    if (*ss == _CXML('&')) {  // [한국어] 조건 분기
+      if (ss[1] == _CXML('#')) {  // [한국어] 조건 분기
         ss += 2;
         j = 0;
-        if ((*ss == _CXML('X')) || (*ss == _CXML('x'))) {
+        if ((*ss == _CXML('X')) || (*ss == _CXML('x'))) {  // [한국어] 조건 분기
           ss++;
-          while (*ss != _CXML(';')) {
-            if ((*ss >= _CXML('0')) && (*ss <= _CXML('9')))
+          while (*ss != _CXML(';')) {  // [한국어] 반복문
+            if ((*ss >= _CXML('0')) && (*ss <= _CXML('9')))  // [한국어] 조건 분기
               j = (j << 4) + *ss - _CXML('0');
             else if ((*ss >= _CXML('A')) && (*ss <= _CXML('F')))
               j = (j << 4) + *ss - _CXML('A') + 10;
@@ -1015,27 +1090,27 @@ XMLSTR fromXMLString(XMLCSTR s, int lo, XML *pXML) {
             else {
               free((void *)s);
               pXML->error = eXMLErrorUnknownCharacterEntity;
-              return NULL;
+              return NULL;  // [한국어] 값 반환
             }
             ss++;
           }
         } else {
-          while (*ss != _CXML(';')) {
-            if ((*ss >= _CXML('0')) && (*ss <= _CXML('9')))
+          while (*ss != _CXML(';')) {  // [한국어] 반복문
+            if ((*ss >= _CXML('0')) && (*ss <= _CXML('9')))  // [한국어] 조건 분기
               j = (j * 10) + *ss - _CXML('0');
             else {
               free((void *)s);
               pXML->error = eXMLErrorUnknownCharacterEntity;
-              return NULL;
+              return NULL;  // [한국어] 값 반환
             }
             ss++;
           }
         }
 #ifndef _XMLWIDECHAR
-        if (j > 255) {
+        if (j > 255) {  // [한국어] 조건 분기
           free((void *)s);
           pXML->error = eXMLErrorCharacterCodeAbove255;
-          return NULL;
+          return NULL;  // [한국어] 값 반환
         }
 #endif
         (*d++) = (XMLCHAR)j;
@@ -1043,7 +1118,7 @@ XMLSTR fromXMLString(XMLCSTR s, int lo, XML *pXML) {
       } else {
         entity = XMLEntities;
         do {
-          if (xstrnicmp(ss, entity->s, entity->l) == 0) {
+          if (xstrnicmp(ss, entity->s, entity->l) == 0) {  // [한국어] 조건 분기
             *(d++) = entity->c;
             ss += entity->l;
             break;
@@ -1055,24 +1130,24 @@ XMLSTR fromXMLString(XMLCSTR s, int lo, XML *pXML) {
 #ifdef _XMLWIDECHAR
       *(d++) = *(ss++);
 #else
-      switch (XML_ByteTable[(unsigned char)*ss]) {
-        case 4:
+      switch (XML_ByteTable[(unsigned char)*ss]) {  // [한국어] switch 분기
+        case 4:  // [한국어] case 레이블
           *(d++) = *(ss++);
           ll--;
-        case 3:
+        case 3:  // [한국어] case 레이블
           *(d++) = *(ss++);
           ll--;
-        case 2:
+        case 2:  // [한국어] case 레이블
           *(d++) = *(ss++);
           ll--;
-        case 1:
+        case 1:  // [한국어] case 레이블
           *(d++) = *(ss++);
       }
 #endif
     }
   }
   *d = 0;
-  return (XMLSTR)s;
+  return (XMLSTR)s;  // [한국어] 값 반환
 }
 
 #define XML_isSPACECHAR(ch)                                            \
@@ -1085,25 +1160,25 @@ char myTagCompare(XMLCSTR cclose, XMLCSTR copen)
 // return 0 if equals
 // return 1 if different
 {
-  if (!cclose) return 1;
+  if (!cclose) return 1;  // [한국어] 조건 분기
   int l = (int)xstrlen(cclose);
-  if (xstrnicmp(cclose, copen, l) != 0) return 1;
+  if (xstrnicmp(cclose, copen, l) != 0) return 1;  // [한국어] 조건 분기
   const XMLCHAR c = copen[l];
-  if (XML_isSPACECHAR(c) || (c == _CXML('/')) || (c == _CXML('<')) ||
+  if (XML_isSPACECHAR(c) || (c == _CXML('/')) || (c == _CXML('<')) ||  // [한국어] 조건 분기
       (c == _CXML('>')) || (c == _CXML('=')))
-    return 0;
-  return 1;
+    return 0;  // [한국어] 값 반환
+  return 1;  // [한국어] 값 반환
 }
 
 // Obtain the next character from the string.
 static inline XMLCHAR getNextChar(XML *pXML) {
   XMLCHAR ch = pXML->lpXML[pXML->nIndex];
 #ifdef _XMLWIDECHAR
-  if (ch != 0) pXML->nIndex++;
+  if (ch != 0) pXML->nIndex++;  // [한국어] 조건 분기
 #else
   pXML->nIndex += XML_ByteTable[(unsigned char)ch];
 #endif
-  return ch;
+  return ch;  // [한국어] 값 반환
 }
 
 // Find the next token in a string.
@@ -1122,7 +1197,7 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
     ch = getNextChar(pXML);
   } while XML_isSPACECHAR(ch);
 
-  if (ch) {
+  if (ch) {  // [한국어] 조건 분기
     // Cache the current string pointer
     result.pStr = &pXML->lpXML[indexStart];
 
@@ -1130,20 +1205,20 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
     // does not need formatting).
     ALLXMLClearTag *ctag = XMLClearTags;
     do {
-      if (xstrncmp(ctag->lpszOpen, result.pStr, ctag->openTagLen) == 0) {
+      if (xstrncmp(ctag->lpszOpen, result.pStr, ctag->openTagLen) == 0) {  // [한국어] 조건 분기
         result.pClr = ctag;
         pXML->nIndex += ctag->openTagLen - 1;
         *pType = eTokenClear;
-        return result;
+        return result;  // [한국어] 값 반환
       }
       ctag++;
     } while (ctag->lpszOpen);
 
     // If we didn't find a clear tag then check for standard tokens
-    switch (ch) {
+    switch (ch) {  // [한국어] switch 분기
       // Check for quotes
-      case _CXML('\''):
-      case _CXML('\"'):
+      case _CXML('\''):  // [한국어] case 레이블
+      case _CXML('\"'):  // [한국어] case 레이블
         // Type of token
         *pType = eTokenQuotedText;
         chTemp = ch;
@@ -1152,16 +1227,16 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
         nFoundMatch = FALSE;
 
         // Search through the string to find a matching quote
-        while ((ch = getNextChar(pXML))) {
-          if (ch == chTemp) {
+        while ((ch = getNextChar(pXML))) {  // [한국어] 반복문
+          if (ch == chTemp) {  // [한국어] 조건 분기
             nFoundMatch = TRUE;
             break;
           }
-          if (ch == _CXML('<')) break;
+          if (ch == _CXML('<')) break;  // [한국어] 조건 분기
         }
 
         // If we failed to find a matching quote
-        if (nFoundMatch == FALSE) {
+        if (nFoundMatch == FALSE) {  // [한국어] 조건 분기
           pXML->nIndex = indexStart + 1;
           nIsText = TRUE;
           break;
@@ -1173,24 +1248,24 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
         break;
 
       // Equals (used with attribute values)
-      case _CXML('='):
+      case _CXML('='):  // [한국어] case 레이블
         *pType = eTokenEquals;
         break;
 
       // Close tag
-      case _CXML('>'):
+      case _CXML('>'):  // [한국어] case 레이블
         *pType = eTokenCloseTag;
         break;
 
       // Check for tag start and tag end
-      case _CXML('<'):
+      case _CXML('<'):  // [한국어] case 레이블
 
         // Peek at the next character to see if we have an end tag '</',
         // or an xml declaration '<?'
         chTemp = pXML->lpXML[pXML->nIndex];
 
         // If we have a tag end...
-        if (chTemp == _CXML('/')) {
+        if (chTemp == _CXML('/')) {  // [한국어] 조건 분기
           // Set the type and ensure we point at the next character
           getNextChar(pXML);
           *pType = eTokenTagEnd;
@@ -1210,13 +1285,13 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
         break;
 
       // Check to see if we have a short hand type end tag ('/>').
-      case _CXML('/'):
+      case _CXML('/'):  // [한국어] case 레이블
 
         // Peek at the next character to see if we have a short end tag '/>'
         chTemp = pXML->lpXML[pXML->nIndex];
 
         // If we have a short hand end tag...
-        if (chTemp == _CXML('>')) {
+        if (chTemp == _CXML('>')) {  // [한국어] 조건 분기
           // Set the type and ensure we point at the next character
           getNextChar(pXML);
           *pType = eTokenShortHandClose;
@@ -1232,10 +1307,10 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
     }
 
     // If this is a TEXT node
-    if (nIsText) {
+    if (nIsText) {  // [한국어] 조건 분기
       // Indicate we are dealing with text
       *pType = eTokenText;
-      while ((ch = getNextChar(pXML))) {
+      while ((ch = getNextChar(pXML))) {  // [한국어] 반복문
         if XML_isSPACECHAR (ch) {
           indexStart++;
           break;
@@ -1244,7 +1319,7 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
           // Peek at the next character to see it we have short hand end tag
           ch = pXML->lpXML[pXML->nIndex];
           // If we found a short hand end tag then we need to exit the loop
-          if (ch == _CXML('>')) {
+          if (ch == _CXML('>')) {  // [한국어] 조건 분기
             pXML->nIndex--;
             break;
           }
@@ -1264,17 +1339,17 @@ static NextToken GetNextToken(XML *pXML, int *pcbToken,
     result.pStr = NULL;
   }
 
-  return result;
+  return result;  // [한국어] 값 반환
 }
 
 XMLCSTR XMLNode::updateName_WOSD(XMLSTR lpszName) {
-  if (!d) {
+  if (!d) {  // [한국어] 조건 분기
     free(lpszName);
-    return NULL;
+    return NULL;  // [한국어] 값 반환
   }
-  if (d->lpszName && (lpszName != d->lpszName)) free((void *)d->lpszName);
+  if (d->lpszName && (lpszName != d->lpszName)) free((void *)d->lpszName);  // [한국어] 조건 분기
   d->lpszName = lpszName;
-  return lpszName;
+  return lpszName;  // [한국어] 값 반환
 }
 
 // private:
@@ -1305,40 +1380,40 @@ XMLNode::XMLNode(XMLNodeData *pParent, XMLSTR lpszName, char isDeclaration) {
 }
 
 XMLNode XMLNode::createXMLTopNode_WOSD(XMLSTR lpszName, char isDeclaration) {
-  return XMLNode(NULL, lpszName, isDeclaration);
+  return XMLNode(NULL, lpszName, isDeclaration);  // [한국어] 값 반환
 }
 XMLNode XMLNode::createXMLTopNode(XMLCSTR lpszName, char isDeclaration) {
-  return XMLNode(NULL, stringDup(lpszName), isDeclaration);
+  return XMLNode(NULL, stringDup(lpszName), isDeclaration);  // [한국어] 값 반환
 }
 
 #define MEMORYINCREASE 50
 
 static inline void myFree(void *p) {
-  if (p) free(p);
+  if (p) free(p);  // [한국어] 조건 분기
 }
 static inline void *myRealloc(void *p, int newsize, int memInc,
                               int sizeofElem) {
-  if (p == NULL) {
-    if (memInc) return malloc(memInc * sizeofElem);
-    return malloc(sizeofElem);
+  if (p == NULL) {  // [한국어] 조건 분기
+    if (memInc) return malloc(memInc * sizeofElem);  // [한국어] 조건 분기
+    return malloc(sizeofElem);  // [한국어] 값 반환
   }
-  if ((memInc == 0) || ((newsize % memInc) == 0))
+  if ((memInc == 0) || ((newsize % memInc) == 0))  // [한국어] 조건 분기
     p = realloc(p, (newsize + memInc) * sizeofElem);
   //    if (!p)
   //    {
   //        printf("XMLParser Error: Not enough memory! Aborting...\n");
   //        exit(220);
   //    }
-  return p;
+  return p;  // [한국어] 값 반환
 }
 
 // private:
 XMLElementPosition XMLNode::findPosition(XMLNodeData *d, int index,
                                          XMLElementType xxtype) {
-  if (index < 0) return -1;
+  if (index < 0) return -1;  // [한국어] 조건 분기
   int i = 0, j = (int)((index << 2) + xxtype), *o = d->pOrder;
-  while (o[i] != j) i++;
-  return i;
+  while (o[i] != j) i++;  // [한국어] 반복문
+  return i;  // [한국어] 값 반환
 }
 
 // private:
@@ -1347,13 +1422,13 @@ int XMLNode::removeOrderElement(XMLNodeData *d, XMLElementType t, int index) {
   int n = d->nChild + d->nText + d->nClear, *o = d->pOrder,
       i = findPosition(d, index, t);
   memmove(o + i, o + i + 1, (n - i) * sizeof(int));
-  for (; i < n; i++)
-    if ((o[i] & 3) == (int)t) o[i] -= 4;
+  for (; i < n; i++)  // [한국어] 반복문
+    if ((o[i] & 3) == (int)t) o[i] -= 4;  // [한국어] 조건 분기
   // We should normally do:
   // d->pOrder=(int)realloc(d->pOrder,n*sizeof(int));
   // but we skip reallocation because it's too time consuming.
   // Anyway, at the end, it will be free'd completely at once.
-  return i;
+  return i;  // [한국어] 값 반환
 }
 
 void *XMLNode::addToOrder(int memoryIncrease, int *_pos, int nc, void *p,
@@ -1366,53 +1441,53 @@ void *XMLNode::addToOrder(int memoryIncrease, int *_pos, int nc, void *p,
       (int *)myRealloc(d->pOrder, n + 1, memoryIncrease * 3, sizeof(int));
   int pos = *_pos, *o = d->pOrder;
 
-  if ((pos < 0) || (pos >= n)) {
+  if ((pos < 0) || (pos >= n)) {  // [한국어] 조건 분기
     *_pos = nc;
     o[n] = (int)((nc << 2) + xtype);
-    return p;
+    return p;  // [한국어] 값 반환
   }
 
   int i = pos;
   memmove(o + i + 1, o + i, (n - i) * sizeof(int));
 
-  while ((pos < n) && ((o[pos] & 3) != (int)xtype)) pos++;
-  if (pos == n) {
+  while ((pos < n) && ((o[pos] & 3) != (int)xtype)) pos++;  // [한국어] 반복문
+  if (pos == n) {  // [한국어] 조건 분기
     *_pos = nc;
     o[n] = (int)((nc << 2) + xtype);
-    return p;
+    return p;  // [한국어] 값 반환
   }
 
   o[i] = o[pos];
-  for (i = pos + 1; i <= n; i++)
-    if ((o[i] & 3) == (int)xtype) o[i] += 4;
+  for (i = pos + 1; i <= n; i++)  // [한국어] 반복문
+    if ((o[i] & 3) == (int)xtype) o[i] += 4;  // [한국어] 조건 분기
 
   *_pos = pos = o[pos] >> 2;
   memmove(((char *)p) + (pos + 1) * size, ((char *)p) + pos * size,
           (nc - pos) * size);
 
-  return p;
+  return p;  // [한국어] 값 반환
 }
 
 // Add a child node to the given element.
 XMLNode XMLNode::addChild_priv(int memoryIncrease, XMLSTR lpszName,
                                char isDeclaration, int pos) {
-  if (!lpszName) return emptyXMLNode;
+  if (!lpszName) return emptyXMLNode;  // [한국어] 조건 분기
   d->pChild = (XMLNode *)addToOrder(memoryIncrease, &pos, d->nChild, d->pChild,
                                     sizeof(XMLNode), eNodeChild);
   d->pChild[pos].d = NULL;
   d->pChild[pos] = XMLNode(d, lpszName, isDeclaration);
   d->nChild++;
-  return d->pChild[pos];
+  return d->pChild[pos];  // [한국어] 값 반환
 }
 
 // Add an attribute to an element.
 XMLAttribute *XMLNode::addAttribute_priv(int memoryIncrease, XMLSTR lpszName,
                                          XMLSTR lpszValuev) {
-  if (!lpszName) return &emptyXMLAttribute;
-  if (!d) {
+  if (!lpszName) return &emptyXMLAttribute;  // [한국어] 조건 분기
+  if (!d) {  // [한국어] 조건 분기
     myFree(lpszName);
     myFree(lpszValuev);
-    return &emptyXMLAttribute;
+    return &emptyXMLAttribute;  // [한국어] 값 반환
   }
   int nc = d->nAttribute;
   d->pAttribute = (XMLAttribute *)myRealloc(
@@ -1421,45 +1496,52 @@ XMLAttribute *XMLNode::addAttribute_priv(int memoryIncrease, XMLSTR lpszName,
   pAttr->lpszName = lpszName;
   pAttr->lpszValue = lpszValuev;
   d->nAttribute++;
-  return pAttr;
+  return pAttr;  // [한국어] 값 반환
 }
 
 // Add text to the element.
 XMLCSTR XMLNode::addText_priv(int memoryIncrease, XMLSTR lpszValue, int pos) {
-  if (!lpszValue) return NULL;
-  if (!d) {
+  if (!lpszValue) return NULL;  // [한국어] 조건 분기
+  if (!d) {  // [한국어] 조건 분기
     myFree(lpszValue);
-    return NULL;
+    return NULL;  // [한국어] 값 반환
   }
   d->pText = (XMLCSTR *)addToOrder(memoryIncrease, &pos, d->nText, d->pText,
                                    sizeof(XMLSTR), eNodeText);
   d->pText[pos] = lpszValue;
   d->nText++;
-  return lpszValue;
+  return lpszValue;  // [한국어] 값 반환
 }
 
 // Add clear (unformatted) text to the element.
 XMLClear *XMLNode::addClear_priv(int memoryIncrease, XMLSTR lpszValue,
                                  XMLCSTR lpszOpen, XMLCSTR lpszClose, int pos) {
-  if (!lpszValue) return &emptyXMLClear;
-  if (!d) {
+  if (!lpszValue) return &emptyXMLClear;  // [한국어] 조건 분기
+  if (!d) {  // [한국어] 조건 분기
     myFree(lpszValue);
-    return &emptyXMLClear;
+    return &emptyXMLClear;  // [한국어] 값 반환
   }
   d->pClear = (XMLClear *)addToOrder(memoryIncrease, &pos, d->nClear, d->pClear,
                                      sizeof(XMLClear), eNodeClear);
   XMLClear *pNewClear = d->pClear + pos;
   pNewClear->lpszValue = lpszValue;
-  if (!lpszOpen) lpszOpen = XMLClearTags->lpszOpen;
-  if (!lpszClose) lpszClose = XMLClearTags->lpszClose;
+  if (!lpszOpen) lpszOpen = XMLClearTags->lpszOpen;  // [한국어] 조건 분기
+  if (!lpszClose) lpszClose = XMLClearTags->lpszClose;  // [한국어] 조건 분기
   pNewClear->lpszOpenTag = lpszOpen;
   pNewClear->lpszCloseTag = lpszClose;
   d->nClear++;
-  return pNewClear;
+  return pNewClear;  // [한국어] 값 반환
 }
 
 // private:
 // Parse a clear (unformatted) type node.
+/*
+ * [한국어] XMLNode::parseClearTag - clear 태그(주석/CDATA/DOCTYPE)를 파싱
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::parseClearTag() 호출 경로
+ */
 char XMLNode::parseClearTag(void *px, void *_pClear) {
   XML *pXML = (XML *)px;
   ALLXMLClearTag pClear = *((ALLXMLClearTag *)_pClear);
@@ -1470,10 +1552,10 @@ char XMLNode::parseClearTag(void *px, void *_pClear) {
 
   // Find the closing tag
   // Seems the <!DOCTYPE need a better treatment so lets handle it
-  if (pClear.lpszOpen == XMLClearTags[1].lpszOpen) {
+  if (pClear.lpszOpen == XMLClearTags[1].lpszOpen) {  // [한국어] 조건 분기
     XMLCSTR pCh = lpXML;
-    while (*pCh) {
-      if (*pCh == _CXML('<')) {
+    while (*pCh) {  // [한국어] 반복문
+      if (*pCh == _CXML('<')) {  // [한국어] 조건 분기
         pClear.lpszClose = docTypeEnd;
         lpszTemp = xstrstr(lpXML, docTypeEnd);
         break;
@@ -1490,7 +1572,7 @@ char XMLNode::parseClearTag(void *px, void *_pClear) {
   } else
     lpszTemp = xstrstr(lpXML, pClear.lpszClose);
 
-  if (lpszTemp) {
+  if (lpszTemp) {  // [한국어] 조건 분기
     // Cache the size and increment the index
     cbTemp = (int)(lpszTemp - lpXML);
 
@@ -1499,78 +1581,92 @@ char XMLNode::parseClearTag(void *px, void *_pClear) {
     // Add the clear node to the current element
     addClear_priv(MEMORYINCREASE, stringDup(lpXML, cbTemp), pClear.lpszOpen,
                   pClear.lpszClose, -1);
-    return 0;
+    return 0;  // [한국어] 값 반환
   }
 
   // If we failed to find the end tag
   pXML->error = eXMLErrorUnmatchedEndClearTag;
-  return 1;
+  return 1;  // [한국어] 값 반환
 }
 
 void XMLNode::exactMemory(XMLNodeData *d) {
-  if (d->pOrder)
+  if (d->pOrder)  // [한국어] 조건 분기
     d->pOrder = (int *)realloc(
         d->pOrder, (d->nChild + d->nText + d->nClear) * sizeof(int));
-  if (d->pChild)
+  if (d->pChild)  // [한국어] 조건 분기
     d->pChild = (XMLNode *)realloc(d->pChild, d->nChild * sizeof(XMLNode));
-  if (d->pAttribute)
+  if (d->pAttribute)  // [한국어] 조건 분기
     d->pAttribute = (XMLAttribute *)realloc(
         d->pAttribute, d->nAttribute * sizeof(XMLAttribute));
-  if (d->pText)
+  if (d->pText)  // [한국어] 조건 분기
     d->pText = (XMLCSTR *)realloc(d->pText, d->nText * sizeof(XMLSTR));
-  if (d->pClear)
+  if (d->pClear)  // [한국어] 조건 분기
     d->pClear = (XMLClear *)realloc(d->pClear, d->nClear * sizeof(XMLClear));
 }
+/*
+ * [한국어] XMLNode::maybeAddTxT - 텍스트 토큰을 현재 노드에 추가
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::maybeAddTxT() 호출 경로
+ */
 
 char XMLNode::maybeAddTxT(void *pa, XMLCSTR tokenPStr) {
   XML *pXML = (XML *)pa;
   XMLCSTR lpszText = pXML->lpszText;
-  if (!lpszText) return 0;
-  if (dropWhiteSpace)
-    while (XML_isSPACECHAR(*lpszText) && (lpszText != tokenPStr)) lpszText++;
+  if (!lpszText) return 0;  // [한국어] 조건 분기
+  if (dropWhiteSpace)  // [한국어] 조건 분기
+    while (XML_isSPACECHAR(*lpszText) && (lpszText != tokenPStr)) lpszText++;  // [한국어] 반복문
   int cbText = (int)(tokenPStr - lpszText);
-  if (!cbText) {
+  if (!cbText) {  // [한국어] 조건 분기
     pXML->lpszText = NULL;
-    return 0;
+    return 0;  // [한국어] 값 반환
   }
-  if (dropWhiteSpace) {
+  if (dropWhiteSpace) {  // [한국어] 조건 분기
     cbText--;
-    while ((cbText) && XML_isSPACECHAR(lpszText[cbText])) cbText--;
+    while ((cbText) && XML_isSPACECHAR(lpszText[cbText])) cbText--;  // [한국어] 반복문
     cbText++;
   }
-  if (!cbText) {
+  if (!cbText) {  // [한국어] 조건 분기
     pXML->lpszText = NULL;
-    return 0;
+    return 0;  // [한국어] 값 반환
   }
   XMLSTR lpt = fromXMLString(lpszText, cbText, pXML);
-  if (!lpt) return 1;
+  if (!lpt) return 1;  // [한국어] 조건 분기
   pXML->lpszText = NULL;
-  if (removeCommentsInMiddleOfText && d->nText && d->nClear) {
+  if (removeCommentsInMiddleOfText && d->nText && d->nClear) {  // [한국어] 조건 분기
     // if the previous insertion was a comment (<!-- -->) AND
     // if the previous previous insertion was a text then, delete the comment
     // and append the text
     int n = d->nChild + d->nText + d->nClear - 1, *o = d->pOrder;
-    if (((o[n] & 3) == eNodeClear) && ((o[n - 1] & 3) == eNodeText)) {
+    if (((o[n] & 3) == eNodeClear) && ((o[n - 1] & 3) == eNodeText)) {  // [한국어] 조건 분기
       int i = o[n] >> 2;
-      if (d->pClear[i].lpszOpenTag == XMLClearTags[2].lpszOpen) {
+      if (d->pClear[i].lpszOpenTag == XMLClearTags[2].lpszOpen) {  // [한국어] 조건 분기
         deleteClear(i);
         i = o[n - 1] >> 2;
         n = xstrlen(d->pText[i]);
         int n2 = xstrlen(lpt) + 1;
         d->pText[i] =
             (XMLSTR)realloc((void *)d->pText[i], (n + n2) * sizeof(XMLCHAR));
-        if (!d->pText[i]) return 1;
+        if (!d->pText[i]) return 1;  // [한국어] 조건 분기
         memcpy((void *)(d->pText[i] + n), lpt, n2 * sizeof(XMLCHAR));
         free(lpt);
-        return 0;
+        return 0;  // [한국어] 값 반환
       }
     }
   }
   addText_priv(MEMORYINCREASE, lpt, -1);
-  return 0;
+  return 0;  // [한국어] 값 반환
 }
 // private:
 // Recursively parse an XML element.
+/*
+ * [한국어] XMLNode::ParseXMLElement - 재귀적으로 하나의 XML 요소를 파싱하는 핵심 함수
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::ParseXMLElement() 호출 경로
+ */
 int XMLNode::ParseXMLElement(void *pa) {
   XML *pXML = (XML *)pa;
   int cbToken;
@@ -1586,7 +1682,7 @@ int XMLNode::ParseXMLElement(void *pa) {
   assert(pXML);
 
   // If this is the first call to the function
-  if (pXML->nFirst) {
+  if (pXML->nFirst) {  // [한국어] 조건 분기
     // Assume we are outside of a tag definition
     pXML->nFirst = FALSE;
     status = eOutsideTag;
@@ -1597,56 +1693,56 @@ int XMLNode::ParseXMLElement(void *pa) {
   }
 
   // Iterate through the tokens in the document
-  for (;;) {
+  for (;;) {  // [한국어] 반복문
     // Obtain the next token
     token = GetNextToken(pXML, &cbToken, &xtype);
 
-    if (xtype != eTokenError) {
+    if (xtype != eTokenError) {  // [한국어] 조건 분기
       // Check the current status
-      switch (status) {
+      switch (status) {  // [한국어] switch 분기
         // If we are outside of a tag definition
-        case eOutsideTag:
+        case eOutsideTag:  // [한국어] case 레이블
 
           // Check what type of token we obtained
-          switch (xtype) {
+          switch (xtype) {  // [한국어] switch 분기
             // If we have found text or quoted text
-            case eTokenText:
-            case eTokenCloseTag:       /* '>'         */
-            case eTokenShortHandClose: /* '/>'        */
-            case eTokenQuotedText:
-            case eTokenEquals:
+            case eTokenText:  // [한국어] case 레이블
+            case eTokenCloseTag:       /* '>'         */  // [한국어] case 레이블
+            case eTokenShortHandClose: /* '/>'        */  // [한국어] case 레이블
+            case eTokenQuotedText:  // [한국어] case 레이블
+            case eTokenEquals:  // [한국어] case 레이블
               break;
 
             // If we found a start tag '<' and declarations '<?'
-            case eTokenTagStart:
-            case eTokenDeclaration:
+            case eTokenTagStart:  // [한국어] case 레이블
+            case eTokenDeclaration:  // [한국어] case 레이블
 
               // Cache whether this new element is a declaration or not
               nDeclaration = (xtype == eTokenDeclaration);
 
               // If we have node text then add this to the element
-              if (maybeAddTxT(pXML, token.pStr)) return FALSE;
+              if (maybeAddTxT(pXML, token.pStr)) return FALSE;  // [한국어] 조건 분기
 
               // Find the name of the tag
               token = GetNextToken(pXML, &cbToken, &xtype);
 
               // Return an error if we couldn't obtain the next token or
               // it wasnt text
-              if (xtype != eTokenText) {
+              if (xtype != eTokenText) {  // [한국어] 조건 분기
                 pXML->error = eXMLErrorMissingTagName;
-                return FALSE;
+                return FALSE;  // [한국어] 값 반환
               }
 
               // If we found a new element which is the same as this
               // element then we need to pass this back to the caller..
 
 #ifdef APPROXIMATE_PARSING
-              if (d->lpszName && myTagCompare(d->lpszName, token.pStr) == 0) {
+              if (d->lpszName && myTagCompare(d->lpszName, token.pStr) == 0) {  // [한국어] 조건 분기
                 // Indicate to the caller that it needs to create a
                 // new element.
                 pXML->lpNewElement = token.pStr;
                 pXML->cbNewElement = cbToken;
-                return TRUE;
+                return TRUE;  // [한국어] 값 반환
               } else
 #endif
               {
@@ -1654,16 +1750,23 @@ int XMLNode::ParseXMLElement(void *pa) {
                 // the current element we need to add the new element to
                 // the current one and recurse
                 pNew = addChild_priv(MEMORYINCREASE,
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
                                      stringDup(token.pStr, cbToken),
                                      nDeclaration, -1);
 
-                while (!pNew.isEmpty()) {
+                while (!pNew.isEmpty()) {  // [한국어] 반복문
                   // Callself to process the new node.  If we return
                   // FALSE this means we dont have any more
                   // processing to do...
 
-                  if (!pNew.ParseXMLElement(pXML))
-                    return FALSE;
+                  if (!pNew.ParseXMLElement(pXML))  // [한국어] 조건 분기
+                    return FALSE;  // [한국어] 값 반환
                   else {
                     // If the call to recurse this function
                     // evented in a end tag specified in XML then
@@ -1671,23 +1774,23 @@ int XMLNode::ParseXMLElement(void *pa) {
                     // function until we find the appropriate node
                     // (the element name and end tag name must
                     // match)
-                    if (pXML->cbEndTag) {
+                    if (pXML->cbEndTag) {  // [한국어] 조건 분기
                       // If we are back at the root node then we
                       // have an unmatched end tag
-                      if (!d->lpszName) {
+                      if (!d->lpszName) {  // [한국어] 조건 분기
                         pXML->error = eXMLErrorUnmatchedEndTag;
-                        return FALSE;
+                        return FALSE;  // [한국어] 값 반환
                       }
 
                       // If the end tag matches the name of this
                       // element then we only need to unwind
                       // once more...
 
-                      if (myTagCompare(d->lpszName, pXML->lpEndTag) == 0) {
+                      if (myTagCompare(d->lpszName, pXML->lpEndTag) == 0) {  // [한국어] 조건 분기
                         pXML->cbEndTag = 0;
                       }
 
-                      return TRUE;
+                      return TRUE;  // [한국어] 값 반환
                     } else if (pXML->cbNewElement) {
                       // If the call indicated a new element is to
                       // be created on THIS element.
@@ -1697,12 +1800,19 @@ int XMLNode::ParseXMLElement(void *pa) {
                       // then we need to return to the caller
                       // and let it process the element.
 
-                      if (myTagCompare(d->lpszName, pXML->lpNewElement) == 0) {
-                        return TRUE;
+                      if (myTagCompare(d->lpszName, pXML->lpNewElement) == 0) {  // [한국어] 조건 분기
+                        return TRUE;  // [한국어] 값 반환
                       }
 
                       // Add the new element and recurse
                       pNew = addChild_priv(
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
                           MEMORYINCREASE,
                           stringDup(pXML->lpNewElement, pXML->cbNewElement), 0,
                           -1);
@@ -1717,38 +1827,38 @@ int XMLNode::ParseXMLElement(void *pa) {
               break;
 
             // If we found an end tag
-            case eTokenTagEnd:
+            case eTokenTagEnd:  // [한국어] case 레이블
 
               // If we have node text then add this to the element
-              if (maybeAddTxT(pXML, token.pStr)) return FALSE;
+              if (maybeAddTxT(pXML, token.pStr)) return FALSE;  // [한국어] 조건 분기
 
               // Find the name of the end tag
               token = GetNextToken(pXML, &cbTemp, &xtype);
 
               // The end tag should be text
-              if (xtype != eTokenText) {
+              if (xtype != eTokenText) {  // [한국어] 조건 분기
                 pXML->error = eXMLErrorMissingEndTagName;
-                return FALSE;
+                return FALSE;  // [한국어] 값 반환
               }
               lpszTemp = token.pStr;
 
               // After the end tag we should find a closing tag
               token = GetNextToken(pXML, &cbToken, &xtype);
-              if (xtype != eTokenCloseTag) {
+              if (xtype != eTokenCloseTag) {  // [한국어] 조건 분기
                 pXML->error = eXMLErrorMissingEndTagName;
-                return FALSE;
+                return FALSE;  // [한국어] 값 반환
               }
               pXML->lpszText = pXML->lpXML + pXML->nIndex;
 
               // We need to return to the previous caller.  If the name
               // of the tag cannot be found we need to keep returning to
               // caller until we find a match
-              if (myTagCompare(d->lpszName, lpszTemp) != 0)
+              if (myTagCompare(d->lpszName, lpszTemp) != 0)  // [한국어] 조건 분기
 #ifdef STRICT_PARSING
               {
                 pXML->error = eXMLErrorUnmatchedEndTag;
                 pXML->nIndexMissigEndTag = pXML->nIndex;
-                return FALSE;
+                return FALSE;  // [한국어] 값 반환
               }
 #else
               {
@@ -1761,13 +1871,13 @@ int XMLNode::ParseXMLElement(void *pa) {
 
               // Return to the caller
               exactMemory(d);
-              return TRUE;
+              return TRUE;  // [한국어] 값 반환
 
             // If we found a clear (unformatted) token
-            case eTokenClear:
+            case eTokenClear:  // [한국어] case 레이블
               // If we have node text then add this to the element
-              if (maybeAddTxT(pXML, token.pStr)) return FALSE;
-              if (parseClearTag(pXML, token.pClr)) return FALSE;
+              if (maybeAddTxT(pXML, token.pStr)) return FALSE;  // [한국어] 조건 분기
+              if (parseClearTag(pXML, token.pClr)) return FALSE;  // [한국어] 조건 분기
               pXML->lpszText = pXML->lpXML + pXML->nIndex;
               break;
 
@@ -1777,19 +1887,19 @@ int XMLNode::ParseXMLElement(void *pa) {
           break;
 
         // If we are inside a tag definition we need to search for attributes
-        case eInsideTag:
+        case eInsideTag:  // [한국어] case 레이블
 
           // Check what part of the attribute (name, equals, value) we
           // are looking for.
-          switch (attrib) {
+          switch (attrib) {  // [한국어] switch 분기
             // If we are looking for a new attribute
-            case eAttribName:
+            case eAttribName:  // [한국어] case 레이블
 
               // Check what the current token type is
-              switch (xtype) {
+              switch (xtype) {  // [한국어] switch 분기
                 // If the current type is text...
                 // Eg.  'attribute'
-                case eTokenText:
+                case eTokenText:  // [한국어] case 레이블
                   // Cache the token then indicate that we are next to
                   // look for the equals
                   lpszTemp = token.pStr;
@@ -1799,7 +1909,7 @@ int XMLNode::ParseXMLElement(void *pa) {
 
                 // If we found a closing tag...
                 // Eg.  '>'
-                case eTokenCloseTag:
+                case eTokenCloseTag:  // [한국어] case 레이블
                   // We are now outside the tag
                   status = eOutsideTag;
                   pXML->lpszText = pXML->lpXML + pXML->nIndex;
@@ -1807,32 +1917,32 @@ int XMLNode::ParseXMLElement(void *pa) {
 
                 // If we found a short hand '/>' closing tag then we can
                 // return to the caller
-                case eTokenShortHandClose:
+                case eTokenShortHandClose:  // [한국어] case 레이블
                   exactMemory(d);
                   pXML->lpszText = pXML->lpXML + pXML->nIndex;
-                  return TRUE;
+                  return TRUE;  // [한국어] 값 반환
 
                 // Errors...
-                case eTokenQuotedText:  /* '"SomeText"'   */
-                case eTokenTagStart:    /* '<'            */
-                case eTokenTagEnd:      /* '</'           */
-                case eTokenEquals:      /* '='            */
-                case eTokenDeclaration: /* '<?'           */
-                case eTokenClear:
+                case eTokenQuotedText:  /* '"SomeText"'   */  // [한국어] case 레이블
+                case eTokenTagStart:    /* '<'            */  // [한국어] case 레이블
+                case eTokenTagEnd:      /* '</'           */  // [한국어] case 레이블
+                case eTokenEquals:      /* '='            */  // [한국어] case 레이블
+                case eTokenDeclaration: /* '<?'           */  // [한국어] case 레이블
+                case eTokenClear:  // [한국어] case 레이블
                   pXML->error = eXMLErrorUnexpectedToken;
-                  return FALSE;
+                  return FALSE;  // [한국어] 값 반환
                 default:
                   break;
               }
               break;
 
             // If we are looking for an equals
-            case eAttribEquals:
+            case eAttribEquals:  // [한국어] case 레이블
               // Check what the current token type is
-              switch (xtype) {
+              switch (xtype) {  // [한국어] switch 분기
                 // If the current type is text...
                 // Eg.  'Attribute AnotherAttribute'
-                case eTokenText:
+                case eTokenText:  // [한국어] case 레이블
                   // Add the unvalued attribute to the list
                   addAttribute_priv(MEMORYINCREASE, stringDup(lpszTemp, cbTemp),
                                     NULL);
@@ -1844,29 +1954,36 @@ int XMLNode::ParseXMLElement(void *pa) {
 
                 // If we found a closing tag 'Attribute >' or a short hand
                 // closing tag 'Attribute />'
-                case eTokenShortHandClose:
-                case eTokenCloseTag:
+                case eTokenShortHandClose:  // [한국어] case 레이블
+                case eTokenCloseTag:  // [한국어] case 레이블
                   // If we are a declaration element '<?' then we need
                   // to remove extra closing '?' if it exists
                   pXML->lpszText = pXML->lpXML + pXML->nIndex;
 
-                  if (d->isDeclaration &&
+                  if (d->isDeclaration &&  // [한국어] 조건 분기
                       (lpszTemp[cbTemp - 1]) == _CXML('?')) {
                     cbTemp--;
-                    if (d->pParent && d->pParent->pParent)
+                    if (d->pParent && d->pParent->pParent)  // [한국어] 조건 분기
                       xtype = eTokenShortHandClose;
                   }
 
-                  if (cbTemp) {
+                  if (cbTemp) {  // [한국어] 조건 분기
                     // Add the unvalued attribute to the list
                     addAttribute_priv(MEMORYINCREASE,
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
                                       stringDup(lpszTemp, cbTemp), NULL);
                   }
 
                   // If this is the end of the tag then return to the caller
-                  if (xtype == eTokenShortHandClose) {
+                  if (xtype == eTokenShortHandClose) {  // [한국어] 조건 분기
                     exactMemory(d);
-                    return TRUE;
+                    return TRUE;  // [한국어] 값 반환
                   }
 
                   // We are now outside the tag
@@ -1875,53 +1992,60 @@ int XMLNode::ParseXMLElement(void *pa) {
 
                 // If we found the equals token...
                 // Eg.  'Attribute ='
-                case eTokenEquals:
+                case eTokenEquals:  // [한국어] case 레이블
                   // Indicate that we next need to search for the value
                   // for the attribute
                   attrib = eAttribValue;
                   break;
 
                 // Errors...
-                case eTokenQuotedText:  /* 'Attribute "InvalidAttr"'*/
-                case eTokenTagStart:    /* 'Attribute <'            */
-                case eTokenTagEnd:      /* 'Attribute </'           */
-                case eTokenDeclaration: /* 'Attribute <?'           */
-                case eTokenClear:
+                case eTokenQuotedText:  /* 'Attribute "InvalidAttr"'*/  // [한국어] case 레이블
+                case eTokenTagStart:    /* 'Attribute <'            */  // [한국어] case 레이블
+                case eTokenTagEnd:      /* 'Attribute </'           */  // [한국어] case 레이블
+                case eTokenDeclaration: /* 'Attribute <?'           */  // [한국어] case 레이블
+                case eTokenClear:  // [한국어] case 레이블
                   pXML->error = eXMLErrorUnexpectedToken;
-                  return FALSE;
+                  return FALSE;  // [한국어] 값 반환
                 default:
                   break;
               }
               break;
 
             // If we are looking for an attribute value
-            case eAttribValue:
+            case eAttribValue:  // [한국어] case 레이블
               // Check what the current token type is
-              switch (xtype) {
+              switch (xtype) {  // [한국어] switch 분기
                 // If the current type is text or quoted text...
                 // Eg.  'Attribute = "Value"' or 'Attribute = Value' or
                 // 'Attribute = 'Value''.
-                case eTokenText:
-                case eTokenQuotedText:
+                case eTokenText:  // [한국어] case 레이블
+                case eTokenQuotedText:  // [한국어] case 레이블
                   // If we are a declaration element '<?' then we need
                   // to remove extra closing '?' if it exists
-                  if (d->isDeclaration &&
+                  if (d->isDeclaration &&  // [한국어] 조건 분기
                       (token.pStr[cbToken - 1]) == _CXML('?')) {
                     cbToken--;
                   }
 
-                  if (cbTemp) {
+                  if (cbTemp) {  // [한국어] 조건 분기
                     // Add the valued attribute to the list
-                    if (xtype == eTokenQuotedText) {
+                    if (xtype == eTokenQuotedText) {  // [한국어] 조건 분기
                       token.pStr++;
                       cbToken -= 2;
                     }
                     XMLSTR attrVal = (XMLSTR)token.pStr;
-                    if (attrVal) {
+                    if (attrVal) {  // [한국어] 조건 분기
                       attrVal = fromXMLString(attrVal, cbToken, pXML);
-                      if (!attrVal) return FALSE;
+                      if (!attrVal) return FALSE;  // [한국어] 조건 분기
                     }
                     addAttribute_priv(MEMORYINCREASE,
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
                                       stringDup(lpszTemp, cbTemp), attrVal);
                   }
 
@@ -1930,15 +2054,15 @@ int XMLNode::ParseXMLElement(void *pa) {
                   break;
 
                 // Errors...
-                case eTokenTagStart:       /* 'Attr = <'          */
-                case eTokenTagEnd:         /* 'Attr = </'         */
-                case eTokenCloseTag:       /* 'Attr = >'          */
-                case eTokenShortHandClose: /* "Attr = />"         */
-                case eTokenEquals:         /* 'Attr = ='          */
-                case eTokenDeclaration:    /* 'Attr = <?'         */
-                case eTokenClear:
+                case eTokenTagStart:       /* 'Attr = <'          */  // [한국어] case 레이블
+                case eTokenTagEnd:         /* 'Attr = </'         */  // [한국어] case 레이블
+                case eTokenCloseTag:       /* 'Attr = >'          */  // [한국어] case 레이블
+                case eTokenShortHandClose: /* "Attr = />"         */  // [한국어] case 레이블
+                case eTokenEquals:         /* 'Attr = ='          */  // [한국어] case 레이블
+                case eTokenDeclaration:    /* 'Attr = <?'         */  // [한국어] case 레이블
+                case eTokenClear:  // [한국어] case 레이블
                   pXML->error = eXMLErrorUnexpectedToken;
-                  return FALSE;
+                  return FALSE;  // [한국어] 값 반환
                   break;
                 default:
                   break;
@@ -1948,7 +2072,7 @@ int XMLNode::ParseXMLElement(void *pa) {
     }
     // If we failed to obtain the next token
     else {
-      if ((!d->isDeclaration) && (d->pParent)) {
+      if ((!d->isDeclaration) && (d->pParent)) {  // [한국어] 조건 분기
 #ifdef STRICT_PARSING
         pXML->error = eXMLErrorUnmatchedEndTag;
 #else
@@ -1957,7 +2081,7 @@ int XMLNode::ParseXMLElement(void *pa) {
         pXML->nIndexMissigEndTag = pXML->nIndex;
       }
       maybeAddTxT(pXML, pXML->lpXML + pXML->nIndex);
-      return FALSE;
+      return FALSE;  // [한국어] 값 반환
     }
   }
 }
@@ -1973,9 +2097,9 @@ static void CountLinesAndColumns(XMLCSTR lpXML, int nUpto,
 
   pResults->nLine = 1;
   pResults->nColumn = 1;
-  while (xml.nIndex < nUpto) {
+  while (xml.nIndex < nUpto) {  // [한국어] 반복문
     ch = getNextChar(&xml);
-    if (ch != _CXML('\n'))
+    if (ch != _CXML('\n'))  // [한국어] 조건 분기
       pResults->nColumn++;
     else {
       pResults->nLine++;
@@ -1985,15 +2109,22 @@ static void CountLinesAndColumns(XMLCSTR lpXML, int nUpto,
 }
 
 // Parse XML and return the root element.
+/*
+ * [한국어] XMLNode::parseString - XML 문자열을 파싱하여 XMLNode 트리 루트를 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::parseString() 호출 경로
+ */
 XMLNode XMLNode::parseString(XMLCSTR lpszXML, XMLCSTR tag,
                              XMLResults *pResults) {
-  if (!lpszXML) {
-    if (pResults) {
+  if (!lpszXML) {  // [한국어] 조건 분기
+    if (pResults) {  // [한국어] 조건 분기
       pResults->error = eXMLErrorNoElements;
       pResults->nLine = 0;
       pResults->nColumn = 0;
     }
-    return emptyXMLNode;
+    return emptyXMLNode;  // [한국어] 값 반환
   }
 
   XMLNode xnode(NULL, NULL, FALSE);
@@ -2003,23 +2134,23 @@ XMLNode XMLNode::parseString(XMLCSTR lpszXML, XMLCSTR tag,
   // Create header element
   xnode.ParseXMLElement(&xml);
   enum XMLError error = xml.error;
-  if (!xnode.nChildNode()) error = eXMLErrorNoXMLTagFound;
-  if ((xnode.nChildNode() == 1) && (xnode.nElement() == 1))
+  if (!xnode.nChildNode()) error = eXMLErrorNoXMLTagFound;  // [한국어] 조건 분기
+  if ((xnode.nChildNode() == 1) && (xnode.nElement() == 1))  // [한국어] 조건 분기
     xnode = xnode.getChildNode();  // skip the empty node
 
   // If no error occurred
-  if ((error == eXMLErrorNone) || (error == eXMLErrorMissingEndTag) ||
+  if ((error == eXMLErrorNone) || (error == eXMLErrorMissingEndTag) ||  // [한국어] 조건 분기
       (error == eXMLErrorNoXMLTagFound)) {
     XMLCSTR name = xnode.getName();
-    if (tag && (*tag) && ((!name) || (xstricmp(name, tag)))) {
+    if (tag && (*tag) && ((!name) || (xstricmp(name, tag)))) {  // [한국어] 조건 분기
       xnode = xnode.getChildNode(tag);
-      if (xnode.isEmpty()) {
-        if (pResults) {
+      if (xnode.isEmpty()) {  // [한국어] 조건 분기
+        if (pResults) {  // [한국어] 조건 분기
           pResults->error = eXMLErrorFirstTagNotFound;
           pResults->nLine = 0;
           pResults->nColumn = 0;
         }
-        return emptyXMLNode;
+        return emptyXMLNode;  // [한국어] 값 반환
       }
     }
   } else {
@@ -2028,36 +2159,43 @@ XMLNode XMLNode::parseString(XMLCSTR lpszXML, XMLCSTR tag,
   }
 
   // If we have been given somewhere to place results
-  if (pResults) {
+  if (pResults) {  // [한국어] 조건 분기
     pResults->error = error;
 
     // If we have an error
-    if (error != eXMLErrorNone) {
-      if (error == eXMLErrorMissingEndTag) xml.nIndex = xml.nIndexMissigEndTag;
+    if (error != eXMLErrorNone) {  // [한국어] 조건 분기
+      if (error == eXMLErrorMissingEndTag) xml.nIndex = xml.nIndexMissigEndTag;  // [한국어] 조건 분기
       // Find which line and column it starts on.
       CountLinesAndColumns(xml.lpXML, xml.nIndex, pResults);
     }
   }
-  return xnode;
+  return xnode;  // [한국어] 값 반환
 }
+/*
+ * [한국어] XMLNode::parseFile - XML 파일을 읽어 DOM 트리 루트를 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::parseFile() 호출 경로
+ */
 
 XMLNode XMLNode::parseFile(XMLCSTR filename, XMLCSTR tag,
                            XMLResults *pResults) {
-  if (pResults) {
+  if (pResults) {  // [한국어] 조건 분기
     pResults->nLine = 0;
     pResults->nColumn = 0;
   }
   FILE *f = xfopen(filename, _CXML("rb"));
-  if (f == NULL) {
-    if (pResults) pResults->error = eXMLErrorFileNotFound;
-    return emptyXMLNode;
+  if (f == NULL) {  // [한국어] 조건 분기
+    if (pResults) pResults->error = eXMLErrorFileNotFound;  // [한국어] 조건 분기
+    return emptyXMLNode;  // [한국어] 값 반환
   }
   fseek(f, 0, SEEK_END);
   int l = ftell(f), headerSz = 0;
-  if (!l) {
-    if (pResults) pResults->error = eXMLErrorEmpty;
+  if (!l) {  // [한국어] 조건 분기
+    if (pResults) pResults->error = eXMLErrorEmpty;  // [한국어] 조건 분기
     fclose(f);
-    return emptyXMLNode;
+    return emptyXMLNode;  // [한국어] 값 반환
   }
   fseek(f, 0, SEEK_SET);
   unsigned char *buf = (unsigned char *)malloc(l + 4);
@@ -2068,10 +2206,10 @@ XMLNode XMLNode::parseFile(XMLCSTR filename, XMLCSTR tag,
   buf[l + 2] = 0;
   buf[l + 3] = 0;
 #ifdef _XMLWIDECHAR
-  if (guessWideCharChars) {
-    if (!myIsTextWideChar(buf, l)) {
+  if (guessWideCharChars) {  // [한국어] 조건 분기
+    if (!myIsTextWideChar(buf, l)) {  // [한국어] 조건 분기
       XMLNode::XMLCharEncoding ce = XMLNode::char_encoding_legacy;
-      if ((buf[0] == 0xef) && (buf[1] == 0xbb) && (buf[2] == 0xbf)) {
+      if ((buf[0] == 0xef) && (buf[1] == 0xbb) && (buf[2] == 0xbf)) {  // [한국어] 조건 분기
         headerSz = 3;
         ce = XMLNode::char_encoding_UTF8;
       }
@@ -2080,37 +2218,37 @@ XMLNode XMLNode::parseFile(XMLCSTR filename, XMLCSTR tag,
       buf = (unsigned char *)b2;
       headerSz = 0;
     } else {
-      if ((buf[0] == 0xef) && (buf[1] == 0xff)) headerSz = 2;
-      if ((buf[0] == 0xff) && (buf[1] == 0xfe)) headerSz = 2;
+      if ((buf[0] == 0xef) && (buf[1] == 0xff)) headerSz = 2;  // [한국어] 조건 분기
+      if ((buf[0] == 0xff) && (buf[1] == 0xfe)) headerSz = 2;  // [한국어] 조건 분기
     }
   }
 #else
-  if (guessWideCharChars) {
-    if (myIsTextWideChar(buf, l)) {
-      if ((buf[0] == 0xef) && (buf[1] == 0xff)) headerSz = 2;
-      if ((buf[0] == 0xff) && (buf[1] == 0xfe)) headerSz = 2;
+  if (guessWideCharChars) {  // [한국어] 조건 분기
+    if (myIsTextWideChar(buf, l)) {  // [한국어] 조건 분기
+      if ((buf[0] == 0xef) && (buf[1] == 0xff)) headerSz = 2;  // [한국어] 조건 분기
+      if ((buf[0] == 0xff) && (buf[1] == 0xfe)) headerSz = 2;  // [한국어] 조건 분기
       char *b2 = myWideCharToMultiByte((const wchar_t *)(buf + headerSz));
       free(buf);
       buf = (unsigned char *)b2;
       headerSz = 0;
     } else {
-      if ((buf[0] == 0xef) && (buf[1] == 0xbb) && (buf[2] == 0xbf))
+      if ((buf[0] == 0xef) && (buf[1] == 0xbb) && (buf[2] == 0xbf))  // [한국어] 조건 분기
         headerSz = 3;
     }
   }
 #endif
 
-  if (!buf) {
-    if (pResults) pResults->error = eXMLErrorCharConversionError;
-    return emptyXMLNode;
+  if (!buf) {  // [한국어] 조건 분기
+    if (pResults) pResults->error = eXMLErrorCharConversionError;  // [한국어] 조건 분기
+    return emptyXMLNode;  // [한국어] 값 반환
   }
   XMLNode x = parseString((XMLSTR)(buf + headerSz), tag, pResults);
   free(buf);
-  return x;
+  return x;  // [한국어] 값 반환
 }
 
 static inline void charmemset(XMLSTR dest, XMLCHAR c, int l) {
-  while (l--) *(dest++) = c;
+  while (l--) *(dest++) = c;  // [한국어] 반복문
 }
 // private:
 // Creates an user friendly XML string from a given element with
@@ -2126,7 +2264,7 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
   int nChildFormat = -1;
   int nElementI = pEntry->nChild + pEntry->nText + pEntry->nClear;
   int i, j;
-  if ((nFormat >= 0) && (nElementI == 1) && (pEntry->nText == 1) &&
+  if ((nFormat >= 0) && (nElementI == 1) && (pEntry->nText == 1) &&  // [한국어] 조건 분기
       (!pEntry->isDeclaration))
     nFormat = -2;
 
@@ -2137,65 +2275,65 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
   // If the element has no name then assume this is the head node.
   cbElement = (int)LENSTR(pEntry->lpszName);
 
-  if (cbElement) {
+  if (cbElement) {  // [한국어] 조건 분기
     // "<elementname "
-    if (lpszMarker) {
-      if (cb) charmemset(lpszMarker, INDENTCHAR, cb);
+    if (lpszMarker) {  // [한국어] 조건 분기
+      if (cb) charmemset(lpszMarker, INDENTCHAR, cb);  // [한국어] 조건 분기
       nResult = cb;
       lpszMarker[nResult++] = _CXML('<');
-      if (pEntry->isDeclaration) lpszMarker[nResult++] = _CXML('?');
+      if (pEntry->isDeclaration) lpszMarker[nResult++] = _CXML('?');  // [한국어] 조건 분기
       xstrcpy(&lpszMarker[nResult], pEntry->lpszName);
       nResult += cbElement;
       lpszMarker[nResult++] = _CXML(' ');
 
     } else {
       nResult += cbElement + 2 + cb;
-      if (pEntry->isDeclaration) nResult++;
+      if (pEntry->isDeclaration) nResult++;  // [한국어] 조건 분기
     }
 
     // Enumerate attributes and add them to the string
     XMLAttribute *pAttr = pEntry->pAttribute;
-    for (i = 0; i < pEntry->nAttribute; i++) {
+    for (i = 0; i < pEntry->nAttribute; i++) {  // [한국어] 반복문
       // "Attrib
       cb = (int)LENSTR(pAttr->lpszName);
-      if (cb) {
-        if (lpszMarker) xstrcpy(&lpszMarker[nResult], pAttr->lpszName);
+      if (cb) {  // [한국어] 조건 분기
+        if (lpszMarker) xstrcpy(&lpszMarker[nResult], pAttr->lpszName);  // [한국어] 조건 분기
         nResult += cb;
         // "Attrib=Value "
-        if (pAttr->lpszValue) {
+        if (pAttr->lpszValue) {  // [한국어] 조건 분기
           cb = (int)ToXMLStringTool::lengthXMLString(pAttr->lpszValue);
-          if (lpszMarker) {
+          if (lpszMarker) {  // [한국어] 조건 분기
             lpszMarker[nResult] = _CXML('=');
             lpszMarker[nResult + 1] = _CXML('"');
-            if (cb)
+            if (cb)  // [한국어] 조건 분기
               ToXMLStringTool::toXMLUnSafe(&lpszMarker[nResult + 2],
                                            pAttr->lpszValue);
             lpszMarker[nResult + cb + 2] = _CXML('"');
           }
           nResult += cb + 3;
         }
-        if (lpszMarker) lpszMarker[nResult] = _CXML(' ');
+        if (lpszMarker) lpszMarker[nResult] = _CXML(' ');  // [한국어] 조건 분기
         nResult++;
       }
       pAttr++;
     }
 
-    if (pEntry->isDeclaration) {
-      if (lpszMarker) {
+    if (pEntry->isDeclaration) {  // [한국어] 조건 분기
+      if (lpszMarker) {  // [한국어] 조건 분기
         lpszMarker[nResult - 1] = _CXML('?');
         lpszMarker[nResult] = _CXML('>');
       }
       nResult++;
-      if (nFormat != -1) {
-        if (lpszMarker) lpszMarker[nResult] = _CXML('\n');
+      if (nFormat != -1) {  // [한국어] 조건 분기
+        if (lpszMarker) lpszMarker[nResult] = _CXML('\n');  // [한국어] 조건 분기
         nResult++;
       }
     } else
       // If there are child nodes we need to terminate the start tag
-      if (nElementI) {
-        if (lpszMarker) lpszMarker[nResult - 1] = _CXML('>');
-        if (nFormat >= 0) {
-          if (lpszMarker) lpszMarker[nResult] = _CXML('\n');
+      if (nElementI) {  // [한국어] 조건 분기
+        if (lpszMarker) lpszMarker[nResult - 1] = _CXML('>');  // [한국어] 조건 분기
+        if (nFormat >= 0) {  // [한국어] 조건 분기
+          if (lpszMarker) lpszMarker[nResult] = _CXML('\n');  // [한국어] 조건 분기
           nResult++;
         }
       } else
@@ -2204,25 +2342,25 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
 
   // Calculate the child format for when we recurse.  This is used to
   // determine the number of spaces used for prefixes.
-  if (nFormat != -1) {
-    if (cbElement && (!pEntry->isDeclaration))
+  if (nFormat != -1) {  // [한국어] 조건 분기
+    if (cbElement && (!pEntry->isDeclaration))  // [한국어] 조건 분기
       nChildFormat = nFormat + 1;
     else
       nChildFormat = nFormat;
   }
 
   // Enumerate through remaining children
-  for (i = 0; i < nElementI; i++) {
+  for (i = 0; i < nElementI; i++) {  // [한국어] 반복문
     j = pEntry->pOrder[i];
-    switch ((XMLElementType)(j & 3)) {
+    switch ((XMLElementType)(j & 3)) {  // [한국어] switch 분기
       // Text nodes
-      case eNodeText: {
+      case eNodeText: {  // [한국어] case 레이블
         // "Text"
         XMLCSTR pChild = pEntry->pText[j >> 2];
         cb = (int)ToXMLStringTool::lengthXMLString(pChild);
-        if (cb) {
-          if (nFormat >= 0) {
-            if (lpszMarker) {
+        if (cb) {  // [한국어] 조건 분기
+          if (nFormat >= 0) {  // [한국어] 조건 분기
+            if (lpszMarker) {  // [한국어] 조건 분기
               charmemset(&lpszMarker[nResult], INDENTCHAR, nFormat + 1);
               ToXMLStringTool::toXMLUnSafe(&lpszMarker[nResult + nFormat + 1],
                                            pChild);
@@ -2230,7 +2368,7 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
             }
             nResult += cb + nFormat + 2;
           } else {
-            if (lpszMarker)
+            if (lpszMarker)  // [한국어] 조건 분기
               ToXMLStringTool::toXMLUnSafe(&lpszMarker[nResult], pChild);
             nResult += cb;
           }
@@ -2239,46 +2377,46 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
       }
 
       // Clear type nodes
-      case eNodeClear: {
+      case eNodeClear: {  // [한국어] case 레이블
         XMLClear *pChild = pEntry->pClear + (j >> 2);
         // "OpenTag"
         cb = (int)LENSTR(pChild->lpszOpenTag);
-        if (cb) {
-          if (nFormat != -1) {
-            if (lpszMarker) {
+        if (cb) {  // [한국어] 조건 분기
+          if (nFormat != -1) {  // [한국어] 조건 분기
+            if (lpszMarker) {  // [한국어] 조건 분기
               charmemset(&lpszMarker[nResult], INDENTCHAR, nFormat + 1);
               xstrcpy(&lpszMarker[nResult + nFormat + 1], pChild->lpszOpenTag);
             }
             nResult += cb + nFormat + 1;
           } else {
-            if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszOpenTag);
+            if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszOpenTag);  // [한국어] 조건 분기
             nResult += cb;
           }
         }
 
         // "OpenTag Value"
         cb = (int)LENSTR(pChild->lpszValue);
-        if (cb) {
-          if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszValue);
+        if (cb) {  // [한국어] 조건 분기
+          if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszValue);  // [한국어] 조건 분기
           nResult += cb;
         }
 
         // "OpenTag Value CloseTag"
         cb = (int)LENSTR(pChild->lpszCloseTag);
-        if (cb) {
-          if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszCloseTag);
+        if (cb) {  // [한국어] 조건 분기
+          if (lpszMarker) xstrcpy(&lpszMarker[nResult], pChild->lpszCloseTag);  // [한국어] 조건 분기
           nResult += cb;
         }
 
-        if (nFormat != -1) {
-          if (lpszMarker) lpszMarker[nResult] = _CXML('\n');
+        if (nFormat != -1) {  // [한국어] 조건 분기
+          if (lpszMarker) lpszMarker[nResult] = _CXML('\n');  // [한국어] 조건 분기
           nResult++;
         }
         break;
       }
 
       // Element nodes
-      case eNodeChild: {
+      case eNodeChild: {  // [한국어] case 레이블
         // Recursively add child nodes
         nResult += CreateXMLStringR(pEntry->pChild[j >> 2].d,
                                     lpszMarker ? lpszMarker + nResult : 0,
@@ -2290,13 +2428,13 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
     }
   }
 
-  if ((cbElement) && (!pEntry->isDeclaration)) {
+  if ((cbElement) && (!pEntry->isDeclaration)) {  // [한국어] 조건 분기
     // If we have child entries we need to use long XML notation for
     // closing the element - "<elementname>blah blah blah</elementname>"
-    if (nElementI) {
+    if (nElementI) {  // [한국어] 조건 분기
       // "</elementname>\0"
-      if (lpszMarker) {
-        if (nFormat >= 0) {
+      if (lpszMarker) {  // [한국어] 조건 분기
+        if (nFormat >= 0) {  // [한국어] 조건 분기
           charmemset(&lpszMarker[nResult], INDENTCHAR, nFormat);
           nResult += nFormat;
         }
@@ -2308,14 +2446,14 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
         nResult += cbElement;
 
         lpszMarker[nResult] = _CXML('>');
-        if (nFormat == -1)
+        if (nFormat == -1)  // [한국어] 조건 분기
           nResult++;
         else {
           lpszMarker[nResult + 1] = _CXML('\n');
           nResult += 2;
         }
       } else {
-        if (nFormat >= 0)
+        if (nFormat >= 0)  // [한국어] 조건 분기
           nResult += cbElement + 4 + nFormat;
         else if (nFormat == -1)
           nResult += cbElement + 3;
@@ -2326,16 +2464,16 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
       // If there are no children we can use shorthand XML notation -
       // "<elementname/>"
       // "/>\0"
-      if (lpszMarker) {
+      if (lpszMarker) {  // [한국어] 조건 분기
         lpszMarker[nResult] = _CXML('/');
         lpszMarker[nResult + 1] = _CXML('>');
-        if (nFormat != -1) lpszMarker[nResult + 2] = _CXML('\n');
+        if (nFormat != -1) lpszMarker[nResult + 2] = _CXML('\n');  // [한국어] 조건 분기
       }
       nResult += nFormat == -1 ? 2 : 3;
     }
   }
 
-  return nResult;
+  return nResult;  // [한국어] 값 반환
 }
 
 #undef LENSTR
@@ -2349,17 +2487,24 @@ int XMLNode::CreateXMLStringR(XMLNodeData *pEntry, XMLSTR lpszMarker,
 //                                        NULL terminator.
 // @return      XMLSTR                  - Allocated XML string, you must free
 //                                        this with free().
+/*
+ * [한국어] XMLNode::createXMLString - DOM 트리를 XML 문자열로 직렬화
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   XMLNode::createXMLString() 호출 경로
+ */
 XMLSTR XMLNode::createXMLString(int nFormat, int *pnSize) const {
-  if (!d) {
-    if (pnSize) *pnSize = 0;
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (pnSize) *pnSize = 0;  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
 
   XMLSTR lpszResult = NULL;
   int cbStr;
 
   // Recursively Calculate the size of the XML string
-  if (!dropWhiteSpace) nFormat = 0;
+  if (!dropWhiteSpace) nFormat = 0;  // [한국어] 조건 분기
   nFormat = nFormat ? 0 : -1;
   cbStr = CreateXMLStringR(d, 0, nFormat);
   // Alllocate memory for the XML string + the NULL terminator and
@@ -2367,32 +2512,32 @@ XMLSTR XMLNode::createXMLString(int nFormat, int *pnSize) const {
   lpszResult = (XMLSTR)malloc((cbStr + 1) * sizeof(XMLCHAR));
   CreateXMLStringR(d, lpszResult, nFormat);
   lpszResult[cbStr] = _CXML('\0');
-  if (pnSize) *pnSize = cbStr;
-  return lpszResult;
+  if (pnSize) *pnSize = cbStr;  // [한국어] 조건 분기
+  return lpszResult;  // [한국어] 값 반환
 }
 
 int XMLNode::detachFromParent(XMLNodeData *d) {
   XMLNode *pa = d->pParent->pChild;
   int i = 0;
-  while (((void *)(pa[i].d)) != ((void *)d)) i++;
+  while (((void *)(pa[i].d)) != ((void *)d)) i++;  // [한국어] 반복문
   d->pParent->nChild--;
-  if (d->pParent->nChild)
+  if (d->pParent->nChild)  // [한국어] 조건 분기
     memmove(pa + i, pa + i + 1, (d->pParent->nChild - i) * sizeof(XMLNode));
   else {
     free(pa);
     d->pParent->pChild = NULL;
   }
-  return removeOrderElement(d->pParent, eNodeChild, i);
+  return removeOrderElement(d->pParent, eNodeChild, i);  // [한국어] 값 반환
 }
 
 XMLNode::~XMLNode() {
-  if (!d) return;
+  if (!d) return;  // [한국어] 조건 분기
   d->ref_count--;
   emptyTheNode(0);
 }
 void XMLNode::deleteNodeContent() {
-  if (!d) return;
-  if (d->pParent) {
+  if (!d) return;  // [한국어] 조건 분기
+  if (d->pParent) {  // [한국어] 조건 분기
     detachFromParent(d);
     d->pParent = NULL;
     d->ref_count--;
@@ -2401,24 +2546,24 @@ void XMLNode::deleteNodeContent() {
 }
 void XMLNode::emptyTheNode(char force) {
   XMLNodeData *dd = d;  // warning: must stay this way!
-  if ((dd->ref_count == 0) || force) {
-    if (d->pParent) detachFromParent(d);
+  if ((dd->ref_count == 0) || force) {  // [한국어] 조건 분기
+    if (d->pParent) detachFromParent(d);  // [한국어] 조건 분기
     int i;
     XMLNode *pc;
-    for (i = 0; i < dd->nChild; i++) {
+    for (i = 0; i < dd->nChild; i++) {  // [한국어] 반복문
       pc = dd->pChild + i;
       pc->d->pParent = NULL;
       pc->d->ref_count--;
       pc->emptyTheNode(force);
     }
     myFree(dd->pChild);
-    for (i = 0; i < dd->nText; i++) free((void *)dd->pText[i]);
+    for (i = 0; i < dd->nText; i++) free((void *)dd->pText[i]);  // [한국어] 반복문
     myFree(dd->pText);
-    for (i = 0; i < dd->nClear; i++) free((void *)dd->pClear[i].lpszValue);
+    for (i = 0; i < dd->nClear; i++) free((void *)dd->pClear[i].lpszValue);  // [한국어] 반복문
     myFree(dd->pClear);
-    for (i = 0; i < dd->nAttribute; i++) {
+    for (i = 0; i < dd->nAttribute; i++) {  // [한국어] 반복문
       free((void *)dd->pAttribute[i].lpszName);
-      if (dd->pAttribute[i].lpszValue)
+      if (dd->pAttribute[i].lpszValue)  // [한국어] 조건 분기
         free((void *)dd->pAttribute[i].lpszValue);
     }
     myFree(dd->pAttribute);
@@ -2436,7 +2581,7 @@ void XMLNode::emptyTheNode(char force) {
     dd->lpszName = NULL;
     dd->pParent = NULL;
   }
-  if (dd->ref_count == 0) {
+  if (dd->ref_count == 0) {  // [한국어] 조건 분기
     free(dd);
     d = NULL;
   }
@@ -2444,84 +2589,84 @@ void XMLNode::emptyTheNode(char force) {
 
 XMLNode &XMLNode::operator=(const XMLNode &A) {
   // shallow copy
-  if (this != &A) {
-    if (d) {
+  if (this != &A) {  // [한국어] 조건 분기
+    if (d) {  // [한국어] 조건 분기
       d->ref_count--;
       emptyTheNode(0);
     }
     d = A.d;
-    if (d) (d->ref_count)++;
+    if (d) (d->ref_count)++;  // [한국어] 조건 분기
   }
-  return *this;
+  return *this;  // [한국어] 값 반환
 }
 
 XMLNode::XMLNode(const XMLNode &A) {
   // shallow copy
   d = A.d;
-  if (d) (d->ref_count)++;
+  if (d) (d->ref_count)++;  // [한국어] 조건 분기
 }
 
 XMLNode XMLNode::deepCopy() const {
-  if (!d) return XMLNode::emptyXMLNode;
+  if (!d) return XMLNode::emptyXMLNode;  // [한국어] 조건 분기
   XMLNode x(NULL, stringDup(d->lpszName), d->isDeclaration);
   XMLNodeData *p = x.d;
   int n = d->nAttribute;
-  if (n) {
+  if (n) {  // [한국어] 조건 분기
     p->nAttribute = n;
     p->pAttribute = (XMLAttribute *)malloc(n * sizeof(XMLAttribute));
-    while (n--) {
+    while (n--) {  // [한국어] 반복문
       p->pAttribute[n].lpszName = stringDup(d->pAttribute[n].lpszName);
       p->pAttribute[n].lpszValue = stringDup(d->pAttribute[n].lpszValue);
     }
   }
-  if (d->pOrder) {
+  if (d->pOrder) {  // [한국어] 조건 분기
     n = (d->nChild + d->nText + d->nClear) * sizeof(int);
     p->pOrder = (int *)malloc(n);
     memcpy(p->pOrder, d->pOrder, n);
   }
   n = d->nText;
-  if (n) {
+  if (n) {  // [한국어] 조건 분기
     p->nText = n;
     p->pText = (XMLCSTR *)malloc(n * sizeof(XMLCSTR));
-    while (n--) p->pText[n] = stringDup(d->pText[n]);
+    while (n--) p->pText[n] = stringDup(d->pText[n]);  // [한국어] 반복문
   }
   n = d->nClear;
-  if (n) {
+  if (n) {  // [한국어] 조건 분기
     p->nClear = n;
     p->pClear = (XMLClear *)malloc(n * sizeof(XMLClear));
-    while (n--) {
+    while (n--) {  // [한국어] 반복문
       p->pClear[n].lpszCloseTag = d->pClear[n].lpszCloseTag;
       p->pClear[n].lpszOpenTag = d->pClear[n].lpszOpenTag;
       p->pClear[n].lpszValue = stringDup(d->pClear[n].lpszValue);
     }
   }
   n = d->nChild;
-  if (n) {
+  if (n) {  // [한국어] 조건 분기
     p->nChild = n;
     p->pChild = (XMLNode *)malloc(n * sizeof(XMLNode));
-    while (n--) {
+    while (n--) {  // [한국어] 반복문
       p->pChild[n].d = NULL;
       p->pChild[n] = d->pChild[n].deepCopy();
       p->pChild[n].d->pParent = p;
     }
   }
-  return x;
+  return x;  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::addChild(XMLNode childNode, int pos) {
   XMLNodeData *dc = childNode.d;
-  if ((!dc) || (!d)) return childNode;
-  if (!dc->lpszName) {
+  if ((!dc) || (!d)) return childNode;  // [한국어] 조건 분기
+  if (!dc->lpszName) {  // [한국어] 조건 분기
     // this is a root node: todo: correct fix
     int j = pos;
-    while (dc->nChild) {
+    while (dc->nChild) {  // [한국어] 반복문
       addChild(dc->pChild[0], j);
-      if (pos >= 0) j++;
+      if (pos >= 0) j++;  // [한국어] 조건 분기
     }
-    return childNode;
+    return childNode;  // [한국어] 값 반환
   }
-  if (dc->pParent) {
-    if ((detachFromParent(dc) <= pos) && (dc->pParent == d)) pos--;
+  if (dc->pParent) {  // [한국어] 조건 분기
+    if ((detachFromParent(dc) <= pos) && (dc->pParent == d)) pos--;  // [한국어] 조건 분기
   } else
     dc->ref_count++;
   dc->pParent = d;
@@ -2531,16 +2676,16 @@ XMLNode XMLNode::addChild(XMLNode childNode, int pos) {
                                     sizeof(XMLNode), eNodeChild);
   d->pChild[pos].d = dc;
   d->nChild++;
-  return childNode;
+  return childNode;  // [한국어] 값 반환
 }
 
 void XMLNode::deleteAttribute(int i) {
-  if ((!d) || (i < 0) || (i >= d->nAttribute)) return;
+  if ((!d) || (i < 0) || (i >= d->nAttribute)) return;  // [한국어] 조건 분기
   d->nAttribute--;
   XMLAttribute *p = d->pAttribute + i;
   free((void *)p->lpszName);
-  if (p->lpszValue) free((void *)p->lpszValue);
-  if (d->nAttribute)
+  if (p->lpszValue) free((void *)p->lpszValue);  // [한국어] 조건 분기
+  if (d->nAttribute)  // [한국어] 조건 분기
     memmove(p, p + 1, (d->nAttribute - i) * sizeof(XMLAttribute));
   else {
     free(p);
@@ -2549,42 +2694,42 @@ void XMLNode::deleteAttribute(int i) {
 }
 
 void XMLNode::deleteAttribute(XMLAttribute *a) {
-  if (a) deleteAttribute(a->lpszName);
+  if (a) deleteAttribute(a->lpszName);  // [한국어] 조건 분기
 }
 void XMLNode::deleteAttribute(XMLCSTR lpszName) {
   int j = 0;
   getAttribute(lpszName, &j);
-  if (j) deleteAttribute(j - 1);
+  if (j) deleteAttribute(j - 1);  // [한국어] 조건 분기
 }
 
 XMLAttribute *XMLNode::updateAttribute_WOSD(XMLSTR lpszNewValue,
                                             XMLSTR lpszNewName, int i) {
-  if (!d) {
-    if (lpszNewValue) free(lpszNewValue);
-    if (lpszNewName) free(lpszNewName);
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (lpszNewValue) free(lpszNewValue);  // [한국어] 조건 분기
+    if (lpszNewName) free(lpszNewName);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
-  if (i >= d->nAttribute) {
-    if (lpszNewName) return addAttribute_WOSD(lpszNewName, lpszNewValue);
-    return NULL;
+  if (i >= d->nAttribute) {  // [한국어] 조건 분기
+    if (lpszNewName) return addAttribute_WOSD(lpszNewName, lpszNewValue);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
   XMLAttribute *p = d->pAttribute + i;
-  if (p->lpszValue && p->lpszValue != lpszNewValue) free((void *)p->lpszValue);
+  if (p->lpszValue && p->lpszValue != lpszNewValue) free((void *)p->lpszValue);  // [한국어] 조건 분기
   p->lpszValue = lpszNewValue;
-  if (lpszNewName && p->lpszName != lpszNewName) {
+  if (lpszNewName && p->lpszName != lpszNewName) {  // [한국어] 조건 분기
     free((void *)p->lpszName);
     p->lpszName = lpszNewName;
   };
-  return p;
+  return p;  // [한국어] 값 반환
 }
 
 XMLAttribute *XMLNode::updateAttribute_WOSD(XMLAttribute *newAttribute,
                                             XMLAttribute *oldAttribute) {
-  if (oldAttribute)
-    return updateAttribute_WOSD((XMLSTR)newAttribute->lpszValue,
+  if (oldAttribute)  // [한국어] 조건 분기
+    return updateAttribute_WOSD((XMLSTR)newAttribute->lpszValue,  // [한국어] 값 반환
                                 (XMLSTR)newAttribute->lpszName,
                                 oldAttribute->lpszName);
-  return addAttribute_WOSD((XMLSTR)newAttribute->lpszName,
+  return addAttribute_WOSD((XMLSTR)newAttribute->lpszName,  // [한국어] 값 반환
                            (XMLSTR)newAttribute->lpszValue);
 }
 
@@ -2593,35 +2738,35 @@ XMLAttribute *XMLNode::updateAttribute_WOSD(XMLSTR lpszNewValue,
                                             XMLCSTR lpszOldName) {
   int j = 0;
   getAttribute(lpszOldName, &j);
-  if (j)
-    return updateAttribute_WOSD(lpszNewValue, lpszNewName, j - 1);
+  if (j)  // [한국어] 조건 분기
+    return updateAttribute_WOSD(lpszNewValue, lpszNewName, j - 1);  // [한국어] 값 반환
   else {
-    if (lpszNewName)
-      return addAttribute_WOSD(lpszNewName, lpszNewValue);
+    if (lpszNewName)  // [한국어] 조건 분기
+      return addAttribute_WOSD(lpszNewName, lpszNewValue);  // [한국어] 값 반환
     else
-      return addAttribute_WOSD(stringDup(lpszOldName), lpszNewValue);
+      return addAttribute_WOSD(stringDup(lpszOldName), lpszNewValue);  // [한국어] 값 반환
   }
 }
 
 int XMLNode::indexText(XMLCSTR lpszValue) const {
-  if (!d) return -1;
+  if (!d) return -1;  // [한국어] 조건 분기
   int i, l = d->nText;
-  if (!lpszValue) {
-    if (l) return 0;
-    return -1;
+  if (!lpszValue) {  // [한국어] 조건 분기
+    if (l) return 0;  // [한국어] 조건 분기
+    return -1;  // [한국어] 값 반환
   }
   XMLCSTR *p = d->pText;
-  for (i = 0; i < l; i++)
-    if (lpszValue == p[i]) return i;
-  return -1;
+  for (i = 0; i < l; i++)  // [한국어] 반복문
+    if (lpszValue == p[i]) return i;  // [한국어] 조건 분기
+  return -1;  // [한국어] 값 반환
 }
 
 void XMLNode::deleteText(int i) {
-  if ((!d) || (i < 0) || (i >= d->nText)) return;
+  if ((!d) || (i < 0) || (i >= d->nText)) return;  // [한국어] 조건 분기
   d->nText--;
   XMLCSTR *p = d->pText + i;
   free((void *)*p);
-  if (d->nText)
+  if (d->nText)  // [한국어] 조건 분기
     memmove(p, p + 1, (d->nText - i) * sizeof(XMLCSTR));
   else {
     free(p);
@@ -2635,35 +2780,35 @@ void XMLNode::deleteText(XMLCSTR lpszValue) {
 }
 
 XMLCSTR XMLNode::updateText_WOSD(XMLSTR lpszNewValue, int i) {
-  if (!d) {
-    if (lpszNewValue) free(lpszNewValue);
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (lpszNewValue) free(lpszNewValue);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
-  if (i >= d->nText) return addText_WOSD(lpszNewValue);
+  if (i >= d->nText) return addText_WOSD(lpszNewValue);  // [한국어] 조건 분기
   XMLCSTR *p = d->pText + i;
-  if (*p != lpszNewValue) {
+  if (*p != lpszNewValue) {  // [한국어] 조건 분기
     free((void *)*p);
     *p = lpszNewValue;
   }
-  return lpszNewValue;
+  return lpszNewValue;  // [한국어] 값 반환
 }
 
 XMLCSTR XMLNode::updateText_WOSD(XMLSTR lpszNewValue, XMLCSTR lpszOldValue) {
-  if (!d) {
-    if (lpszNewValue) free(lpszNewValue);
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (lpszNewValue) free(lpszNewValue);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
   int i = indexText(lpszOldValue);
-  if (i >= 0) return updateText_WOSD(lpszNewValue, i);
-  return addText_WOSD(lpszNewValue);
+  if (i >= 0) return updateText_WOSD(lpszNewValue, i);  // [한국어] 조건 분기
+  return addText_WOSD(lpszNewValue);  // [한국어] 값 반환
 }
 
 void XMLNode::deleteClear(int i) {
-  if ((!d) || (i < 0) || (i >= d->nClear)) return;
+  if ((!d) || (i < 0) || (i >= d->nClear)) return;  // [한국어] 조건 분기
   d->nClear--;
   XMLClear *p = d->pClear + i;
   free((void *)p->lpszValue);
-  if (d->nClear)
+  if (d->nClear)  // [한국어] 조건 분기
     memmove(p, p + 1, (d->nClear - i) * sizeof(XMLClear));
   else {
     free(p);
@@ -2673,121 +2818,121 @@ void XMLNode::deleteClear(int i) {
 }
 
 int XMLNode::indexClear(XMLCSTR lpszValue) const {
-  if (!d) return -1;
+  if (!d) return -1;  // [한국어] 조건 분기
   int i, l = d->nClear;
-  if (!lpszValue) {
-    if (l) return 0;
-    return -1;
+  if (!lpszValue) {  // [한국어] 조건 분기
+    if (l) return 0;  // [한국어] 조건 분기
+    return -1;  // [한국어] 값 반환
   }
   XMLClear *p = d->pClear;
-  for (i = 0; i < l; i++)
-    if (lpszValue == p[i].lpszValue) return i;
-  return -1;
+  for (i = 0; i < l; i++)  // [한국어] 반복문
+    if (lpszValue == p[i].lpszValue) return i;  // [한국어] 조건 분기
+  return -1;  // [한국어] 값 반환
 }
 
 void XMLNode::deleteClear(XMLCSTR lpszValue) {
   deleteClear(indexClear(lpszValue));
 }
 void XMLNode::deleteClear(XMLClear *a) {
-  if (a) deleteClear(a->lpszValue);
+  if (a) deleteClear(a->lpszValue);  // [한국어] 조건 분기
 }
 
 XMLClear *XMLNode::updateClear_WOSD(XMLSTR lpszNewContent, int i) {
-  if (!d) {
-    if (lpszNewContent) free(lpszNewContent);
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (lpszNewContent) free(lpszNewContent);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
-  if (i >= d->nClear) return addClear_WOSD(lpszNewContent);
+  if (i >= d->nClear) return addClear_WOSD(lpszNewContent);  // [한국어] 조건 분기
   XMLClear *p = d->pClear + i;
-  if (lpszNewContent != p->lpszValue) {
+  if (lpszNewContent != p->lpszValue) {  // [한국어] 조건 분기
     free((void *)p->lpszValue);
     p->lpszValue = lpszNewContent;
   }
-  return p;
+  return p;  // [한국어] 값 반환
 }
 
 XMLClear *XMLNode::updateClear_WOSD(XMLSTR lpszNewContent,
                                     XMLCSTR lpszOldValue) {
-  if (!d) {
-    if (lpszNewContent) free(lpszNewContent);
-    return NULL;
+  if (!d) {  // [한국어] 조건 분기
+    if (lpszNewContent) free(lpszNewContent);  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
   int i = indexClear(lpszOldValue);
-  if (i >= 0) return updateClear_WOSD(lpszNewContent, i);
-  return addClear_WOSD(lpszNewContent);
+  if (i >= 0) return updateClear_WOSD(lpszNewContent, i);  // [한국어] 조건 분기
+  return addClear_WOSD(lpszNewContent);  // [한국어] 값 반환
 }
 
 XMLClear *XMLNode::updateClear_WOSD(XMLClear *newP, XMLClear *oldP) {
-  if (oldP)
-    return updateClear_WOSD((XMLSTR)newP->lpszValue, (XMLSTR)oldP->lpszValue);
-  return NULL;
+  if (oldP)  // [한국어] 조건 분기
+    return updateClear_WOSD((XMLSTR)newP->lpszValue, (XMLSTR)oldP->lpszValue);  // [한국어] 값 반환
+  return NULL;  // [한국어] 값 반환
 }
 
 int XMLNode::nChildNode(XMLCSTR name) const {
-  if (!d) return 0;
+  if (!d) return 0;  // [한국어] 조건 분기
   int i, j = 0, n = d->nChild;
   XMLNode *pc = d->pChild;
-  for (i = 0; i < n; i++) {
-    if (xstricmp(pc->d->lpszName, name) == 0) j++;
+  for (i = 0; i < n; i++) {  // [한국어] 반복문
+    if (xstricmp(pc->d->lpszName, name) == 0) j++;  // [한국어] 조건 분기
     pc++;
   }
-  return j;
+  return j;  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::getChildNode(XMLCSTR name, int *j) const {
-  if (!d) return emptyXMLNode;
+  if (!d) return emptyXMLNode;  // [한국어] 조건 분기
   int i = 0, n = d->nChild;
-  if (j) i = *j;
+  if (j) i = *j;  // [한국어] 조건 분기
   XMLNode *pc = d->pChild + i;
-  for (; i < n; i++) {
-    if (!xstricmp(pc->d->lpszName, name)) {
-      if (j) *j = i + 1;
-      return *pc;
+  for (; i < n; i++) {  // [한국어] 반복문
+    if (!xstricmp(pc->d->lpszName, name)) {  // [한국어] 조건 분기
+      if (j) *j = i + 1;  // [한국어] 조건 분기
+      return *pc;  // [한국어] 값 반환
     }
     pc++;
   }
-  return emptyXMLNode;
+  return emptyXMLNode;  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::getChildNode(XMLCSTR name, int j) const {
-  if (!d) return emptyXMLNode;
-  if (j >= 0) {
+  if (!d) return emptyXMLNode;  // [한국어] 조건 분기
+  if (j >= 0) {  // [한국어] 조건 분기
     int i = 0;
-    while (j-- > 0) getChildNode(name, &i);
-    return getChildNode(name, &i);
+    while (j-- > 0) getChildNode(name, &i);  // [한국어] 반복문
+    return getChildNode(name, &i);  // [한국어] 값 반환
   }
   int i = d->nChild;
-  while (i--)
-    if (!xstricmp(name, d->pChild[i].d->lpszName)) break;
-  if (i < 0) return emptyXMLNode;
-  return getChildNode(i);
+  while (i--)  // [한국어] 반복문
+    if (!xstricmp(name, d->pChild[i].d->lpszName)) break;  // [한국어] 조건 분기
+  if (i < 0) return emptyXMLNode;  // [한국어] 조건 분기
+  return getChildNode(i);  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::getChildNodeByPath(XMLCSTR _path, char createMissing,
                                     XMLCHAR sep) {
   XMLSTR path = stringDup(_path);
   XMLNode x = getChildNodeByPathNonConst(path, createMissing, sep);
-  if (path) free(path);
-  return x;
+  if (path) free(path);  // [한국어] 조건 분기
+  return x;  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::getChildNodeByPathNonConst(XMLSTR path, char createIfMissing,
                                             XMLCHAR sep) {
-  if ((!path) || (!(*path))) return *this;
+  if ((!path) || (!(*path))) return *this;  // [한국어] 조건 분기
   XMLNode xn, xbase = *this;
   XMLCHAR *tend1, sepString[2];
   sepString[0] = sep;
   sepString[1] = 0;
   tend1 = xstrstr(path, sepString);
-  while (tend1) {
+  while (tend1) {  // [한국어] 반복문
     *tend1 = 0;
     xn = xbase.getChildNode(path);
-    if (xn.isEmpty()) {
-      if (createIfMissing)
+    if (xn.isEmpty()) {  // [한국어] 조건 분기
+      if (createIfMissing)  // [한국어] 조건 분기
         xn = xbase.addChild(path);
       else {
         *tend1 = sep;
-        return XMLNode::emptyXMLNode;
+        return XMLNode::emptyXMLNode;  // [한국어] 값 반환
       }
     }
     *tend1 = sep;
@@ -2796,268 +2941,275 @@ XMLNode XMLNode::getChildNodeByPathNonConst(XMLSTR path, char createIfMissing,
     tend1 = xstrstr(path, sepString);
   }
   xn = xbase.getChildNode(path);
-  if (xn.isEmpty() && createIfMissing) xn = xbase.addChild(path);
-  return xn;
+  if (xn.isEmpty() && createIfMissing) xn = xbase.addChild(path);  // [한국어] 조건 분기
+  return xn;  // [한국어] 값 반환
 }
 
 XMLElementPosition XMLNode::positionOfText(int i) const {
-  if (i >= d->nText) i = d->nText - 1;
-  return findPosition(d, i, eNodeText);
+  if (i >= d->nText) i = d->nText - 1;  // [한국어] 조건 분기
+  return findPosition(d, i, eNodeText);  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfClear(int i) const {
-  if (i >= d->nClear) i = d->nClear - 1;
-  return findPosition(d, i, eNodeClear);
+  if (i >= d->nClear) i = d->nClear - 1;  // [한국어] 조건 분기
+  return findPosition(d, i, eNodeClear);  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfChildNode(int i) const {
-  if (i >= d->nChild) i = d->nChild - 1;
-  return findPosition(d, i, eNodeChild);
+  if (i >= d->nChild) i = d->nChild - 1;  // [한국어] 조건 분기
+  return findPosition(d, i, eNodeChild);  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfText(XMLCSTR lpszValue) const {
-  return positionOfText(indexText(lpszValue));
+  return positionOfText(indexText(lpszValue));  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfClear(XMLCSTR lpszValue) const {
-  return positionOfClear(indexClear(lpszValue));
+  return positionOfClear(indexClear(lpszValue));  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfClear(XMLClear *a) const {
-  if (a) return positionOfClear(a->lpszValue);
-  return positionOfClear();
+  if (a) return positionOfClear(a->lpszValue);  // [한국어] 조건 분기
+  return positionOfClear();  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfChildNode(XMLNode x) const {
-  if ((!d) || (!x.d)) return -1;
+  if ((!d) || (!x.d)) return -1;  // [한국어] 조건 분기
   XMLNodeData *dd = x.d;
   XMLNode *pc = d->pChild;
   int i = d->nChild;
-  while (i--)
-    if (pc[i].d == dd) return findPosition(d, i, eNodeChild);
-  return -1;
+  while (i--)  // [한국어] 반복문
+    if (pc[i].d == dd) return findPosition(d, i, eNodeChild);  // [한국어] 조건 분기
+  return -1;  // [한국어] 값 반환
 }
 XMLElementPosition XMLNode::positionOfChildNode(XMLCSTR name, int count) const {
-  if (!name) return positionOfChildNode(count);
+  if (!name) return positionOfChildNode(count);  // [한국어] 조건 분기
   int j = 0;
   do {
     getChildNode(name, &j);
-    if (j < 0) return -1;
+    if (j < 0) return -1;  // [한국어] 조건 분기
   } while (count--);
-  return findPosition(d, j - 1, eNodeChild);
+  return findPosition(d, j - 1, eNodeChild);  // [한국어] 값 반환
 }
 
 XMLNode XMLNode::getChildNodeWithAttribute(XMLCSTR name, XMLCSTR attributeName,
                                            XMLCSTR attributeValue,
                                            int *k) const {
   int i = 0, j;
-  if (k) i = *k;
+  if (k) i = *k;  // [한국어] 조건 분기
   XMLNode x;
   XMLCSTR t;
   do {
     x = getChildNode(name, &i);
-    if (!x.isEmpty()) {
-      if (attributeValue) {
+    if (!x.isEmpty()) {  // [한국어] 조건 분기
+      if (attributeValue) {  // [한국어] 조건 분기
         j = 0;
         do {
           t = x.getAttribute(attributeName, &j);
-          if (t && (xstricmp(attributeValue, t) == 0)) {
-            if (k) *k = i;
-            return x;
+          if (t && (xstricmp(attributeValue, t) == 0)) {  // [한국어] 조건 분기
+            if (k) *k = i;  // [한국어] 조건 분기
+            return x;  // [한국어] 값 반환
           }
         } while (t);
       } else {
-        if (x.isAttributeSet(attributeName)) {
-          if (k) *k = i;
-          return x;
+        if (x.isAttributeSet(attributeName)) {  // [한국어] 조건 분기
+          if (k) *k = i;  // [한국어] 조건 분기
+          return x;  // [한국어] 값 반환
         }
       }
     }
   } while (!x.isEmpty());
-  return emptyXMLNode;
+  return emptyXMLNode;  // [한국어] 값 반환
 }
 
 // Find an attribute on an node.
 XMLCSTR XMLNode::getAttribute(XMLCSTR lpszAttrib, int *j) const {
-  if (!d) return NULL;
+  if (!d) return NULL;  // [한국어] 조건 분기
   int i = 0, n = d->nAttribute;
-  if (j) i = *j;
+  if (j) i = *j;  // [한국어] 조건 분기
   XMLAttribute *pAttr = d->pAttribute + i;
-  for (; i < n; i++) {
-    if (xstricmp(pAttr->lpszName, lpszAttrib) == 0) {
-      if (j) *j = i + 1;
-      return pAttr->lpszValue;
+  for (; i < n; i++) {  // [한국어] 반복문
+    if (xstricmp(pAttr->lpszName, lpszAttrib) == 0) {  // [한국어] 조건 분기
+      if (j) *j = i + 1;  // [한국어] 조건 분기
+      return pAttr->lpszValue;  // [한국어] 값 반환
     }
     pAttr++;
   }
-  return NULL;
+  return NULL;  // [한국어] 값 반환
 }
 
 char XMLNode::isAttributeSet(XMLCSTR lpszAttrib) const {
-  if (!d) return FALSE;
+  if (!d) return FALSE;  // [한국어] 조건 분기
   int i, n = d->nAttribute;
   XMLAttribute *pAttr = d->pAttribute;
-  for (i = 0; i < n; i++) {
-    if (xstricmp(pAttr->lpszName, lpszAttrib) == 0) {
-      return TRUE;
+  for (i = 0; i < n; i++) {  // [한국어] 반복문
+    if (xstricmp(pAttr->lpszName, lpszAttrib) == 0) {  // [한국어] 조건 분기
+      return TRUE;  // [한국어] 값 반환
     }
     pAttr++;
   }
-  return FALSE;
+  return FALSE;  // [한국어] 값 반환
 }
 
 XMLCSTR XMLNode::getAttribute(XMLCSTR name, int j) const {
-  if (!d) return NULL;
+  if (!d) return NULL;  // [한국어] 조건 분기
   int i = 0;
-  while (j-- > 0) getAttribute(name, &i);
-  return getAttribute(name, &i);
+  while (j-- > 0) getAttribute(name, &i);  // [한국어] 반복문
+  return getAttribute(name, &i);  // [한국어] 값 반환
 }
 
 XMLNodeContents XMLNode::enumContents(int i) const {
   XMLNodeContents c;
-  if (!d) {
+  if (!d) {  // [한국어] 조건 분기
     c.etype = eNodeNULL;
-    return c;
+    return c;  // [한국어] 값 반환
   }
-  if (i < d->nAttribute) {
+  if (i < d->nAttribute) {  // [한국어] 조건 분기
     c.etype = eNodeAttribute;
     c.attrib = d->pAttribute[i];
-    return c;
+    return c;  // [한국어] 값 반환
   }
   i -= d->nAttribute;
   c.etype = (XMLElementType)(d->pOrder[i] & 3);
   i = (d->pOrder[i]) >> 2;
-  switch (c.etype) {
-    case eNodeChild:
+  switch (c.etype) {  // [한국어] switch 분기
+    case eNodeChild:  // [한국어] case 레이블
       c.child = d->pChild[i];
       break;
-    case eNodeText:
+    case eNodeText:  // [한국어] case 레이블
       c.text = d->pText[i];
       break;
-    case eNodeClear:
+    case eNodeClear:  // [한국어] case 레이블
       c.clear = d->pClear[i];
       break;
     default:
       break;
   }
-  return c;
+  return c;  // [한국어] 값 반환
 }
 
 XMLCSTR XMLNode::getName() const {
-  if (!d) return NULL;
-  return d->lpszName;
+  if (!d) return NULL;  // [한국어] 조건 분기
+  return d->lpszName;  // [한국어] 값 반환
 }
 int XMLNode::nText() const {
-  if (!d) return 0;
-  return d->nText;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->nText;  // [한국어] 값 반환
 }
 int XMLNode::nChildNode() const {
-  if (!d) return 0;
-  return d->nChild;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->nChild;  // [한국어] 값 반환
 }
 int XMLNode::nAttribute() const {
-  if (!d) return 0;
-  return d->nAttribute;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->nAttribute;  // [한국어] 값 반환
 }
 int XMLNode::nClear() const {
-  if (!d) return 0;
-  return d->nClear;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->nClear;  // [한국어] 값 반환
 }
 int XMLNode::nElement() const {
-  if (!d) return 0;
-  return d->nAttribute + d->nChild + d->nText + d->nClear;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->nAttribute + d->nChild + d->nText + d->nClear;  // [한국어] 값 반환
 }
 XMLClear XMLNode::getClear(int i) const {
-  if ((!d) || (i >= d->nClear)) return emptyXMLClear;
-  return d->pClear[i];
+  if ((!d) || (i >= d->nClear)) return emptyXMLClear;  // [한국어] 조건 분기
+  return d->pClear[i];  // [한국어] 값 반환
 }
 XMLAttribute XMLNode::getAttribute(int i) const {
-  if ((!d) || (i >= d->nAttribute)) return emptyXMLAttribute;
-  return d->pAttribute[i];
+  if ((!d) || (i >= d->nAttribute)) return emptyXMLAttribute;  // [한국어] 조건 분기
+  return d->pAttribute[i];  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::getAttributeName(int i) const {
-  if ((!d) || (i >= d->nAttribute)) return NULL;
-  return d->pAttribute[i].lpszName;
+  if ((!d) || (i >= d->nAttribute)) return NULL;  // [한국어] 조건 분기
+  return d->pAttribute[i].lpszName;  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::getAttributeValue(int i) const {
-  if ((!d) || (i >= d->nAttribute)) return NULL;
-  return d->pAttribute[i].lpszValue;
+  if ((!d) || (i >= d->nAttribute)) return NULL;  // [한국어] 조건 분기
+  return d->pAttribute[i].lpszValue;  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::getText(int i) const {
-  if ((!d) || (i >= d->nText)) return NULL;
-  return d->pText[i];
+  if ((!d) || (i >= d->nText)) return NULL;  // [한국어] 조건 분기
+  return d->pText[i];  // [한국어] 값 반환
 }
 XMLNode XMLNode::getChildNode(int i) const {
-  if ((!d) || (i >= d->nChild)) return emptyXMLNode;
-  return d->pChild[i];
+  if ((!d) || (i >= d->nChild)) return emptyXMLNode;  // [한국어] 조건 분기
+  return d->pChild[i];  // [한국어] 값 반환
 }
 XMLNode XMLNode::getParentNode() const {
-  if ((!d) || (!d->pParent)) return emptyXMLNode;
-  return XMLNode(d->pParent);
+  if ((!d) || (!d->pParent)) return emptyXMLNode;  // [한국어] 조건 분기
+  return XMLNode(d->pParent);  // [한국어] 값 반환
 }
 char XMLNode::isDeclaration() const {
-  if (!d) return 0;
-  return d->isDeclaration;
+  if (!d) return 0;  // [한국어] 조건 분기
+  return d->isDeclaration;  // [한국어] 값 반환
 }
 char XMLNode::isEmpty() const { return (d == NULL); }
 XMLNode XMLNode::emptyNode() { return XMLNode::emptyXMLNode; }
 
 XMLNode XMLNode::addChild(XMLCSTR lpszName, char isDeclaration,
                           XMLElementPosition pos) {
-  return addChild_priv(0, stringDup(lpszName), isDeclaration, pos);
+  return addChild_priv(0, stringDup(lpszName), isDeclaration, pos);  // [한국어] 값 반환
 }
 XMLNode XMLNode::addChild_WOSD(XMLSTR lpszName, char isDeclaration,
                                XMLElementPosition pos) {
-  return addChild_priv(0, lpszName, isDeclaration, pos);
+  return addChild_priv(0, lpszName, isDeclaration, pos);  // [한국어] 값 반환
 }
 XMLAttribute *XMLNode::addAttribute(XMLCSTR lpszName, XMLCSTR lpszValue) {
-  return addAttribute_priv(0, stringDup(lpszName), stringDup(lpszValue));
+  return addAttribute_priv(0, stringDup(lpszName), stringDup(lpszValue));  // [한국어] 값 반환
 }
 XMLAttribute *XMLNode::addAttribute_WOSD(XMLSTR lpszName, XMLSTR lpszValuev) {
-  return addAttribute_priv(0, lpszName, lpszValuev);
+  return addAttribute_priv(0, lpszName, lpszValuev);  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::addText(XMLCSTR lpszValue, XMLElementPosition pos) {
-  return addText_priv(0, stringDup(lpszValue), pos);
+  return addText_priv(0, stringDup(lpszValue), pos);  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::addText_WOSD(XMLSTR lpszValue, XMLElementPosition pos) {
-  return addText_priv(0, lpszValue, pos);
+  return addText_priv(0, lpszValue, pos);  // [한국어] 값 반환
 }
 XMLClear *XMLNode::addClear(XMLCSTR lpszValue, XMLCSTR lpszOpen,
                             XMLCSTR lpszClose, XMLElementPosition pos) {
-  return addClear_priv(0, stringDup(lpszValue), lpszOpen, lpszClose, pos);
+  return addClear_priv(0, stringDup(lpszValue), lpszOpen, lpszClose, pos);  // [한국어] 값 반환
 }
 XMLClear *XMLNode::addClear_WOSD(XMLSTR lpszValue, XMLCSTR lpszOpen,
                                  XMLCSTR lpszClose, XMLElementPosition pos) {
-  return addClear_priv(0, lpszValue, lpszOpen, lpszClose, pos);
+  return addClear_priv(0, lpszValue, lpszOpen, lpszClose, pos);  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::updateName(XMLCSTR lpszName) {
-  return updateName_WOSD(stringDup(lpszName));
+  return updateName_WOSD(stringDup(lpszName));  // [한국어] 값 반환
 }
 XMLAttribute *XMLNode::updateAttribute(XMLAttribute *newAttribute,
                                        XMLAttribute *oldAttribute) {
-  return updateAttribute_WOSD(stringDup(newAttribute->lpszValue),
+  return updateAttribute_WOSD(stringDup(newAttribute->lpszValue),  // [한국어] 값 반환
+/*
+ * [한국어] stringDup - 문자열을 힙에 복사하여 반환
+ * @return 구현에 따라 다름
+ *
+ * 호출 체인:
+ *   stringDup() 호출 경로
+ */
                               stringDup(newAttribute->lpszName),
                               oldAttribute->lpszName);
 }
 XMLAttribute *XMLNode::updateAttribute(XMLCSTR lpszNewValue,
                                        XMLCSTR lpszNewName, int i) {
-  return updateAttribute_WOSD(stringDup(lpszNewValue), stringDup(lpszNewName),
+  return updateAttribute_WOSD(stringDup(lpszNewValue), stringDup(lpszNewName),  // [한국어] 값 반환
                               i);
 }
 XMLAttribute *XMLNode::updateAttribute(XMLCSTR lpszNewValue,
                                        XMLCSTR lpszNewName,
                                        XMLCSTR lpszOldName) {
-  return updateAttribute_WOSD(stringDup(lpszNewValue), stringDup(lpszNewName),
+  return updateAttribute_WOSD(stringDup(lpszNewValue), stringDup(lpszNewName),  // [한국어] 값 반환
                               lpszOldName);
 }
 XMLCSTR XMLNode::updateText(XMLCSTR lpszNewValue, int i) {
-  return updateText_WOSD(stringDup(lpszNewValue), i);
+  return updateText_WOSD(stringDup(lpszNewValue), i);  // [한국어] 값 반환
 }
 XMLCSTR XMLNode::updateText(XMLCSTR lpszNewValue, XMLCSTR lpszOldValue) {
-  return updateText_WOSD(stringDup(lpszNewValue), lpszOldValue);
+  return updateText_WOSD(stringDup(lpszNewValue), lpszOldValue);  // [한국어] 값 반환
 }
 XMLClear *XMLNode::updateClear(XMLCSTR lpszNewContent, int i) {
-  return updateClear_WOSD(stringDup(lpszNewContent), i);
+  return updateClear_WOSD(stringDup(lpszNewContent), i);  // [한국어] 값 반환
 }
 XMLClear *XMLNode::updateClear(XMLCSTR lpszNewValue, XMLCSTR lpszOldValue) {
-  return updateClear_WOSD(stringDup(lpszNewValue), lpszOldValue);
+  return updateClear_WOSD(stringDup(lpszNewValue), lpszOldValue);  // [한국어] 값 반환
 }
 XMLClear *XMLNode::updateClear(XMLClear *newP, XMLClear *oldP) {
-  return updateClear_WOSD(stringDup(newP->lpszValue), oldP->lpszValue);
+  return updateClear_WOSD(stringDup(newP->lpszValue), oldP->lpszValue);  // [한국어] 값 반환
 }
 
 char XMLNode::setGlobalOptions(XMLCharEncoding _characterEncoding,
@@ -3067,78 +3219,78 @@ char XMLNode::setGlobalOptions(XMLCharEncoding _characterEncoding,
   dropWhiteSpace = _dropWhiteSpace;
   removeCommentsInMiddleOfText = _removeCommentsInMiddleOfText;
 #ifdef _XMLWIDECHAR
-  if (_characterEncoding) characterEncoding = _characterEncoding;
+  if (_characterEncoding) characterEncoding = _characterEncoding;  // [한국어] 조건 분기
 #else
-  switch (_characterEncoding) {
-    case char_encoding_UTF8:
+  switch (_characterEncoding) {  // [한국어] switch 분기
+    case char_encoding_UTF8:  // [한국어] case 레이블
       characterEncoding = _characterEncoding;
       XML_ByteTable = XML_utf8ByteTable;
       break;
-    case char_encoding_legacy:
+    case char_encoding_legacy:  // [한국어] case 레이블
       characterEncoding = _characterEncoding;
       XML_ByteTable = XML_legacyByteTable;
       break;
-    case char_encoding_ShiftJIS:
+    case char_encoding_ShiftJIS:  // [한국어] case 레이블
       characterEncoding = _characterEncoding;
       XML_ByteTable = XML_sjisByteTable;
       break;
-    case char_encoding_GB2312:
+    case char_encoding_GB2312:  // [한국어] case 레이블
       characterEncoding = _characterEncoding;
       XML_ByteTable = XML_gb2312ByteTable;
       break;
-    case char_encoding_Big5:
-    case char_encoding_GBK:
+    case char_encoding_Big5:  // [한국어] case 레이블
+    case char_encoding_GBK:  // [한국어] case 레이블
       characterEncoding = _characterEncoding;
       XML_ByteTable = XML_gbk_big5_ByteTable;
       break;
     default:
-      return 1;
+      return 1;  // [한국어] 값 반환
   }
 #endif
-  return 0;
+  return 0;  // [한국어] 값 반환
 }
 
 XMLNode::XMLCharEncoding XMLNode::guessCharEncoding(
     void *buf, int l, char useXMLEncodingAttribute) {
 #ifdef _XMLWIDECHAR
-  return (XMLCharEncoding)0;
+  return (XMLCharEncoding)0;  // [한국어] 값 반환
 #else
-  if (l < 25) return (XMLCharEncoding)0;
-  if (guessWideCharChars && (myIsTextWideChar(buf, l)))
-    return (XMLCharEncoding)0;
+  if (l < 25) return (XMLCharEncoding)0;  // [한국어] 조건 분기
+  if (guessWideCharChars && (myIsTextWideChar(buf, l)))  // [한국어] 조건 분기
+    return (XMLCharEncoding)0;  // [한국어] 값 반환
   unsigned char *b = (unsigned char *)buf;
-  if ((b[0] == 0xef) && (b[1] == 0xbb) && (b[2] == 0xbf))
-    return char_encoding_UTF8;
+  if ((b[0] == 0xef) && (b[1] == 0xbb) && (b[2] == 0xbf))  // [한국어] 조건 분기
+    return char_encoding_UTF8;  // [한국어] 값 반환
 
   // Match utf-8 model ?
   XMLCharEncoding bestGuess = char_encoding_UTF8;
   int i = 0;
-  while (i < l) switch (XML_utf8ByteTable[b[i]]) {
-      case 4:
+  while (i < l) switch (XML_utf8ByteTable[b[i]]) {  // [한국어] 반복문
+      case 4:  // [한국어] case 레이블
         i++;
-        if ((i < l) && (b[i] & 0xC0) != 0x80) {
+        if ((i < l) && (b[i] & 0xC0) != 0x80) {  // [한국어] 조건 분기
           bestGuess = char_encoding_legacy;
           i = l;
         }  // 10bbbbbb ?
-      case 3:
+      case 3:  // [한국어] case 레이블
         i++;
-        if ((i < l) && (b[i] & 0xC0) != 0x80) {
+        if ((i < l) && (b[i] & 0xC0) != 0x80) {  // [한국어] 조건 분기
           bestGuess = char_encoding_legacy;
           i = l;
         }  // 10bbbbbb ?
-      case 2:
+      case 2:  // [한국어] case 레이블
         i++;
-        if ((i < l) && (b[i] & 0xC0) != 0x80) {
+        if ((i < l) && (b[i] & 0xC0) != 0x80) {  // [한국어] 조건 분기
           bestGuess = char_encoding_legacy;
           i = l;
         }  // 10bbbbbb ?
-      case 1:
+      case 1:  // [한국어] case 레이블
         i++;
         break;
-      case 0:
+      case 0:  // [한국어] case 레이블
         i = l;
     }
-  if (!useXMLEncodingAttribute) return bestGuess;
+  if (!useXMLEncodingAttribute) return bestGuess;  // [한국어] 조건 분기
   // if encoding is specified and different from utf-8 than it's non-utf8
   // otherwise it's utf-8
   char bb[201];
@@ -3146,35 +3298,35 @@ XMLNode::XMLCharEncoding XMLNode::guessCharEncoding(
   memcpy(bb, buf, l);  // copy buf into bb to be able to do "bb[l]=0"
   bb[l] = 0;
   b = (unsigned char *)strstr(bb, "encoding");
-  if (!b) return bestGuess;
+  if (!b) return bestGuess;  // [한국어] 조건 분기
   b += 8;
   while
     XML_isSPACECHAR(*b) b++;
-  if (*b != '=') return bestGuess;
+  if (*b != '=') return bestGuess;  // [한국어] 조건 분기
   b++;
   while
     XML_isSPACECHAR(*b) b++;
-  if ((*b != '\'') && (*b != '"')) return bestGuess;
+  if ((*b != '\'') && (*b != '"')) return bestGuess;  // [한국어] 조건 분기
   b++;
   while
     XML_isSPACECHAR(*b) b++;
 
-  if ((xstrnicmp((char *)b, "utf-8", 5) == 0) ||
+  if ((xstrnicmp((char *)b, "utf-8", 5) == 0) ||  // [한국어] 조건 분기
       (xstrnicmp((char *)b, "utf8", 4) == 0)) {
-    if (bestGuess == char_encoding_legacy) return char_encoding_error;
-    return char_encoding_UTF8;
+    if (bestGuess == char_encoding_legacy) return char_encoding_error;  // [한국어] 조건 분기
+    return char_encoding_UTF8;  // [한국어] 값 반환
   }
 
-  if ((xstrnicmp((char *)b, "shiftjis", 8) == 0) ||
+  if ((xstrnicmp((char *)b, "shiftjis", 8) == 0) ||  // [한국어] 조건 분기
       (xstrnicmp((char *)b, "shift-jis", 9) == 0) ||
       (xstrnicmp((char *)b, "sjis", 4) == 0))
-    return char_encoding_ShiftJIS;
+    return char_encoding_ShiftJIS;  // [한국어] 값 반환
 
-  if (xstrnicmp((char *)b, "GB2312", 6) == 0) return char_encoding_GB2312;
-  if (xstrnicmp((char *)b, "Big5", 4) == 0) return char_encoding_Big5;
-  if (xstrnicmp((char *)b, "GBK", 3) == 0) return char_encoding_GBK;
+  if (xstrnicmp((char *)b, "GB2312", 6) == 0) return char_encoding_GB2312;  // [한국어] 조건 분기
+  if (xstrnicmp((char *)b, "Big5", 4) == 0) return char_encoding_Big5;  // [한국어] 조건 분기
+  if (xstrnicmp((char *)b, "GBK", 3) == 0) return char_encoding_GBK;  // [한국어] 조건 분기
 
-  return char_encoding_legacy;
+  return char_encoding_legacy;  // [한국어] 값 반환
 #endif
 }
 #undef XML_isSPACECHAR
@@ -3216,15 +3368,15 @@ const unsigned char base64DecodeTable[] = {
 XMLParserBase64Tool::~XMLParserBase64Tool() { freeBuffer(); }
 
 void XMLParserBase64Tool::freeBuffer() {
-  if (buf) free(buf);
+  if (buf) free(buf);  // [한국어] 조건 분기
   buf = NULL;
   buflen = 0;
 }
 
 int XMLParserBase64Tool::encodeLength(int inlen, char formatted) {
   unsigned int i = ((inlen - 1) / 3 * 4 + 4 + 1);
-  if (formatted) i += inlen / 54;
-  return i;
+  if (formatted) i += inlen / 54;  // [한국어] 조건 분기
+  return i;  // [한국어] 값 반환
 }
 
 XMLSTR XMLParserBase64Tool::encode(unsigned char *inbuf, unsigned int inlen,
@@ -3232,7 +3384,7 @@ XMLSTR XMLParserBase64Tool::encode(unsigned char *inbuf, unsigned int inlen,
   int i = encodeLength(inlen, formatted), k = 17, eLen = inlen / 3, j;
   alloc(i * sizeof(XMLCHAR));
   XMLSTR curr = (XMLSTR)buf;
-  for (i = 0; i < eLen; i++) {
+  for (i = 0; i < eLen; i++) {  // [한국어] 반복문
     // Copy next three bytes into lower 24 bits of int, paying attention to
     // sign.
     j = (inbuf[0] << 16) | (inbuf[1] << 8) | inbuf[2];
@@ -3242,8 +3394,8 @@ XMLSTR XMLParserBase64Tool::encode(unsigned char *inbuf, unsigned int inlen,
     *(curr++) = base64EncodeTable[(j >> 12) & 0x3f];
     *(curr++) = base64EncodeTable[(j >> 6) & 0x3f];
     *(curr++) = base64EncodeTable[(j)&0x3f];
-    if (formatted) {
-      if (!k) {
+    if (formatted) {  // [한국어] 조건 분기
+      if (!k) {  // [한국어] 조건 분기
         *(curr++) = _CXML('\n');
         k = 18;
       }
@@ -3251,7 +3403,7 @@ XMLSTR XMLParserBase64Tool::encode(unsigned char *inbuf, unsigned int inlen,
     }
   }
   eLen = inlen - eLen * 3;  // 0 - 2.
-  if (eLen == 1) {
+  if (eLen == 1) {  // [한국어] 조건 분기
     *(curr++) = base64EncodeTable[inbuf[0] >> 2];
     *(curr++) = base64EncodeTable[(inbuf[0] << 4) & 0x3F];
     *(curr++) = base64Fillchar;
@@ -3264,46 +3416,46 @@ XMLSTR XMLParserBase64Tool::encode(unsigned char *inbuf, unsigned int inlen,
     *(curr++) = base64Fillchar;
   }
   *(curr++) = 0;
-  return (XMLSTR)buf;
+  return (XMLSTR)buf;  // [한국어] 값 반환
 }
 
 unsigned int XMLParserBase64Tool::decodeSize(XMLCSTR data, XMLError *xe) {
-  if (xe) *xe = eXMLErrorNone;
+  if (xe) *xe = eXMLErrorNone;  // [한국어] 조건 분기
   int size = 0;
   unsigned char c;
   // skip any extra characters (e.g. newlines or spaces)
-  while (*data) {
+  while (*data) {  // [한국어] 반복문
 #ifdef _XMLWIDECHAR
-    if (*data > 255) {
-      if (xe) *xe = eXMLErrorBase64DecodeIllegalCharacter;
-      return 0;
+    if (*data > 255) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeIllegalCharacter;  // [한국어] 조건 분기
+      return 0;  // [한국어] 값 반환
     }
 #endif
     c = base64DecodeTable[(unsigned char)(*data)];
-    if (c < 97)
+    if (c < 97)  // [한국어] 조건 분기
       size++;
     else if (c == 98) {
-      if (xe) *xe = eXMLErrorBase64DecodeIllegalCharacter;
-      return 0;
+      if (xe) *xe = eXMLErrorBase64DecodeIllegalCharacter;  // [한국어] 조건 분기
+      return 0;  // [한국어] 값 반환
     }
     data++;
   }
-  if (xe && (size % 4 != 0)) *xe = eXMLErrorBase64DataSizeIsNotMultipleOf4;
-  if (size == 0) return 0;
+  if (xe && (size % 4 != 0)) *xe = eXMLErrorBase64DataSizeIsNotMultipleOf4;  // [한국어] 조건 분기
+  if (size == 0) return 0;  // [한국어] 조건 분기
   do {
     data--;
     size--;
   } while (*data == base64Fillchar);
   size++;
-  return (unsigned int)((size * 3) / 4);
+  return (unsigned int)((size * 3) / 4);  // [한국어] 값 반환
 }
 
 unsigned char XMLParserBase64Tool::decode(XMLCSTR data, unsigned char *buf,
                                           int len, XMLError *xe) {
-  if (xe) *xe = eXMLErrorNone;
+  if (xe) *xe = eXMLErrorNone;  // [한국어] 조건 분기
   int i = 0, p = 0;
   unsigned char d, c;
-  for (;;) {
+  for (;;) {  // [한국어] 반복문
 #ifdef _XMLWIDECHAR
 #define BASE64DECODE_READ_NEXT_CHAR(c)                   \
   do {                                                   \
@@ -3329,55 +3481,55 @@ unsigned char XMLParserBase64Tool::decode(XMLCSTR data, unsigned char *buf,
 #endif
 
     BASE64DECODE_READ_NEXT_CHAR(c)
-    if (c == 99) {
-      return 2;
+    if (c == 99) {  // [한국어] 조건 분기
+      return 2;  // [한국어] 값 반환
     }
-    if (c == 96) {
-      if (p == (int)len) return 2;
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if (c == 96) {  // [한국어] 조건 분기
+      if (p == (int)len) return 2;  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
 
     BASE64DECODE_READ_NEXT_CHAR(d)
-    if ((d == 99) || (d == 96)) {
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if ((d == 99) || (d == 96)) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
-    if (p == (int)len) {
-      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;
-      return 0;
+    if (p == (int)len) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;  // [한국어] 조건 분기
+      return 0;  // [한국어] 값 반환
     }
     buf[p++] = (unsigned char)((c << 2) | ((d >> 4) & 0x3));
 
     BASE64DECODE_READ_NEXT_CHAR(c)
-    if (c == 99) {
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if (c == 99) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
-    if (p == (int)len) {
-      if (c == 96) return 2;
-      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;
-      return 0;
+    if (p == (int)len) {  // [한국어] 조건 분기
+      if (c == 96) return 2;  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;  // [한국어] 조건 분기
+      return 0;  // [한국어] 값 반환
     }
-    if (c == 96) {
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if (c == 96) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
     buf[p++] = (unsigned char)(((d << 4) & 0xf0) | ((c >> 2) & 0xf));
 
     BASE64DECODE_READ_NEXT_CHAR(d)
-    if (d == 99) {
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if (d == 99) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
-    if (p == (int)len) {
-      if (d == 96) return 2;
-      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;
-      return 0;
+    if (p == (int)len) {  // [한국어] 조건 분기
+      if (d == 96) return 2;  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeBufferTooSmall;  // [한국어] 조건 분기
+      return 0;  // [한국어] 값 반환
     }
-    if (d == 96) {
-      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;
-      return 1;
+    if (d == 96) {  // [한국어] 조건 분기
+      if (xe) *xe = eXMLErrorBase64DecodeTruncatedData;  // [한국어] 조건 분기
+      return 1;  // [한국어] 값 반환
     }
     buf[p++] = (unsigned char)(((c << 6) & 0xc0) | d);
   }
@@ -3385,12 +3537,12 @@ unsigned char XMLParserBase64Tool::decode(XMLCSTR data, unsigned char *buf,
 #undef BASE64DECODE_READ_NEXT_CHAR
 
 void XMLParserBase64Tool::alloc(int newsize) {
-  if ((!buf) && (newsize)) {
+  if ((!buf) && (newsize)) {  // [한국어] 조건 분기
     buf = malloc(newsize);
     buflen = newsize;
     return;
   }
-  if (newsize > buflen) {
+  if (newsize > buflen) {  // [한국어] 조건 분기
     buf = realloc(buf, newsize);
     buflen = newsize;
   }
@@ -3398,13 +3550,13 @@ void XMLParserBase64Tool::alloc(int newsize) {
 
 unsigned char *XMLParserBase64Tool::decode(XMLCSTR data, int *outlen,
                                            XMLError *xe) {
-  if (xe) *xe = eXMLErrorNone;
+  if (xe) *xe = eXMLErrorNone;  // [한국어] 조건 분기
   unsigned int len = decodeSize(data, xe);
-  if (outlen) *outlen = len;
-  if (!len) return NULL;
+  if (outlen) *outlen = len;  // [한국어] 조건 분기
+  if (!len) return NULL;  // [한국어] 조건 분기
   alloc(len + 1);
-  if (!decode(data, (unsigned char *)buf, len, xe)) {
-    return NULL;
+  if (!decode(data, (unsigned char *)buf, len, xe)) {  // [한국어] 조건 분기
+    return NULL;  // [한국어] 값 반환
   }
-  return (unsigned char *)buf;
+  return (unsigned char *)buf;  // [한국어] 값 반환
 }

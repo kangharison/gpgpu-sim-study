@@ -60,6 +60,29 @@
 # Ali Bakhoda, George L. Yuan, at the University of British Columbia, 
 # Vancouver, BC V6T 1Z4
 
+"""
+[한국어 설명] AerialVision 즐겨찾기 파서 (lexyaccbookmark.py)
+
+=== 파일의 역할 ===
+사용자가 정의한 플롯 즐겨찾기 설정 파일(~/.gpgpu_sim/aerialvision/bookmarks.txt)을
+PLY Lex/Yacc 기반 파서로 읽어 vc.bookmark 객체 리스트를 생성한다.
+GUI의 "Favourites" 기능이 이 파일을 통해 저장된 플롯 구성을 불러온다.
+
+=== 전체 아키텍처에서의 위치 ===
+  aerialvision/guiclasses.py - "Add to Favourites" 저장 / "Favourites" 버튼 클릭
+        ↓
+  aerialvision/lexyaccbookmark.py (이 파일) - bookmarks.txt 파싱
+        ↓
+  aerialvision/variableclasses.py - vc.bookmark 클래스
+
+=== 타 모듈과의 연결 ===
+- guiclasses.py: formEntry.chooseFavourite()에서 lexyaccbookmark.parseMe() 호출
+- variableclasses.py: vc.bookmark 인스턴스 생성 및 필드 채움
+
+=== 주요 함수/구조체 요약 ===
+- parseMe(): bookmarks.txt를 파싱하여 bookmark 리스트 반환
+- Lex/Yacc 토큰/규칙: WORD, EQUALS, VALUE, NUMBER, NOTHING
+"""
 
 import os
 import sys
@@ -67,6 +90,10 @@ import ply.lex as lex
 import ply.yacc as yacc
 import variableclasses as vc
 
+# [한국어]
+# parseMe: ~/.gpgpu_sim/aerialvision/bookmarks.txt 파일을 파싱하여
+# 사용자 즐겨찾기(bookmark) 객체 리스트를 반환한다.
+# 파일이 없으면 빈 리스트를 반환한다.
 def parseMe():
   
 
@@ -82,6 +109,8 @@ def parseMe():
     ]
     
     # Regular expression rules for tokens
+    # [한국어] Lex 토큰 정의: WORD=키 이름, EQUALS='= ', VALUE=따옴표 문자열,
+    # NUMBER=따옴표 숫자, NOTHING=빈 문자열.
     
     def t_VALUE(t):
         r'["][a-zA-Z()0-9\._ ]+["]'
@@ -100,7 +129,7 @@ def parseMe():
         return t
     
     def t_NOTHING(t):
-        r'["]["]'
+        r'["][""]'
         return t
         
     t_ignore = '[\n]+'
@@ -121,9 +150,11 @@ def parseMe():
         '''sentence : WORD EQUALS VALUE 
                     | WORD EQUALS NUMBER
                     | WORD EQUALS NOTHING'''
+        # [한국어] 파싱된 단어에서 끝에 붙은 공백 제거, 값에서 양쪽 따옴표 제거
         p[1] = p[1][0:-1]
         p[3] = p[3][1:-1]
 
+        # [한국어] 키 이름에 따라 마지막 bookmark 객체의 필드 업데이트
         if p[1] == 'title':
             listBookmarks[-1].title = p[3]
 
@@ -144,6 +175,7 @@ def parseMe():
             listBookmarks[-1].dydx.append(p[3])
         
         elif p[1] == 'START':
+            # [한국어] START 항목을 만나면 새 bookmark 인스턴스를 리스트에 추가
             listBookmarks.append(vc.bookmark())
         
         elif p[1] == 'ReasonForFile':
@@ -166,6 +198,7 @@ def parseMe():
     yacc.yacc()
    
     try:
+        # [한국어] 즐겨찾기 파일 열기, 없으면 IOError errno 2로 처리
         file = open(os.environ['HOME'] + '/.gpgpu_sim/aerialvision/bookmarks.txt', 'r')
         inputData = file.readlines()
     except IOError as e:
@@ -174,8 +207,8 @@ def parseMe():
         else:
             raise e
 
+    # [한국어] 파일의 각 행을 yacc 파서로 처리 (줄바꿈 문자 제외)
     for x in inputData:
         yacc.parse(x[0:-1]) # ,debug=True)
         
     return listBookmarks
-

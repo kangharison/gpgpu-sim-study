@@ -1,4 +1,47 @@
 /*
+ * [한국어 설명] PTX 문법 파서(Bison/Yacc) 정의 (ptx.y)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 Flex 토크나이저(ptx.l)가 생성한 토큰 스트림을 받아 PTX(Parallel Thread
+ * eXecution) 어셈블리의 문법 구조를 해석하는 Bison(Yacc) 문법 파일이다. 변수 선언,
+ * 함수 정의, 명령어, 피연산자, 옵션 등의 문법 규칙을 정의하고, 각 규칙이 reduce될
+ * 때마다 ptx_recognizer(ptx_parser.cc)의 semantic action 함수를 호출하여 PTX IR
+ * (function_info, symbol_table, ptx_instruction 등)를 조립한다. 빌드 시 Bison이
+ * ptx.tab.c/ptx.tab.h를 생성하며, ptx_parse() 진입점이 여기서 나온다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * CUDA Application → libcuda 인터셉트 → gpgpusim_entrypoint.cc
+ *   → gpgpu_context::init_parser()
+ *       → ptx_lex_init() → ptx.l (ptx_lex) → [이 파일: ptx_parse()] → Yacc reduce 액션
+ *           → ptx_recognizer (ptx_parser.cc) → function_info / symbol_table / ptx_instruction
+ *               → cuda-sim/ 기능 시뮬레이션 → gpgpu-sim/ 타이밍 시뮬레이션
+ * 실행 컨텍스트: 호스트 유저스페이스, 커널 실행 전 초기화 단계에서 1회 수행.
+ * 사이클-레벨 시뮬레이션과 무관한 전처리 단계이다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - 의존하는 모듈: ptx.l (Flex lexer, 토큰 스트림 공급), ptx_parser.h/ptx_parser.cc
+ *   (semantic action 구현체 ptx_recognizer), ptx_ir.h (생성되는 PTX IR 타입),
+ *   opcodes.h (opcode enum), gpgpu_context.h (전역 상태)
+ * - 이 파일에 의존하는 모듈: 빌드 시스템(Bison이 ptx.tab.c/h 생성), ptx_parser.cc
+ *   (ptx.tab.h의 토큰 번호 사용), cuda-sim.cc (최종 PTX IR 사용)
+ * - 데이터 흐름: PTX 소스 문자열 → ptx.l 토큰 → ptx.y 문법 reduce →
+ *   recognizer->add_*() 호출 → g_instructions / symbol_table 축적 →
+ *   end_function()에서 function_info::add_inst() → gpgpu_ptx_assemble()
+ *
+ * === 주요 문법 규칙 요약 ===
+ * - input: 최상위 규칙; directive_statement와 function_defn을 반복
+ * - function_defn: 함수 선언 + 문법 본문; start_function / end_function 경계
+ * - function_decl: 함수 헤더(.entry/.func/.extern) 파싱; param_list 처리
+ * - statement_list: 변수 선언(directive_statement)과 명령어(instruction_statement) 반복
+ * - variable_declaration: 변수 선언 + 선택적 초기화
+ * - instruction_statement: 레이블 또는 프레디케이트가 붙은 명령어
+ * - operand / vector_operand / memory_operand / literal_operand / address_expression:
+ *   다양한 PTX 피연산자 형태 처리
+ * - option_list / compare_spec / rounding_mode / atomic_operation_spec:
+ *   명령어 수식어(옵션) 처리
+ */
+
+/*
 Copyright (c) 2009-2011, Tor M. Aamodt
 The University of British Columbia
 All rights reserved.
@@ -28,180 +71,180 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 %{
-typedef void * yyscan_t;
-class ptx_recognizer;
-#include "../../libcuda/gpgpu_context.h"
+typedef void * yyscan_t;           // [한국어] Flex 재진입 스캐너 핸들 타입
+class ptx_recognizer;              // [한국어] semantic action을 담당하는 클래스 전방 선언
+#include "../../libcuda/gpgpu_context.h"  // [한국어] gpgpu_context 전역 상태
 %}
 
-%define api.pure full
-%parse-param {yyscan_t scanner}
-%parse-param {ptx_recognizer* recognizer}
-%lex-param {yyscan_t scanner}
-%lex-param {ptx_recognizer* recognizer}
+%define api.pure full              // [한국어] 순수(pure) 재진입 파서 생성
+%parse-param {yyscan_t scanner}    // [한국어] yyparse의 첫 번째 인자: Flex 스캐너 핸들
+%parse-param {ptx_recognizer* recognizer} // [한국어] yyparse의 두 번째 인자: ptx_recognizer 포인터
+%lex-param {yyscan_t scanner}      // [한국어] yylex 호출 시 Flex 스캐너 전달
+%lex-param {ptx_recognizer* recognizer}   // [한국어] yylex 호출 시 recognizer 전달
 
 %union {
-  double double_value;
-  float  float_value;
-  int    int_value;
-  char * string_value;
-  void * ptr_value;
+  double double_value;             // [한국어] double 리터럴 / .version 번호 등
+  float  float_value;              // [한국어] float 리터럴
+  int    int_value;                // [한국어] 정수 리터럴 / opcode / 옵션 / 토큰 값
+  char * string_value;             // [한국어] IDENTIFIER, STRING 등 문자열 포인터
+  void * ptr_value;                // [한국어] symbol_table 포인터 등 불투명 포인터
 }
 
-%token <string_value> STRING
-%token <int_value>  OPCODE
-%token <int_value>  WMMA_DIRECTIVE
-%token <int_value>  LAYOUT 
-%token <int_value>  CONFIGURATION 
-%token  ALIGN_DIRECTIVE
-%token  BRANCHTARGETS_DIRECTIVE
-%token  BYTE_DIRECTIVE
-%token  CALLPROTOTYPE_DIRECTIVE
-%token  CALLTARGETS_DIRECTIVE
-%token  <int_value> CONST_DIRECTIVE
-%token  CONSTPTR_DIRECTIVE
-%token  PTR_DIRECTIVE
-%token  ENTRY_DIRECTIVE
-%token  EXTERN_DIRECTIVE
-%token  FILE_DIRECTIVE
-%token  FUNC_DIRECTIVE
-%token  GLOBAL_DIRECTIVE
-%token  LOCAL_DIRECTIVE
-%token  LOC_DIRECTIVE
-%token  MAXNCTAPERSM_DIRECTIVE
-%token  MAXNNREG_DIRECTIVE
-%token  MAXNTID_DIRECTIVE
-%token  MINNCTAPERSM_DIRECTIVE
-%token  PARAM_DIRECTIVE
-%token  PRAGMA_DIRECTIVE
-%token  REG_DIRECTIVE
-%token  REQNTID_DIRECTIVE
-%token  SECTION_DIRECTIVE
-%token  SHARED_DIRECTIVE
-%token  SREG_DIRECTIVE
-%token	SSTARR_DIRECTIVE
-%token  STRUCT_DIRECTIVE
-%token  SURF_DIRECTIVE
-%token  TARGET_DIRECTIVE
-%token  TEX_DIRECTIVE
-%token  UNION_DIRECTIVE
-%token  VERSION_DIRECTIVE
-%token  ADDRESS_SIZE_DIRECTIVE
-%token  VISIBLE_DIRECTIVE
-%token  WEAK_DIRECTIVE
-%token  <string_value> IDENTIFIER
-%token  <int_value> INT_OPERAND
-%token  <float_value> FLOAT_OPERAND
-%token  <double_value> DOUBLE_OPERAND
-%token  S8_TYPE
-%token  S16_TYPE
-%token  S32_TYPE
-%token  S64_TYPE
-%token  U8_TYPE
-%token  U16_TYPE
-%token  U32_TYPE
-%token  U64_TYPE
-%token  F16_TYPE
-%token  F32_TYPE
-%token  F64_TYPE
-%token  FF64_TYPE
-%token  B8_TYPE
-%token  B16_TYPE
-%token  B32_TYPE
-%token  B64_TYPE
-%token  BB64_TYPE
-%token  BB128_TYPE
-%token  PRED_TYPE
-%token  TEXREF_TYPE
-%token  SAMPLERREF_TYPE
-%token  SURFREF_TYPE
-%token  V2_TYPE
-%token  V3_TYPE
-%token  V4_TYPE
-%token  COMMA
-%token  PRED
-%token  HALF_OPTION
-%token  EXTP_OPTION
-%token  EQ_OPTION
-%token  NE_OPTION
-%token  LT_OPTION
-%token  LE_OPTION
-%token  GT_OPTION
-%token  GE_OPTION
-%token  LO_OPTION
-%token  LS_OPTION
-%token  HI_OPTION
-%token  HS_OPTION
-%token  EQU_OPTION
-%token  NEU_OPTION
-%token  LTU_OPTION
-%token  LEU_OPTION
-%token  GTU_OPTION
-%token  GEU_OPTION
-%token  NUM_OPTION
-%token  NAN_OPTION
-%token  CF_OPTION
-%token  SF_OPTION
-%token  NSF_OPTION
-%token  LEFT_SQUARE_BRACKET
-%token  RIGHT_SQUARE_BRACKET
-%token  WIDE_OPTION
-%token  <int_value> SPECIAL_REGISTER
-%token  MINUS
-%token  PLUS
-%token  COLON
-%token  SEMI_COLON
-%token  EXCLAMATION
-%token  PIPE
-%token	RIGHT_BRACE
-%token	LEFT_BRACE
-%token	EQUALS
-%token  PERIOD
-%token  BACKSLASH
-%token <int_value> DIMENSION_MODIFIER
-%token RN_OPTION
-%token RZ_OPTION
-%token RM_OPTION
-%token RP_OPTION
-%token RNI_OPTION
-%token RZI_OPTION
-%token RMI_OPTION
-%token RPI_OPTION
-%token UNI_OPTION
-%token GEOM_MODIFIER_1D
-%token GEOM_MODIFIER_2D
-%token GEOM_MODIFIER_3D
-%token SAT_OPTION
-%token FTZ_OPTION
-%token NEG_OPTION
-%token SYNC_OPTION
-%token RED_OPTION
-%token ARRIVE_OPTION
-%token ATOMIC_POPC
-%token ATOMIC_AND
-%token ATOMIC_OR
-%token ATOMIC_XOR
-%token ATOMIC_CAS
-%token ATOMIC_EXCH
-%token ATOMIC_ADD
-%token ATOMIC_INC
-%token ATOMIC_DEC
-%token ATOMIC_MIN
-%token ATOMIC_MAX
-%token  LEFT_ANGLE_BRACKET
-%token  RIGHT_ANGLE_BRACKET
-%token  LEFT_PAREN
-%token  RIGHT_PAREN
-%token  APPROX_OPTION
-%token  FULL_OPTION
-%token  ANY_OPTION
-%token  ALL_OPTION
-%token  BALLOT_OPTION
-%token  GLOBAL_OPTION
-%token  CTA_OPTION
-%token  SYS_OPTION
-%token  EXIT_OPTION
-%token  ABS_OPTION
-%token  TO_OPTION
+%token <string_value> STRING       // [한국어] 문자열 리터럴 토큰
+%token <int_value>  OPCODE         // [한국어] PTX opcode 토큰 (ADD_OP, LD_OP 등)
+%token <int_value>  WMMA_DIRECTIVE // [한국어] WMMA 지시어 토큰
+%token <int_value>  LAYOUT         // [한국어] WMMA 레이아웃(ROW/COL) 토큰
+%token <int_value>  CONFIGURATION  // [한국어] WMMA 설정(M16N16K16 등) 토큰
+%token  ALIGN_DIRECTIVE            // [한국어] .align
+%token  BRANCHTARGETS_DIRECTIVE    // [한국어] .branchtargets
+%token  BYTE_DIRECTIVE             // [한국어] .byte
+%token  CALLPROTOTYPE_DIRECTIVE    // [한국어] .callprototype
+%token  CALLTARGETS_DIRECTIVE      // [한국어] .calltargets
+%token  <int_value> CONST_DIRECTIVE // [한국어] .const[bank]
+%token  CONSTPTR_DIRECTIVE         // [한국어] .constptr
+%token  PTR_DIRECTIVE              // [한국어] .ptr
+%token  ENTRY_DIRECTIVE            // [한국어] .entry
+%token  EXTERN_DIRECTIVE           // [한국어] .extern
+%token  FILE_DIRECTIVE             // [한국어] .file
+%token  FUNC_DIRECTIVE             // [한국어] .func
+%token  GLOBAL_DIRECTIVE           // [한국어] .global
+%token  LOCAL_DIRECTIVE            // [한국어] .local
+%token  LOC_DIRECTIVE              // [한국어] .loc
+%token  MAXNCTAPERSM_DIRECTIVE     // [한국어] .maxnctapersm
+%token  MAXNNREG_DIRECTIVE         // [한국어] .maxnreg
+%token  MAXNTID_DIRECTIVE          // [한국어] .maxntid
+%token  MINNCTAPERSM_DIRECTIVE     // [한국어] .minnctapersm
+%token  PARAM_DIRECTIVE            // [한국어] .param
+%token  PRAGMA_DIRECTIVE           // [한국어] .pragma
+%token  REG_DIRECTIVE              // [한국어] .reg
+%token  REQNTID_DIRECTIVE          // [한국어] .reqntid
+%token  SECTION_DIRECTIVE          // [한국어] .section
+%token  SHARED_DIRECTIVE           // [한국어] .shared
+%token  SREG_DIRECTIVE             // [한국어] .sreg
+%token	SSTARR_DIRECTIVE           // [한국어] .sstarr
+%token  STRUCT_DIRECTIVE           // [한국어] .struct
+%token  SURF_DIRECTIVE             // [한국어] .surf
+%token  TARGET_DIRECTIVE           // [한국어] .target
+%token  TEX_DIRECTIVE              // [한국어] .tex
+%token  UNION_DIRECTIVE            // [한국어] .union
+%token  VERSION_DIRECTIVE          // [한국어] .version
+%token  ADDRESS_SIZE_DIRECTIVE     // [한국어] .address_size
+%token  VISIBLE_DIRECTIVE          // [한국어] .visible
+%token  WEAK_DIRECTIVE             // [한국어] .weak
+%token  <string_value> IDENTIFIER  // [한국어] 사용자 정의 식별자
+%token  <int_value> INT_OPERAND    // [한국어] 정수 상수
+%token  <float_value> FLOAT_OPERAND // [한국어] float 상수
+%token  <double_value> DOUBLE_OPERAND // [한국어] double 상수
+%token  S8_TYPE                    // [한국어] .s8
+%token  S16_TYPE                   // [한국어] .s16
+%token  S32_TYPE                   // [한국어] .s32
+%token  S64_TYPE                   // [한국어] .s64
+%token  U8_TYPE                    // [한국어] .u8
+%token  U16_TYPE                   // [한국어] .u16
+%token  U32_TYPE                   // [한국어] .u32
+%token  U64_TYPE                   // [한국어] .u64
+%token  F16_TYPE                   // [한국어] .f16
+%token  F32_TYPE                   // [한국어] .f32
+%token  F64_TYPE                   // [한국어] .f64
+%token  FF64_TYPE                  // [한국어] .ff64
+%token  B8_TYPE                    // [한국어] .b8
+%token  B16_TYPE                   // [한국어] .b16
+%token  B32_TYPE                   // [한국어] .b32
+%token  B64_TYPE                   // [한국어] .b64
+%token  BB64_TYPE                  // [한국어] .bb64
+%token  BB128_TYPE                 // [한국어] .bb128
+%token  PRED_TYPE                  // [한국어] .pred
+%token  TEXREF_TYPE                // [한국어] .texref
+%token  SAMPLERREF_TYPE            // [한국어] .samplerref
+%token  SURFREF_TYPE               // [한국어] .surfref
+%token  V2_TYPE                    // [한국어] .v2
+%token  V3_TYPE                    // [한국어] .v3
+%token  V4_TYPE                    // [한국어] .v4
+%token  COMMA                      // [한국어] ,
+%token  PRED                       // [한국어] @ (프레디케이트 접두사)
+%token  HALF_OPTION                // [한국어] .half
+%token  EXTP_OPTION                // [한국어] .cc
+%token  EQ_OPTION                  // [한국어] .eq
+%token  NE_OPTION                  // [한국어] .ne
+%token  LT_OPTION                  // [한국어] .lt
+%token  LE_OPTION                  // [한국어] .le
+%token  GT_OPTION                  // [한국어] .gt
+%token  GE_OPTION                  // [한국어] .ge
+%token  LO_OPTION                  // [한국어] .lo
+%token  LS_OPTION                  // [한국어] .ls
+%token  HI_OPTION                  // [한국어] .hi
+%token  HS_OPTION                  // [한국어] .hs
+%token  EQU_OPTION                 // [한국어] .equ
+%token  NEU_OPTION                 // [한국어] .neu
+%token  LTU_OPTION                 // [한국어] .ltu
+%token  LEU_OPTION                 // [한국어] .leu
+%token  GTU_OPTION                 // [한국어] .gtu
+%token  GEU_OPTION                 // [한국어] .geu
+%token  NUM_OPTION                 // [한국어] .num
+%token  NAN_OPTION                 // [한국어] .nan
+%token  CF_OPTION                  // [한국어] .cf
+%token  SF_OPTION                  // [한국어] .sf
+%token  NSF_OPTION                 // [한국어] .nsf
+%token  LEFT_SQUARE_BRACKET        // [한국어] [
+%token  RIGHT_SQUARE_BRACKET       // [한국어] ]
+%token  WIDE_OPTION                // [한국어] .wide
+%token  <int_value> SPECIAL_REGISTER // [한국어] %tid, %ctaid 등 특수 레지스터
+%token  MINUS                      // [한국어] -
+%token  PLUS                       // [한국어] +
+%token  COLON                      // [한국어] :
+%token  SEMI_COLON                 // [한국어] ;
+%token  EXCLAMATION                // [한국어] !
+%token  PIPE                       // [한국어] |
+%token	RIGHT_BRACE                // [한국어] }
+%token	LEFT_BRACE                 // [한국어] {
+%token	EQUALS                     // [한국어] =
+%token  PERIOD                     // [한국어] .
+%token  BACKSLASH                  // [한국어] /
+%token <int_value> DIMENSION_MODIFIER // [한국어] .x/.y/.z/.0/.1/.2
+%token RN_OPTION                   // [한국어] .rn
+%token RZ_OPTION                   // [한국어] .rz
+%token RM_OPTION                   // [한국어] .rm
+%token RP_OPTION                   // [한국어] .rp
+%token RNI_OPTION                  // [한국어] .rni
+%token RZI_OPTION                  // [한국어] .rzi
+%token RMI_OPTION                  // [한국어] .rmi
+%token RPI_OPTION                  // [한국어] .rpi
+%token UNI_OPTION                  // [한국어] .uni
+%token GEOM_MODIFIER_1D            // [한국어] .1d
+%token GEOM_MODIFIER_2D            // [한국어] .2d
+%token GEOM_MODIFIER_3D            // [한국어] .3d
+%token SAT_OPTION                  // [한국어] .sat
+%token FTZ_OPTION                  // [한국어] .ftz
+%token NEG_OPTION                  // [한국어] .neg
+%token SYNC_OPTION                 // [한국어] .sync
+%token RED_OPTION                  // [한국어] .red
+%token ARRIVE_OPTION               // [한국어] .arrive
+%token ATOMIC_POPC                 // [한국어] .popc
+%token ATOMIC_AND                  // [한국어] .and
+%token ATOMIC_OR                   // [한국어] .or
+%token ATOMIC_XOR                  // [한국어] .xor
+%token ATOMIC_CAS                  // [한국어] .cas
+%token ATOMIC_EXCH                 // [한국어] .exch
+%token ATOMIC_ADD                  // [한국어] .add
+%token ATOMIC_INC                  // [한국어] .inc
+%token ATOMIC_DEC                  // [한국어] .dec
+%token ATOMIC_MIN                  // [한국어] .min
+%token ATOMIC_MAX                  // [한국어] .max
+%token  LEFT_ANGLE_BRACKET         // [한국어] <
+%token  RIGHT_ANGLE_BRACKET        // [한국어] >
+%token  LEFT_PAREN                 // [한국어] (
+%token  RIGHT_PAREN                // [한국어] )
+%token  APPROX_OPTION              // [한국어] .approx
+%token  FULL_OPTION                // [한국어] .full
+%token  ANY_OPTION                 // [한국어] .any
+%token  ALL_OPTION                 // [한국어] .all
+%token  BALLOT_OPTION              // [한국어] .ballot
+%token  GLOBAL_OPTION              // [한국어] .gl
+%token  CTA_OPTION                 // [한국어] .cta
+%token  SYS_OPTION                 // [한국어] .sys
+%token  EXIT_OPTION                // [한국어] .exit
+%token  ABS_OPTION                 // [한국어] .abs
+%token  TO_OPTION                  // [한국어] .to
 %token  CA_OPTION;
 %token  CG_OPTION;
 %token  CS_OPTION;
@@ -229,7 +272,7 @@ class ptx_recognizer;
 %type <ptr_value> function_decl
 
 %{
-  	#include "ptx_parser.h"
+  	#include "ptx_parser.h"      // [한국어] ptx_recognizer 클래스 정의
 	#include <stdlib.h>
 	#include <string.h>
 	#include <math.h>
@@ -240,22 +283,27 @@ class ptx_recognizer;
 
 %%
 
-input:	/* empty */
-	| input directive_statement
-	| input function_defn
-	| input function_decl
+input:	/* empty */                // [한국어] 빈 입력도 허용
+	| input directive_statement  // [한국어] 지시어(변수 선언 등) 반복
+	| input function_defn        // [한국어] 함수 정의 반복
+	| input function_decl        // [한국어] 함수 선언(프로토타입) 반복
 	;
 
 function_defn: function_decl { recognizer->set_symtab($1); recognizer->func_header(".skip"); } statement_block { recognizer->end_function(); }
+	// [한국어] 함수 정의: 함수 헤더 + 심볼 테이블 설정 + 함수 본문 + end_function()
 	| function_decl { recognizer->set_symtab($1); } block_spec_list { recognizer->func_header(".skip"); } statement_block { recognizer->end_function(); }
+	// [한국어] .maxntid 등 블록 스펙이 있는 함수 정의
 	;
 
 block_spec: MAXNTID_DIRECTIVE INT_OPERAND COMMA INT_OPERAND COMMA INT_OPERAND {recognizer->func_header_info_int(".maxntid", $2);
 										recognizer->func_header_info_int(",", $4);
 										recognizer->func_header_info_int(",", $6);
                                                                                 recognizer->maxnt_id($2, $4, $6);}
+	// [한국어] .maxntid x, y, z: CTA당 최대 스레드 수
 	| MINNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".minnctapersm", $2); printf("GPGPU-Sim: Warning: .minnctapersm ignored. \n"); }
+	// [한국어] .minnctapersm: 현재 무시
 	| MAXNCTAPERSM_DIRECTIVE INT_OPERAND { recognizer->func_header_info_int(".maxnctapersm", $2); printf("GPGPU-Sim: Warning: .maxnctapersm ignored. \n"); }
+	// [한국어] .maxnctapersm: 현재 무시
 	;
 
 block_spec_list: block_spec
@@ -263,21 +311,29 @@ block_spec_list: block_spec
 	;
 
 function_decl: function_decl_header LEFT_PAREN { recognizer->start_function($1); recognizer->func_header_info("(");} param_entry RIGHT_PAREN {recognizer->func_header_info(")");} function_ident_param { $$ = recognizer->reset_symtab(); }
+	// [한국어] (.param ...) 형태의 함수 헤더 + 이름: 커널/함수 파라미터 처리
 	| function_decl_header { recognizer->start_function($1); } function_ident_param { $$ = recognizer->reset_symtab(); }
+	// [한국어] 파라미터 없는 함수 헤더
 	| function_decl_header { recognizer->start_function($1); recognizer->add_function_name(""); recognizer->g_func_decl=0; $$ = recognizer->reset_symtab(); }
+	// [한국어] 이름 없는 함수 선언(예: .entry에 이름 생략 시)
 	;
 
 function_ident_param: IDENTIFIER { recognizer->add_function_name($1); } LEFT_PAREN {recognizer->func_header_info("(");} param_list RIGHT_PAREN { recognizer->g_func_decl=0; recognizer->func_header_info(")"); }
+	// [한국어] 함수 이름 + 파라미터 목록
 	| IDENTIFIER { recognizer->add_function_name($1); recognizer->g_func_decl=0; }
+	// [한국어] 함수 이름만 (파라미터 없음)
 	;
 
 function_decl_header: ENTRY_DIRECTIVE { $$ = 1; recognizer->g_func_decl=1; recognizer->func_header(".entry"); }
+	// [한국어] .entry: 커널 엔트리 포인트 (entry_point=1)
 	| VISIBLE_DIRECTIVE ENTRY_DIRECTIVE { $$ = 1; recognizer->g_func_decl=1; recognizer->func_header(".entry"); }
 	| WEAK_DIRECTIVE ENTRY_DIRECTIVE { $$ = 1; recognizer->g_func_decl=1; recognizer->func_header(".entry"); }
 	| FUNC_DIRECTIVE { $$ = 0; recognizer->g_func_decl=1; recognizer->func_header(".func"); }
+	// [한국어] .func: 일반 device 함수 (entry_point=0)
 	| VISIBLE_DIRECTIVE FUNC_DIRECTIVE { $$ = 0; recognizer->g_func_decl=1; recognizer->func_header(".func"); }
 	| WEAK_DIRECTIVE FUNC_DIRECTIVE { $$ = 0; recognizer->g_func_decl=1; recognizer->func_header(".func"); }
 	| EXTERN_DIRECTIVE FUNC_DIRECTIVE { $$ = 2; recognizer->g_func_decl=1; recognizer->func_header(".func"); }
+	// [한국어] .extern .func: 외부 함수 선언 (entry_point=2)
 	| WEAK_DIRECTIVE FUNC_DIRECTIVE { $$ = 0; recognizer->g_func_decl=1; recognizer->func_header(".func"); }
 	;
 
@@ -286,7 +342,9 @@ param_list: /*empty*/
 	| param_list COMMA {recognizer->func_header_info(",");} param_entry { recognizer->add_directive(); }
 
 param_entry: PARAM_DIRECTIVE { recognizer->add_space_spec(param_space_unclassified,0); } variable_spec ptr_spec identifier_spec { recognizer->add_function_arg(); }
+	// [한국어] .param으로 선언된 함수 파라미터
 	| REG_DIRECTIVE { recognizer->add_space_spec(reg_space,0); } variable_spec identifier_spec { recognizer->add_function_arg(); }
+	// [한국어] .reg으로 선언된 함수 파라미터
 
 ptr_spec: /*empty*/
         | PTR_DIRECTIVE ptr_space_spec ptr_align_spec
@@ -295,7 +353,8 @@ ptr_spec: /*empty*/
 ptr_space_spec: GLOBAL_DIRECTIVE { recognizer->add_ptr_spec(global_space); }
               | LOCAL_DIRECTIVE  { recognizer->add_ptr_spec(local_space); }
               | SHARED_DIRECTIVE { recognizer->add_ptr_spec(shared_space); }
-			  | CONST_DIRECTIVE { recognizer->add_ptr_spec(global_space); }
+				  | CONST_DIRECTIVE { recognizer->add_ptr_spec(global_space); }
+				  // [한국어] .ptr .const는 global_space로 매핑
 
 ptr_align_spec: ALIGN_DIRECTIVE INT_OPERAND
 
@@ -307,13 +366,16 @@ statement_list: directive_statement { recognizer->add_directive(); }
 	| statement_list directive_statement { recognizer->add_directive(); }
 	| statement_list instruction_statement { recognizer->add_instruction(); }
 	| statement_list {recognizer->start_inst_group();} statement_block {recognizer->end_inst_group();}
+	// [한국어] CDP 명령어 그룹 중첩
 	| {recognizer->start_inst_group();} statement_block {recognizer->end_inst_group();}
 	;
 
 directive_statement: variable_declaration SEMI_COLON
 	| VERSION_DIRECTIVE DOUBLE_OPERAND { recognizer->add_version_info($2, 0); }
+	// [한국어] .version 번호
 	| VERSION_DIRECTIVE DOUBLE_OPERAND PLUS { recognizer->add_version_info($2,1); }
 	| ADDRESS_SIZE_DIRECTIVE INT_OPERAND {/*Do nothing*/}
+	// [한국어] .address_size는 무시
 	| TARGET_DIRECTIVE IDENTIFIER COMMA IDENTIFIER { recognizer->target_header2($2,$4); }
 	| TARGET_DIRECTIVE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER { recognizer->target_header3($2,$4,$6); }
 	| TARGET_DIRECTIVE IDENTIFIER { recognizer->target_header($2); }
@@ -322,20 +384,24 @@ directive_statement: variable_declaration SEMI_COLON
 	| LOC_DIRECTIVE INT_OPERAND INT_OPERAND INT_OPERAND 
 	| PRAGMA_DIRECTIVE STRING SEMI_COLON { recognizer->add_pragma($2); }
 	| function_decl SEMI_COLON {/*Do nothing*/}
+	// [한국어] 함수 선언 프로토타입만 있는 경우
 	;
 
 variable_declaration: variable_spec identifier_list { recognizer->add_variables(); }
 	| variable_spec identifier_spec EQUALS initializer_list { recognizer->add_variables(); }
 	| variable_spec identifier_spec EQUALS literal_operand { recognizer->add_variables(); }
 	| CONSTPTR_DIRECTIVE IDENTIFIER COMMA IDENTIFIER COMMA INT_OPERAND { recognizer->add_constptr($2, $4, $6); }
+	// [한국어] .constptr 상수 포인터 재배치
 	;
 
 variable_spec: var_spec_list { recognizer->set_variable_type(); }
+	// [한국어] 공간/타입/정렬 지시어 모음이 모이면 type_info 생성
 
 identifier_list: identifier_spec
 	| identifier_list COMMA identifier_spec;
 
 identifier_spec: IDENTIFIER { recognizer->add_identifier($1,0,NON_ARRAY_IDENTIFIER); recognizer->func_header_info($1);}
+	// [한국어] 스칼라 식별자
 	| IDENTIFIER LEFT_ANGLE_BRACKET INT_OPERAND RIGHT_ANGLE_BRACKET { recognizer->func_header_info($1); recognizer->func_header_info_int("<", $3); recognizer->func_header_info(">");
 		int i,lbase,l;
 		char *id = NULL;
@@ -348,12 +414,15 @@ identifier_spec: IDENTIFIER { recognizer->add_identifier($1,0,NON_ARRAY_IDENTIFI
 		}
 		free($1);
 	}
+	// [한국어] 벡터 형태 식별자: %r<4> → %r0, %r1, %r2, %r3로 확장
 	| IDENTIFIER LEFT_SQUARE_BRACKET RIGHT_SQUARE_BRACKET { recognizer->add_identifier($1,0,ARRAY_IDENTIFIER_NO_DIM); recognizer->func_header_info($1); recognizer->func_header_info("["); recognizer->func_header_info("]");}
+	// [한국어] 크기 미지정 배열
 	| IDENTIFIER LEFT_SQUARE_BRACKET INT_OPERAND RIGHT_SQUARE_BRACKET { recognizer->add_identifier($1,$3,ARRAY_IDENTIFIER); recognizer->func_header_info($1); recognizer->func_header_info_int("[",$3); recognizer->func_header_info("]");}
+	// [한국어] 크기 지정 배열
 	;
 
 var_spec_list: var_spec 
-	 | var_spec_list var_spec;
+		 | var_spec_list var_spec;
 
 var_spec: space_spec 
 	| type_spec
@@ -428,7 +497,7 @@ literal_list: literal_operand
 prototype_block: prototype_decl prototype_call
 
 prototype_decl: IDENTIFIER COLON CALLPROTOTYPE_DIRECTIVE LEFT_PAREN prototype_param RIGHT_PAREN IDENTIFIER LEFT_PAREN prototype_param RIGHT_PAREN SEMI_COLON 
-	      
+		      
 prototype_call: OPCODE LEFT_PAREN IDENTIFIER RIGHT_PAREN COMMA operand COMMA LEFT_PAREN IDENTIFIER RIGHT_PAREN COMMA IDENTIFIER SEMI_COLON
 	      | OPCODE IDENTIFIER COMMA LEFT_PAREN IDENTIFIER RIGHT_PAREN COMMA IDENTIFIER SEMI_COLON
 
@@ -438,20 +507,26 @@ prototype_param: /* empty */
 
 instruction_statement:  instruction SEMI_COLON
 	| IDENTIFIER COLON { recognizer->add_label($1); }
+	// [한국어] 레이블 정의: "loop:"
 	| pred_spec instruction SEMI_COLON;
+	// [한국어] 프레디케이트가 붙은 명령어: "@p bra loop"
 
 instruction: opcode_spec LEFT_PAREN operand RIGHT_PAREN { recognizer->set_return(); } COMMA operand COMMA LEFT_PAREN operand_list RIGHT_PAREN
+	// [한국어] call (ret), func, (args) 형태
 	| opcode_spec operand COMMA LEFT_PAREN operand_list RIGHT_PAREN
 	| opcode_spec operand COMMA LEFT_PAREN RIGHT_PAREN
 	| opcode_spec operand_list 
 	| opcode_spec
+	// [한국어] 오퍼랜드 없는 명령어 (예: exit, ret)
 	;
 
 opcode_spec: OPCODE { recognizer->add_opcode($1); } option_list
 	| OPCODE { recognizer->add_opcode($1); }
 
 pred_spec: PRED IDENTIFIER  { recognizer->add_pred($2,0, -1); }
+	// [한국어] @%p
 	| PRED EXCLAMATION IDENTIFIER { recognizer->add_pred($3,1, -1); }
+	// [한국어] @!%p
 	| PRED IDENTIFIER LT_OPTION  { recognizer->add_pred($2,0,1); }
 	| PRED IDENTIFIER EQ_OPTION  { recognizer->add_pred($2,0,2); }
 	| PRED IDENTIFIER LE_OPTION  { recognizer->add_pred($2,0,3); }
@@ -575,7 +650,9 @@ prmt_spec: PRMT_F4E_MODE { recognizer->add_option( PRMT_F4E_MODE); }
 	;
 
 wmma_spec: WMMA_DIRECTIVE LAYOUT CONFIGURATION{recognizer->add_space_spec(global_space,0);recognizer->add_ptr_spec(global_space); recognizer->add_wmma_option($1);recognizer->add_wmma_option($2);recognizer->add_wmma_option($3);}
+	// [한국어] WMMA load/store: .load/.store .row/.col .m16n16k16
 	| WMMA_DIRECTIVE LAYOUT LAYOUT CONFIGURATION{recognizer->add_wmma_option($1);recognizer->add_wmma_option($2);recognizer->add_wmma_option($3);recognizer->add_wmma_option($4);}
+	// [한국어] WMMA mma: .mma .row .col .m16n16k16
 	;
 
 vp_spec: WMMA_DIRECTIVE LAYOUT CONFIGURATION{recognizer->add_space_spec(global_space,0);recognizer->add_ptr_spec(global_space);recognizer->add_wmma_option($1);recognizer->add_wmma_option($2);recognizer->add_wmma_option($3);}
@@ -588,8 +665,11 @@ operand_list: operand
 	| operand COMMA operand_list;
 
 operand: IDENTIFIER  { recognizer->add_scalar_operand( $1 ); }
+	// [한국어] 스칼라 레지스터/변수 피연산자
 	| EXCLAMATION IDENTIFIER { recognizer->add_neg_pred_operand( $2 ); }
+	// [한국어] 부정 프레디케이트 피연산자
 	| MINUS IDENTIFIER  { recognizer->add_scalar_operand( $2 ); recognizer->change_operand_neg(); }
+	// [한국어] 음수 레지스터/변수
 	| memory_operand
 	| literal_operand
 	| builtin_operand
@@ -597,11 +677,15 @@ operand: IDENTIFIER  { recognizer->add_scalar_operand( $1 ); }
 	| MINUS vector_operand { recognizer->change_operand_neg(); }
 	| tex_operand
 	| IDENTIFIER PLUS INT_OPERAND { recognizer->add_address_operand($1,$3); }
+	// [한국어] symbol + offset 주소
 	| IDENTIFIER LO_OPTION { recognizer->add_scalar_operand( $1 ); recognizer->change_operand_lohi(1);}
+	// [한국어] 하위 16비트
 	| MINUS IDENTIFIER LO_OPTION { recognizer->add_scalar_operand( $2 ); recognizer->change_operand_lohi(1); recognizer->change_operand_neg();}
 	| IDENTIFIER HI_OPTION { recognizer->add_scalar_operand( $1 ); recognizer->change_operand_lohi(2);}
+	// [한국어] 상위 16비트
 	| MINUS IDENTIFIER HI_OPTION { recognizer->add_scalar_operand( $2 ); recognizer->change_operand_lohi(2); recognizer->change_operand_neg();}
 	| IDENTIFIER PIPE IDENTIFIER { recognizer->add_2vector_operand($1,$3); recognizer->change_double_operand_type(-1);}
+	// [한국어] reg | reg 형태 (set/cvt double destination)
 	| IDENTIFIER PIPE IDENTIFIER LO_OPTION { recognizer->add_2vector_operand($1,$3); recognizer->change_double_operand_type(-1); recognizer->change_operand_lohi(1);}
 	| IDENTIFIER PIPE IDENTIFIER HI_OPTION { recognizer->add_2vector_operand($1,$3); recognizer->change_double_operand_type(-1); recognizer->change_operand_lohi(2);}
 	| IDENTIFIER BACKSLASH IDENTIFIER { recognizer->add_2vector_operand($1,$3); recognizer->change_double_operand_type(-3);}
@@ -610,27 +694,29 @@ operand: IDENTIFIER  { recognizer->add_scalar_operand( $1 ); }
 	;
 
 vector_operand: LEFT_BRACE IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_2vector_operand($2,$4); }
-		| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_3vector_operand($2,$4,$6); }
-		| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_4vector_operand($2,$4,$6,$8); }
-		| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_8vector_operand($2,$4,$6,$8,$10,$12,$14,$16); }
-		| LEFT_BRACE IDENTIFIER RIGHT_BRACE { recognizer->add_1vector_operand($2); }
-	;
+			| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_3vector_operand($2,$4,$6); }
+			| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_4vector_operand($2,$4,$6,$8); }
+			| LEFT_BRACE IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER COMMA IDENTIFIER RIGHT_BRACE { recognizer->add_8vector_operand($2,$4,$6,$8,$10,$12,$14,$16); }
+			| LEFT_BRACE IDENTIFIER RIGHT_BRACE { recognizer->add_1vector_operand($2); }
+		;
 
 tex_operand: LEFT_SQUARE_BRACKET IDENTIFIER COMMA { recognizer->add_scalar_operand($2); }
-		vector_operand 
-	     RIGHT_SQUARE_BRACKET
-	;
+			vector_operand 
+		     RIGHT_SQUARE_BRACKET
+		;
 
 builtin_operand: SPECIAL_REGISTER DIMENSION_MODIFIER { recognizer->add_builtin_operand($1,$2); }
-        | SPECIAL_REGISTER { recognizer->add_builtin_operand($1,-1); }
-	;
+	        | SPECIAL_REGISTER { recognizer->add_builtin_operand($1,-1); }
+		;
 
 memory_operand : LEFT_SQUARE_BRACKET address_expression RIGHT_SQUARE_BRACKET { recognizer->add_memory_operand(); }
+	// [한국어] [address]
 	| IDENTIFIER LEFT_SQUARE_BRACKET address_expression RIGHT_SQUARE_BRACKET { recognizer->add_memory_operand(); recognizer->change_memory_addr_space($1); }
+	// [한국어] g[address] 같은 메모리 공간 한정자
 	| IDENTIFIER LEFT_SQUARE_BRACKET literal_operand RIGHT_SQUARE_BRACKET { recognizer->change_memory_addr_space($1); }
 	| IDENTIFIER LEFT_SQUARE_BRACKET twin_operand RIGHT_SQUARE_BRACKET { recognizer->change_memory_addr_space($1); recognizer->add_memory_operand();}
         | MINUS memory_operand { recognizer->change_operand_neg(); }
-	;
+		;
 
 twin_operand : IDENTIFIER PLUS IDENTIFIER { recognizer->add_double_operand($1,$3); recognizer->change_double_operand_type(1); }
 	| IDENTIFIER PLUS IDENTIFIER LO_OPTION { recognizer->add_double_operand($1,$3); recognizer->change_double_operand_type(1); recognizer->change_operand_lohi(1); }
@@ -651,6 +737,7 @@ address_expression: IDENTIFIER { recognizer->add_address_operand($1,0); }
 	| IDENTIFIER HI_OPTION { recognizer->add_address_operand($1,0); recognizer->change_operand_lohi(2); }
 	| IDENTIFIER PLUS INT_OPERAND { recognizer->add_address_operand($1,$3); }
 	| INT_OPERAND { recognizer->add_address_operand2($1); }
+	// [한국어] 즉치 주소 (예: [256])
 	;
 
 %%

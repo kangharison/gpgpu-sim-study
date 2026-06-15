@@ -44,6 +44,13 @@
  * - module.hpp: Module 기반 클래스 상속 — 계층적 이름/디버그 지원
  * - roundrobin_arb, matrix_arb, tree_arb: 구체 구현 클래스들
  * - SeparableAllocator: _input_arb/_output_arb로 이 클래스의 인스턴스 보유
+ * - BookSimConfig / gpgpusim.config: 다음 옵션이 이 중재자의 생성과 동작에 영향을 준다.
+ *     * arb_type        — 중재 알고리즘 기본("round_robin"/"matrix"/"tree(...)")
+ *     * vc_allocator    — VC 할당기("islip"/"prio" 등)가 남부 Arbiter를 생성
+ *     * sw_allocator    — 스위치 할당기가 남부 Arbiter를 생성
+ *     * spec_sw_allocator — 투기적 스위치 할당기("prio" 등)
+ *     * alloc_iters     — 반복 할당 횟수(iSLIP 등에서 Arbiter Clear/Add/Arbitrate/Update 반복 수)
+ *     * class_priority  — 클래스별 기본 우선순위(pri 값) 제공
  *
  * === 주요 함수/구조체 요약 ===
  * - entry_t: 요청 엔트리 (valid, id, pri)

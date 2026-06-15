@@ -56,6 +56,13 @@
  * (이 파일에는 구현된 함수가 없음. Area 클래스의 함수는 area.h에 인라인 정의.)
  * - Area::get_area(): w×h 또는 직접 지정 area 반환 (area.h 인라인).
  * - Area::set_w/set_h/set_area(): 폭·높이·면적 설정 (area.h 인라인).
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * 이 파일은 Area 클래스의 .cc 구현 자리표시자이므로 설정을 직접 읽지 않는다.
+ * 다만 Area를 멤버로 포함하는 Component/Bank/Mat/Subarray/Wire/Decoder 등이
+ * AccelWattch XML의 캐시/NoC/메모리 구성 옵션과 gpgpusim.config의
+ * -gpgpu_n_mem, -gpgpu_l2_rop_latency, -gpgpu_dram_timing_opt 등에 따라
+ * 계산된 면적을 저장할 때 이 클래스가 사용된다.
  */
 
 #include "area.h"          // [한국어] Area 클래스 선언 및 인라인 함수 정의

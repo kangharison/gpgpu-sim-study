@@ -36,19 +36,54 @@
  *British Columbia             *
  ********************************************************************/
 // clang-format off
-#include "io.h"
-#include "parameter.h"
-#include "const.h"
-#include "logic.h"
-#include "cacti/basic_circuit.h"
-#include <iostream>
-#include <algorithm>
-#include "XML_Parse.h"
-#include <string>
-#include <cmath>
-#include <assert.h>
-#include "memoryctrl.h"
-#include "basic_components.h"
+/*
+ * [한국어 설명] AccelWattch 메모리 컨트롤러 전력 모델 구현 (memoryctrl.cc)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 McPAT/AccelWattch의 메모리 컨트롤러(MC)를 모델링한다.
+ * MC는 FrontEnd(리오더 버퍼/읽기 버퍼/쓰기 버퍼/PRT/ThreadMasks/PRC),
+ * Backend(transaction engine), PHY(SerDes 기반 물리 계층), 그리고 DRAM
+ * 전력(DRAM IDD 계수 기반) 네 부분으로 구성된다. GPU 메모리 공동 발행
+ *(coalescing)을 위한 PRT(Pending Request Table), ThreadMasks, PRC 등의
+ * SRAM 구조물도 이 파일에서 ArrayST로 생성된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * Processor 클래스가 GPU/CPU 설정에 따라 MemoryController 객체를 생성하고,
+ * 이는 다시 MCFrontEnd, MCBackend, MCPHY, DRAM 객체를 구성한다.
+ *   Processor::Processor() → new MemoryController()
+ *                            → frontend(MCFrontEnd), transecEngine(MCBackend),
+ *                               PHY(MCPHY), dram(DRAM)
+ *   Processor::computeEnergy() → MemoryController::computeEnergy()
+ * 실행 컨텍스트: 호스트 유저스페이스, 시뮬레이션 초기화 및 주기적 전력 집계.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: memoryctrl.h, XML_Parse.h, basic_components.h, logic.h,
+ *       array.h(ArrayST), parameter.h, cacti/basic_circuit.h.
+ * 의존 받음: processor.cc(Processor의 생성/소멸/전력 집계).
+ * 데이터 흐름: XML->sys.mc.* → set_mc_param() → mcp
+ *             → MCFrontEnd/MCBackend/MCPHY/DRAM 생성 → computeEnergy()
+ *             → power/rt_power.
+ *
+ * === 주요 함수/클례스 요약 ===
+ * MCBackend       — transaction engine/backend 전력 (경험적 curve fitting).
+ * MCPHY           — 메모리 PHY 전력 (mW/Gb/s 기반 스케일링).
+ * MCFrontEnd      — 리오더 버퍼, 읽기/쓰기 버퍼, GPU coalescing 자료구조.
+ * DRAM            — 시뮬레이션에서 수집된 메모리 통계에 기반한 DRAM 동적 전력.
+ * MemoryController — 위 네 구성요소를 생성·연결·집계하는 최상위 MC 클래스.
+ */
+#include "io.h"                 // [한국어] McPAT I/O 출력 유틸리티
+#include "parameter.h"           // [한국어] CACTI InputParameter, init_interface
+#include "const.h"               // [한국어] McPAT 회로 상수 (nand, inv 등)
+#include "logic.h"               // [한국어] selection_logic 등 논리 회로
+#include "cacti/basic_circuit.h" // [한국어] cmos_Isub_leakage, gate_C 등
+#include <iostream>              // [한국어] cout/cerr
+#include <algorithm>             // [한국어] std::min/max 등
+#include "XML_Parse.h"            // [한국어] ParseXML 및 sys.mc 파라미터
+#include <string>                // [한국어] std::string
+#include <cmath>                 // [한국어] log, ceil 등
+#include <assert.h>              // [한국어] assert
+#include "memoryctrl.h"          // [한국어] MC 클래스 선언
+#include "basic_components.h"    // [한국어] Component, powerDef, longer_channel_device_reduction
 // clang-format on
 /* overview of MC models:
  * McPAT memory controllers are modeled according to large number of industrial
@@ -79,6 +114,17 @@
  *
  */
 
+/*
+ * [한국어]
+ * MCBackend::MCBackend - 메모리 컨트롤러 Backend(Transaction Engine) 생성자
+ *
+ * @interface_ip_: CACTI InputParameter.
+ * @mcp_: MC 파라미터 (dataBusWidth, peakDataTransferRate, type 등).
+ * @mc_type_: MC 또는 FLASHC (현재는 MC만 지원).
+ *
+ * type==0은 Niagara 기반 고성능 MC, type==1은 Cadence 기반 저전력 MC.
+ * compute()에서 면적과 per-access 동적/누설 전력을 산출한다.
+ */
 MCBackend::MCBackend(InputParameter* interface_ip_, const MCParam& mcp_,
                      enum MemoryCtrl_type mc_type_)
     : l_ip(*interface_ip_), mc_type(mc_type_), mcp(mcp_) {
@@ -86,6 +132,15 @@ MCBackend::MCBackend(InputParameter* interface_ip_, const MCParam& mcp_,
   compute();
 }
 
+/*
+ * [한국어]
+ * MCBackend::compute - backend 면적·전력 산출
+ *
+ * 고성능(type==0): 로그/선형 피팅으로 면적을 산출하고, Cadence 65nm 기준
+ * 4.32W의 10%(backend)를 공정/전압으로 스케일링하여 동적 전력을 계산.
+ * 저전력(type==1): 0.15×dataBusWidth 기준 면적과 0.9nJ@800MHz 기준 동적
+ * 에너지를 사용. 누설은 면적 또는 게이트 수 기반.
+ */
 void MCBackend::compute() {
   // double max_row_addr_width = 20.0;//Current address 12~18bits
   double C_MCB, mc_power, backend_dyn,
@@ -94,7 +149,9 @@ void MCBackend::compute() {
   double pmos_to_nmos_sizing_r = pmos_to_nmos_sz_ratio();
   double NMOS_sizing, PMOS_sizing;
 
+  // [한국어] MC/Flash 분기 (현재 MC만 지원)
   if (mc_type == MC) {
+    // [한국어] 고성능 MC (Niagara 기반)
     if (mcp.type == 0) {
       // area =
       // (2.2927*log(peakDataTransferRate)-14.504)*memDataWidth/144.0*(l_ip.F_sz_um/0.09);
@@ -129,6 +186,7 @@ void MCBackend::compute() {
           g_tp.peri_global.Vdd;  // unit W
 
     } else {
+      // [한국어] 저전력 MC (Cadence 기반): 최소 폭 트랜지스터 사용
       NMOS_sizing = g_tp.min_w_nmos_;
       PMOS_sizing = g_tp.min_w_nmos_ * pmos_to_nmos_sizing_r;
       area.set_area(0.15 * mcp.dataBusWidth / 72.0 * (l_ip.F_sz_um / 0.065) *
@@ -152,6 +210,7 @@ void MCBackend::compute() {
           (backend_gates)*cmos_Ig_leakage(NMOS_sizing, PMOS_sizing, 2, nand) *
           g_tp.peri_global.Vdd;  // unit W
     }
+  // [한국어] MC/Flash 이외 타입은 종료
   } else {  // skip old model
     cout << "Unknown memory controllers" << endl;
     exit(0);
@@ -182,11 +241,22 @@ void MCBackend::compute() {
       power_t.readOp.leakage * long_channel_device_reduction;
 }
 
+/*
+ * [한국어]
+ * MCBackend::computeEnergy - TDP/런타임 backend 전력 계산
+ *
+ * TDP 모드에서는 채널 수 절반(0.5×num_channels)을 peak access로 사용.
+ * 런타임 모드에서는 XML에서 수집한 reads/writes에 대해
+ * (read+write)×blockSize×8/dataBusWidth × per-access energy로 동적 전력을
+ * 계산하고, refresh/scrubbing 등 루틴 작업을 10% 가산한다.
+ */
 void MCBackend::computeEnergy(bool is_tdp) {
   // backend uses internal data buswidth
+  // [한국어] TDP/런타임 분기
   if (is_tdp) {
     power.reset();  // Jingwen
     // init stats for Peak
+    // [한국어] TDP peak: 채널당 0.5 access 가정
     stats_t.readAc.access = 0.5 * mcp.num_channels;
     stats_t.writeAc.access = 0.5 * mcp.num_channels;
     tdp_stats = stats_t;
@@ -195,21 +265,27 @@ void MCBackend::computeEnergy(bool is_tdp) {
     // init stats for runtime power (RTP)
     // Jingwen: should use stats from XML object, modified in
     // MemoryController::computeEnergy
+    // [한국어] 런타임: XML에서 수집한 read/write 통계 사용
     stats_t.readAc.access = mcp.reads;
     stats_t.writeAc.access = mcp.writes;
     tdp_stats = stats_t;
   }
+  // [한국어] TDP/런타임 전력 집계
   if (is_tdp) {
     power = power_t;
+    // [한국어] TDP 동적 전력 = (read+write) × per-access energy
     power.readOp.dynamic = (stats_t.readAc.access + stats_t.writeAc.access) *
                            power_t.readOp.dynamic;
 
   } else {
+    // [한국어] 런타임 동적 전력 = access × blockSize×8 / dataBusWidth × per-access energy
     rt_power.readOp.dynamic = (stats_t.readAc.access + stats_t.writeAc.access) *
                               mcp.llcBlockSize * 8.0 / mcp.dataBusWidth *
                               power_t.readOp.dynamic;
+    // [한국어] 런타임 누설 전력 추가
     rt_power = rt_power + power_t * pppm_lkg;
     rt_power.readOp.dynamic =
+        // [한국어] refresh/scrubbing 등 루틴 작업 10% 추가
         rt_power.readOp.dynamic + power.readOp.dynamic * 0.1 * mcp.clockRate *
                                       mcp.num_mcs * mcp.executionTime;
     // Assume 10% of peak power is consumed by routine job including memory
@@ -217,6 +293,15 @@ void MCBackend::computeEnergy(bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * MCPHY::MCPHY - 메모리 PHY 생성자
+ *
+ * @interface_ip_, @mcp_, @mc_type_: MCBackend와 동일.
+ *
+ * PHY는 off-chip 링크의 SerDes/IO 전력을 모델링. LVDS 여부에 따라
+ * power_per_gb_per_s가 0.01(LVDS) 또는 0.04(일반)로 설정된다.
+ */
 MCPHY::MCPHY(InputParameter* interface_ip_, const MCParam& mcp_,
              enum MemoryCtrl_type mc_type_)
     : l_ip(*interface_ip_), mc_type(mc_type_), mcp(mcp_) {
@@ -224,6 +309,14 @@ MCPHY::MCPHY(InputParameter* interface_ip_, const MCParam& mcp_,
   compute();
 }
 
+/*
+ * [한국어]
+ * MCPHY::compute - PHY 면적·전력 산출
+ *
+ * Niagara 다이 포토 기반으로 고성능 PHY 면적을 로그 피팅, 저전력 PHY는
+ * DesignWare 16bit DDR3 PHY 1.3mm²@40nm에서 스케일링. 동적 전력은
+ * mW/Gb/s 단위로 전압/공정 스케일링한 뒤 clockRate로 나눠 에너지화.
+ */
 void MCPHY::compute() {
   // PHY uses internal data buswidth but the actuall off-chip datawidth is
   // 64bits + ecc
@@ -236,6 +329,7 @@ void MCPHY::compute() {
   double power_per_gb_per_s, phy_gates, NMOS_sizing, PMOS_sizing;
 
   if (mc_type == MC) {
+    // [한국어] 고성능 PHY
     if (mcp.type == 0) {
       power_per_gb_per_s = mcp.LVDS ? 0.01 : 0.04;
       // Based on die photos from Niagara 1 and 2.
@@ -249,6 +343,7 @@ void MCPHY::compute() {
       // This is power not energy, 10mw/Gb/s @90nm for each channel and scaling
       // down power.readOp.dynamic = 0.02*memAccesses*llcBlocksize*8;//change
       // from Bytes to bits.
+      // [한국어] PHY 동적 전력 = mW/Gb/s × sqrt(공정비) × (Vdd/1.2)²
       power_t.readOp.dynamic = power_per_gb_per_s * sqrt(l_ip.F_sz_um / 0.09) *
                                g_tp.peri_global.Vdd / 1.2 *
                                g_tp.peri_global.Vdd / 1.2;
@@ -268,7 +363,9 @@ void MCPHY::compute() {
       PMOS_sizing = g_tp.min_w_nmos_ * pmos_to_nmos_sizing_r;
       // Designware/synopsis 16bit DDR3 PHY is 1.3mm (WITH IOs) at 40nm for upto
       // DDR3 2133 (PC3 17066)
+      // [한국어] PHY 면적 중 IO를 제외한 로직 비율 20%
       double non_IO_percentage = 0.2;
+      // [한국어] DesignWare 16bit DDR3 PHY 1.3mm²@40nm 기준 스케일링
       area.set_area(1.3 * non_IO_percentage / 2133.0e6 * mcp.clockRate / 17066 *
                     mcp.peakDataTransferRate * mcp.dataBusWidth / 16.0 *
                     (l_ip.F_sz_um / 0.040) * (l_ip.F_sz_um / 0.040) *
@@ -306,6 +403,14 @@ void MCPHY::compute() {
       power_t.readOp.leakage * long_channel_device_reduction;
 }
 
+/*
+ * [한국어]
+ * MCPHY::computeEnergy - TDP/런타임 PHY 전력 계산
+ *
+ * TDP: peak 대역폭(peakDataTransferRate×8)과 dataBusWidth/72로 스케일링.
+ * 런타임: 실제 read+write access × blockSize×8 / 1e9 / executionTime 기반.
+ * 둘 다 루틴 작업 10%를 추가.
+ */
 void MCPHY::computeEnergy(bool is_tdp) {
   if (is_tdp) {
     power.reset();  // Jingwen
@@ -324,10 +429,12 @@ void MCPHY::computeEnergy(bool is_tdp) {
   }
 
   if (is_tdp) {
+    // [한국어] DIMM 데이터 폭: MC=72bit, Flash=16bit
     double data_transfer_unit = (mc_type == MC) ? 72 : 16; /*DIMM data width*/
     power = power_t;
     power.readOp.dynamic =
         power.readOp.dynamic *
+        // [한국어] TDP PHY 동적 전력 = peak 대역폭 × bus 폭 비율 × 채널 수 / clockRate
         (mcp.peakDataTransferRate * 8 * 1e6 / 1e9 /*change to Gbs*/) *
         mcp.dataBusWidth / data_transfer_unit * mcp.num_channels /
         mcp.clockRate;
@@ -342,6 +449,7 @@ void MCPHY::computeEnergy(bool is_tdp) {
     //    (stats_t.readAc.access*power_t.readOp.dynamic+
     //    						stats_t.writeAc.access*power_t.readOp.dynamic);
 
+    // [한국어] 런타임 PHY 동적 전력
     rt_power.readOp.dynamic = power_t.readOp.dynamic *
                               (stats_t.readAc.access + stats_t.writeAc.access) *
                               (mcp.llcBlockSize) * 8 / 1e9 / mcp.executionTime *
@@ -352,6 +460,18 @@ void MCPHY::computeEnergy(bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * MCFrontEnd::MCFrontEnd - MC 프론트엔드 생성자
+ *
+ * 하나의 MC에 대해 다음 SRAM/논리 구조물을 ArrayST로 생성한다.
+ *   - frontendBuffer (리오더 버퍼, CAM+RAM)
+ *   - readBuffer / writeBuffer
+ *   - PRT (Pending Request Table) — GPU coalescing용
+ *   - threadMasks — 동일 기본 주소로 coalescing된 warp 스레드 마스크
+ *   - PRC — PRT 항목당 pending request 수
+ * 각 구조물의 면적은 memory_channels_per_mc로 확장된다.
+ */
 MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
                        const MCParam& mcp_, enum MemoryCtrl_type mc_type_)
     : XML(XML_interface),
@@ -378,7 +498,9 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
    */
 
   // memory request reorder buffer
+  // [한국어] 리오더 버퍼 CAM 태그 폭 = 주소 + 여유 태그 + opcode
   tag = mcp.addressBusWidth + EXTRA_TAG_BITS + mcp.opcodeW;
+  // [한국어] 리오더 버퍼 데이터 폭 = 물리주소 + opcode [byte]
   data = int(ceil((XML->sys.physical_address_width + mcp.opcodeW) / 8.0));
   interface_ip.cache_sz = data * XML->sys.mc.req_window_size_per_channel;
   interface_ip.line_sz = data;
@@ -402,6 +524,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_wr_ports = interface_ip.num_rd_ports;
   interface_ip.num_se_rd_ports = 0;
   interface_ip.num_search_ports = XML->sys.mc.memory_channels_per_mc;
+  // [한국어] 메모리 요청 리오더 버퍼 (CAM+RAM)
   frontendBuffer =
       new ArrayST(&interface_ip, "MC ReorderBuffer", Uncore_device);
   frontendBuffer->area.set_area(frontendBuffer->area.get_area() +
@@ -411,6 +534,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
                                       XML->sys.mc.memory_channels_per_mc);
 
   // selection and arbitration logic
+  // [한국어] MC 요청 선택/조정(selection_logic)
   MC_arb =
       new selection_logic(is_default, XML->sys.mc.req_window_size_per_channel,
                           1, &interface_ip, Uncore_device);
@@ -440,6 +564,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_rd_ports = XML->sys.mc.memory_channels_per_mc;
   interface_ip.num_wr_ports = interface_ip.num_rd_ports;
   interface_ip.num_se_rd_ports = 0;
+  // [한국어] 읽기 버퍼
   readBuffer = new ArrayST(&interface_ip, "MC ReadBuffer", Uncore_device);
   readBuffer->area.set_area(readBuffer->area.get_area() +
                             readBuffer->local_result.area *
@@ -468,6 +593,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_rd_ports = XML->sys.mc.memory_channels_per_mc;
   interface_ip.num_wr_ports = interface_ip.num_rd_ports;
   interface_ip.num_se_rd_ports = 0;
+  // [한국어] 쓰기 버퍼
   writeBuffer = new ArrayST(&interface_ip, "MC writeBuffer", Uncore_device);
   writeBuffer->area.set_area(writeBuffer->area.get_area() +
                              writeBuffer->local_result.area *
@@ -475,6 +601,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   area.set_area(area.get_area() + writeBuffer->local_result.area *
                                       XML->sys.mc.memory_channels_per_mc);
 
+  // [한국어] GPU 메모리 coalescing을 위한 SRAM 구조물 (Syed Gilani)
   // SRAM structures for memory coalescing --Syed Gilani
   // Pending Request Table (base addresses, offset addresses, threads IDs),
   // Thread Masks
@@ -507,6 +634,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_rd_ports = 1;
   interface_ip.num_wr_ports = 1;
   interface_ip.num_se_rd_ports = 0;
+  // [한국어] Pending Request Table (coalescing 기본 주소/오프셋/TID 저장)
   PRT = new ArrayST(&interface_ip, "MC PRT", Uncore_device);
   PRT->area.set_area(PRT->area.get_area() +
                      PRT->local_result.area *
@@ -540,6 +668,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_rd_ports = 1;
   interface_ip.num_wr_ports = 1;
   interface_ip.num_se_rd_ports = 0;
+  // [한국어] coalescing된 스레드 마스크 저장
   threadMasks = new ArrayST(&interface_ip, "MC ThreadMasks", Uncore_device);
   threadMasks->area.set_area(threadMasks->area.get_area() +
                              threadMasks->local_result.area *
@@ -568,6 +697,7 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
   interface_ip.num_rd_ports = 1;
   interface_ip.num_wr_ports = 1;
   interface_ip.num_se_rd_ports = 0;
+  // [한국어] PRT 항목당 pending request 개수 저장
   PRC = new ArrayST(&interface_ip, "MC PendingRequestCount", Uncore_device);
   PRC->area.set_area(PRC->area.get_area() +
                      PRC->local_result.area *
@@ -576,6 +706,14 @@ MCFrontEnd::MCFrontEnd(ParseXML* XML_interface, InputParameter* interface_ip_,
                 PRC->local_result.area * XML->sys.mc.memory_channels_per_mc);
 }
 
+/*
+ * [한국어]
+ * DRAM::computeEnergy - DRAM 런타임 전력 계산
+ *
+ * TDP 계산은 미지원(return). 런타임에서는 XML에서 수집된 memory_reads,
+ * memory_writes, dram_pre에 각각 rd_coeff, wr_coeff, pre_coeff를 곱해
+ * Micron IDD 기반 DRAM 동적 전력을 산출한다.
+ */
 void DRAM::computeEnergy(bool is_tdp) {
   if (is_tdp) {
     power.reset();
@@ -586,22 +724,36 @@ void DRAM::computeEnergy(bool is_tdp) {
       XML->sys.total_cycles / (XML->sys.target_core_clockrate * 1e6);
 
   power_t.reset();
+  // [한국어] DRAM read 동적 전력 = memory_reads × rd_coeff
   power_t.readOp.dynamic += XML->sys.mc.memory_reads * dramp.rd_coeff;
+  // [한국어] DRAM write 동적 전력 = memory_writes × wr_coeff
   power_t.readOp.dynamic += XML->sys.mc.memory_writes * dramp.wr_coeff;
+  // [한국어] DRAM precharge 동적 전력 = dram_pre × pre_coeff
   power_t.readOp.dynamic += XML->sys.mc.dram_pre * dramp.pre_coeff;
 
   rt_power = rt_power + power_t;
 }
 
+/*
+ * [한국어]
+ * MCFrontEnd::computeEnergy - 프론트엔드 구성요소 전력 계산
+ *
+ * TDP: 각 버퍼/PRT/마스크의 포트 수 × frontend_duty_cycle로 peak access 설정.
+ * 런타임: 실제 메모리 reads/writes와 core[0] 캐시 접근을 기반으로 access 수를
+ * 산출한 뒤, 각 ArrayST의 power_t에 동적 전력을 누적. coalescing 논리
+ * 전력은 perAccessCoalescingEnergy로 추가.
+ */
 void MCFrontEnd::computeEnergy(bool is_tdp) {
   if (is_tdp) {
     power.reset();
     // init stats for Peak
+    // [한국어] TDP: 리오더 버퍼 read = search 포트 수
     frontendBuffer->stats_t.readAc.access =
         frontendBuffer->l_ip.num_search_ports;
     frontendBuffer->stats_t.writeAc.access = frontendBuffer->l_ip.num_wr_ports;
     frontendBuffer->tdp_stats = frontendBuffer->stats_t;
 
+    // [한국어] 런타임: read buffer access (keyword-first)
     readBuffer->stats_t.readAc.access =
         readBuffer->l_ip.num_rd_ports * mcp.frontend_duty_cycle;
     readBuffer->stats_t.writeAc.access =
@@ -636,6 +788,7 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
     rt_power.reset();  // Jingwen
     // init stats for runtime power (RTP)
     frontendBuffer->stats_t.readAc.access =
+        // [한국어] 런타임: 리오더 버퍼 read access
         XML->sys.mc.memory_reads * mcp.llcBlockSize * 8.0 / mcp.dataBusWidth *
         mcp.dataBusWidth / 72;
     // For each channel, each memory word need to check the address data to
@@ -664,6 +817,7 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
     // Co-alesce all misses in caches and add an entry for them in PRT
     // TODO: Change 0 to ithCore and move to LSU (Syed)
     // TODO: Do these accesses represent coalesced accesses?
+    // [한국어] PRT access = core[0] dcache/ccache/tcache 접근 합
     PRT->stats_t.readAc.access = XML->sys.core[0].dcache.read_accesses +
                                  XML->sys.core[0].ccache.read_accesses +
                                  XML->sys.core[0].tcache.read_accesses;
@@ -672,6 +826,7 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
                                   XML->sys.core[0].tcache.write_accesses;
     PRT->rtp_stats = PRT->stats_t;
 
+    // [한국어] threadMasks access = core[0] 캐시 접근 합
     threadMasks->stats_t.readAc.access = XML->sys.core[0].dcache.read_accesses +
                                          XML->sys.core[0].ccache.read_accesses +
                                          XML->sys.core[0].tcache.read_accesses;
@@ -681,6 +836,7 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
         XML->sys.core[0].tcache.write_accesses;
     threadMasks->rtp_stats = threadMasks->stats_t;
 
+    // [한국어] PRC access = core[0] 캐시 접근 합
     PRC->stats_t.readAc.access = XML->sys.core[0].dcache.read_accesses +
                                  XML->sys.core[0].ccache.read_accesses +
                                  XML->sys.core[0].tcache.read_accesses;
@@ -739,6 +895,7 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
   // Add coalescing logic power (Estimated from Verilog HDL description and
   // Synopsys PowerCompiler)--Syed
 #define COALESCE_SCALE 1
+  // [한국어] Verilog/Synopsys PowerCompiler 기반 coalescing 논리 에너지
   double perAccessCoalescingEnergy =
       coalesce_scale *
       ((0.443e-3) * (0.5e-9) * g_tp.peri_global.Vdd * g_tp.peri_global.Vdd) /
@@ -777,6 +934,13 @@ void MCFrontEnd::computeEnergy(bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * MCFrontEnd::displayEnergy - 프론트엔드 구성요소별 전력·면적 출력
+ *
+ * Front End ROB, Read Buffer, Write Buffer, PRT, Thread Masks and coalescing
+ * logic의 area/peak dynamic/leakage/gate leakage/runtime dynamic을 출력.
+ */
 void MCFrontEnd::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   string indent_str(indent, ' ');
   string indent_str_next(indent + 2, ' ');
@@ -928,11 +1092,24 @@ void MCFrontEnd::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * DRAM::DRAM - DRAM 전력 모델 생성자
+ *
+ * XML에서 DRAM IDD 계수를 읽어 dramp 구조체를 초기화한다.
+ */
 DRAM::DRAM(ParseXML* XML_interface, InputParameter* interface_ip_,
            enum Dram_type dram_type_)
     : XML(XML_interface), interface_ip(*interface_ip_), dram_type(dram_type_) {
   set_dram_param();
 }
+/*
+ * [한국어]
+ * MemoryController::MemoryController - 최상위 메모리 컨트롤러 생성자
+ *
+ * MCFrontEnd, DRAM, MCBackend, MCPHY 객체를 생성하고 면적을 누적한다.
+ * PHY는 mcp.type==0(고성능) 또는 type==1&&withPHY일 때만 생성된다.
+ */
 MemoryController::MemoryController(ParseXML* XML_interface,
                                    InputParameter* interface_ip_,
                                    enum MemoryCtrl_type mc_type_,
@@ -950,13 +1127,19 @@ MemoryController::MemoryController(ParseXML* XML_interface,
   interface_ip.wire_is_mat_type = 2;
   interface_ip.wire_os_mat_type = 2;
   interface_ip.wt = Global;
+  // [한국어] XML에서 MC 파라미터 복사
   set_mc_param();
+  // [한국어] MC 프론트엔드 생성
   frontend = new MCFrontEnd(XML, &interface_ip, mcp, mc_type);
+  // [한국어] DRAM 전력 모델 생성
   dram = new DRAM(XML, &interface_ip, dram_type_);
   area.set_area(area.get_area() + frontend->area.get_area());
+  // [한국어] MC backend(transaction engine) 생성
   transecEngine = new MCBackend(&interface_ip, mcp, mc_type);
   area.set_area(area.get_area() + transecEngine->area.get_area());
+  // [한국어] 고성능 MC 또는 저전력 MC+PHY 옵션일 때 PHY 생성
   if (mcp.type == 0 || (mcp.type == 1 && mcp.withPHY)) {
+    // [한국어] 메모리 PHY 생성
     PHY = new MCPHY(&interface_ip, mcp, mc_type);
     area.set_area(area.get_area() + PHY->area.get_area());
   }
@@ -1003,6 +1186,13 @@ MemoryController::MemoryController(ParseXML* XML_interface,
   /// clockNetwork.num_regs = pipeLogic.tot_stage_vector; /
   /// clockNetwork.optimize_wire();
 }
+/*
+ * [한국어]
+ * MemoryController::computeEnergy - MC 전체 전력 집계
+ *
+ * frontend/backend/DRAM/PHY 각각의 computeEnergy()를 호출하고,
+ * is_tdp에 따라 power 또는 rt_power에 합산한다. PHY는 존재할 때만 포함.
+ */
 void MemoryController::computeEnergy(bool is_tdp) {
   rt_power.reset();  // Jingwen
   frontend->rt_power.reset();
@@ -1035,12 +1225,14 @@ void MemoryController::computeEnergy(bool is_tdp) {
     PHY->computeEnergy(is_tdp);
   }
   if (is_tdp) {
+    // [한국어] TDP: frontend/backend/PHY(존재 시) 전력 집계
     power = power + frontend->power + transecEngine->power;
     if (mcp.type == 0 || (mcp.type == 1 && mcp.withPHY)) {
       power = power + PHY->power;
     }
   } else {
     rt_power = rt_power + frontend->rt_power + transecEngine->rt_power +
+    // [한국어] 런타임: frontend/backend/DRAM/PHY(존재 시) 전력 집계
                dram->rt_power;
     if (mcp.type == 0 || (mcp.type == 1 && mcp.withPHY)) {
       rt_power = rt_power + PHY->rt_power;
@@ -1048,6 +1240,14 @@ void MemoryController::computeEnergy(bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * MemoryController::displayEnergy - MC 전체 및 하위 구성요소 출력
+ *
+ * Memory Controller의 area, peak dynamic, leakage, gate leakage, runtime
+ * dynamic을 출력한 뒤, Front End Engine, Transaction Engine, PHY(존재 시)의
+ * 상세 결과를 출력한다.
+ */
 void MemoryController::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   string indent_str(indent, ' ');
   string indent_str_next(indent + 2, ' ');
@@ -1142,6 +1342,10 @@ void MemoryController::displayEnergy(uint32_t indent, int plevel, bool is_tdp) {
   }
 }
 
+/*
+ * [한국어]
+ * DRAM::set_dram_param - XML에서 DRAM IDD 계수를 dramp에 복사
+ */
 void DRAM::set_dram_param() {
   dramp.cmd_coeff = XML->sys.mc.dram_rd_coeff;
   dramp.act_coeff = XML->sys.mc.dram_act_coeff;
@@ -1154,15 +1358,25 @@ void DRAM::set_dram_param() {
   dramp.const_coeff = XML->sys.mc.dram_const_coeff;
 }
 
+/*
+ * [한국어]
+ * MemoryController::set_mc_param - XML->sys.mc 파라미터를 mcp 구조체로 복사
+ *
+ * DDR은 더블 펌프되므로 mc_clock×2가 실제 클록. dataBusWidth, addressBusWidth,
+ * LLC block size, 채널/랭크 수, PHY/LVDS/type 등을 설정.
+ */
 void MemoryController::set_mc_param() {
   if (mc_type == MC) {
+    // [한국어] DDR 더블 펌프: 실제 클록 = 2×mc_clock
     mcp.clockRate = XML->sys.mc.mc_clock * 2;  // DDR double pumped
     mcp.clockRate *= 1e6;
     mcp.executionTime =
         XML->sys.total_cycles / (XML->sys.target_core_clockrate * 1e6);
 
+    // [한국어] LLC block size [byte] + ECC 오버헤드
     mcp.llcBlockSize = int(ceil(XML->sys.mc.llc_line_length / 8.0)) +
                        XML->sys.mc.llc_line_length;  // ecc overhead
+    // [한국어] 데이터 버스 폭 [bit] + ECC 비트
     mcp.dataBusWidth =
         int(ceil(XML->sys.mc.databus_width / 8.0)) + XML->sys.mc.databus_width;
     mcp.addressBusWidth = int(ceil(
@@ -1224,6 +1438,10 @@ void MemoryController::set_mc_param() {
   }
 }
 
+/*
+ * [한국어]
+ * MCFrontEnd::~MCFrontEnd - 프론트엔드 동적 할당 객체 해제
+ */
 MCFrontEnd ::~MCFrontEnd() {
   if (MC_arb) {
     delete MC_arb;
@@ -1243,6 +1461,10 @@ MCFrontEnd ::~MCFrontEnd() {
   }
 }
 
+/*
+ * [한국어]
+ * MemoryController::~MemoryController - MC 하위 구성요소 해제
+ */
 MemoryController ::~MemoryController() {
   if (frontend) {
     delete frontend;

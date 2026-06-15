@@ -1,4 +1,43 @@
 /*
+ * [한국어 설명] 원본 PTX 헤더 Lex/Flex 어휘 분석기 (header.l)
+ *
+ * === 파일의 역할 ===
+ * cuobjdump_to_ptxplus가 원본 PTX 파일을 파싱할 때, Flex가 생성하는
+ * 어휘 분석기(lexer) 정의 파일이다. GPGPU-Sim 메인 PTX 파서(ptx.l)와
+ * 달리, 이 lexer는 커널 본문({...})과 .file/.extern 등 대부분을
+ * 무시(discard)하고, .version, .target, .entry 선언과 그 파라미터,
+ * .tex 선언 등 **헤더 부분만** 토큰화한다. 생성된 header_parser.hh는
+ * Bison(header.y)과 공유된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ *   cuobjdump_to_ptxplus.cc
+ *     → header_parse() (header.y가 생성)
+ *         → header.l (이 파일)이 먼저 토큰을 생성
+ *             → header.y가 문법 규칙에 따라 g_headerList 구축
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존하는 모듈:
+ *   - header_parser.hh : Bison이 생성한 토큰 정의 및 yylval 공용체
+ * 이 파일에 의존하는 모듈:
+ *   - header.y : 이 lexer가 반환하는 토큰들을 문법 규칙에서 사용
+ *   - 빌드 시스템 : flex header.l → header.yy.cc 생성
+ *
+ * === 주요 함수/구조체 요약 ===
+ * Flex 옵션:
+ *   noyywrap    : 입력이 끝나도 yywrap 호출하지 않음
+ *   yylineno    : 줄 번호 자동 추적
+ *   prefix="header_" : 생성된 함수/변수명에 header_ 접두사 부여
+ *   nounput      : unput 함수 생성 안 함
+ * START 조건: 없음(단일 INITIAL 상태)
+ * 주요 토큰:
+ *   DOTVERSION/DOTTARGET/DOTENTRY : 컴파일러 지시어
+ *   DOTPARAM                      : 파라미터 공간
+ *   DOTU64/DOTU32/DOTU16/DOTB32/DOTF32 : scalar 타입
+ *   IDENTIFER/DECLITERAL          : 식별자와 10진수 리터럴
+ *   LEFTPAREN/RIGHTPAREN          : 괄호
+ */
+
+/*
 // Copyright (c) 2009-2011, Jimmy Kwa,
 // The University of British Columbia
 // All rights reserved.
@@ -39,7 +78,9 @@
 /* not sure if this is needed*/
 #define	YY_NEVER_INTERACTIVE	1
 
+/* [한국어] header.l 전용 오류 처리 함수 선언. */
 void header_error(const char*);
+/* [한국어] 출력 함수(output)는 cuobjdump_to_ptxplus.cc에 정의되어 있다. */
 extern void output(const char * text);
 %}
 
@@ -116,6 +157,14 @@ decliteral	([1-9][0-9]*U?)|0U?
 
 %%
 
+/*
+ * [한국어]
+ * header_error - lexer가 인식할 수 없는 토큰을 만났을 때 호출
+ *
+ * @message: 오류 메시지
+ *
+ * 현재 입력 토큰과 줄 번호를 output()를 통해 출력 파일에 기록한다.
+ */
 void header_error(const char* message)
 {
 	output("   "); output(message); output(" near \""); output(header_text); output("\"");

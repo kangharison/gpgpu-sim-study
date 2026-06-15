@@ -60,6 +60,39 @@
 # Ali Bakhoda, George L. Yuan, at the University of British Columbia, 
 # Vancouver, BC V6T 1Z4
 
+"""
+[한국어 설명] AerialVision 메인 GUI 진입점 (startup.py)
+
+=== 파일의 역할 ===
+AerialVision의 최상위 GUI 진입점으로, 파일 입력 대화창(fileInput)과
+메인 시각화 창(startup)을 생성한다.
+사용자가 GPGPU-Sim 로그 파일(.gz/plain), CUDA 소스 파일, PTX 파일, stat 파일을
+선택하면 lexyacc.parseMe()로 파싱하고 organizedata.organizedata()로 재배열한 뒤
+Time Lapse View와 Source Code View 탭을 구성한다.
+
+=== 전체 아키텍처에서의 위치 ===
+  bin/aerialvision.py
+        ↓
+  aerialvision/startup.py (이 파일)
+        ├── aerialvision/lexyacc.py        - 로그 파싱
+        ├── aerialvision/organizedata.py   - 데이터 재배열
+        └── aerialvision/guiclasses.py     - 시각화 탭/플롯
+
+=== 타 모듈과의 연결 ===
+- lexyacc.py: parseMe(filename)로 파일별 variables 생성
+- organizedata.py: organizedata() 변환, skipCFLog/convertCFLog2CUDAsrc 플래그 전달
+- guiclasses.py: formEntry, newTextTab 생성
+- configs.py: userSettingPath 공유
+
+=== 주요 함수/구조체 요약 ===
+- fileInput(cl_files=None): 파일 입력 대화창
+- submitClicked(...): 입력 수집 후 startup() 호출
+- startup(res, TEFILES): 메인 시각화 창
+- checkEmpty(list): 0/NULL이 아닌 값이 있는지 검사
+- graphAddTab/remTab: 그래프 탭 추가/삭제
+- manageFiles*: 파일 추가/삭제/새로고침 대화창
+- textAddTab/textRemTab: 소스코드 뷰 탭 추가/삭제
+"""
 
 import sys
 import tkinter as Tk
@@ -72,6 +105,7 @@ import os
 import os.path
 
 
+# [한국어] 전역 상태 변수들.
 global TabsForGraphs
 global Filenames
 global TabsForText
@@ -82,8 +116,13 @@ TabsForGraphs = []
 vars = {}
 TabsForText = []
 
+# [한국어] AerialVision 사용자 설정 디렉토리 경로 (configs.py와 동일).
 userSettingPath = os.path.join(os.environ['HOME'], '.gpgpu_sim', 'aerialvision')
 
+# [한국어]
+# checkEmpty: 리스트(또는 중첩 리스트)에 0이나 'NULL'이 아닌 값이 하나라도 있는지 확인.
+# @list: 검사할 데이터 리스트
+# @return: 1이면 유효 데이터 존재, 0이면 모두 0/NULL
 def checkEmpty(list):
     bool = 0
     try:
@@ -104,6 +143,9 @@ def checkEmpty(list):
                 bool = 1
         return bool
 
+# [한국어]
+# fileInput: AerialVision 시작 시 처음 띄우는 파일 입력 대화창.
+# @cl_files: 명령행에서 전달된 파일 경로 리스트 (선택적)
 def fileInput(cl_files=None):
     # The Main Window Stuff
     
@@ -152,6 +194,7 @@ def fileInput(cl_files=None):
     
     
     #Loading the most recent directory visited as the first directory
+    # [한국어] 최근 사용 파일에서 마지막 디렉토리를 초기 브라우저 디렉토리로 설정
     try:
         loadfile = open(os.path.join(userSettingPath, 'recentfiles.txt'), 'r')
         tmprecentfile = loadfile.readlines()
@@ -306,6 +349,8 @@ def fileInput(cl_files=None):
     instance.mainloop()
 
     
+# [한국어]
+# loadRecentFile: recentfiles.txt에 저장된 최근 파일 목록을 보여주는 팝업창을 띄운다.
 def loadRecentFile(entry):
     instance = Tk.Toplevel(bg = 'white')
     instance.title("Recent Files")
@@ -328,6 +373,7 @@ def loadRecentFile(entry):
     scrollbar.config(command = cRecentFile.yview)
     scrollbar.pack(side = Tk.LEFT, fill = Tk.Y)
     
+    # [한국어] 중복 제거하면서 최신순으로 정렬
     tmp = []
     for x in range(len(recentfiles) - 1, 0, -1):
         try:
@@ -405,7 +451,10 @@ def errorMsg(string):
     lError.pack(pady = 10, padx = 10)
     bError = Tk.Button(error, text = "OK", font = ("Times New Roman", 14), command = (lambda: error.destroy()))
     bError.pack(pady = 10)
-   
+
+# [한국어]
+# submitClicked: 파일 입력 대화창에서 Submit 버튼 클릭 시 호출.
+# 소스코드 뷰 파일 목록과 CFLog 옵션을 수집하고, 해상도에 따라 startup()을 호출.
 def submitClicked(instance, num, skipcflog, cflog2cuda, listboxes):
     
     for iter in range(0, len(listboxes)):
@@ -416,10 +465,12 @@ def submitClicked(instance, num, skipcflog, cflog2cuda, listboxes):
         else:
             TEStatFiles = listboxes[iter].get(0, Tk.END)
    
+    # [한국어] CFLog 관련 전역 플래그 전달
     organizedata.skipCFLog = skipcflog
     lexyacc.skipCFLOGParsing = skipcflog
     organizedata.convertCFLog2CUDAsrc = cflog2cuda
 
+    # [한국어] 사용자 설정 디렉토리 및 recentfiles.txt 갱신
     start = 0
     if (not os.path.exists(userSettingPath)):
         os.makedirs(userSettingPath)
@@ -437,6 +488,7 @@ def submitClicked(instance, num, skipcflog, cflog2cuda, listboxes):
         f_recentFiles.write(files + '\n')
 
     f_recentFiles.close()
+    # [한국어] 해상도 문자열 변환
     if num == '1':
         res = 'small'  
     elif num == '2':
@@ -446,6 +498,8 @@ def submitClicked(instance, num, skipcflog, cflog2cuda, listboxes):
     instance.destroy()
     startup(res, [TEFiles, TEPTXFiles, TEStatFiles])
 
+# [한국어]
+# graphAddTab: Time Lapse View에 새 그래프 탭 추가.
 def graphAddTab(vars, graphTabs,res, entry):
 
     
@@ -476,6 +530,10 @@ def tmpquit(instance):
     bNo.pack(side = Tk.RIGHT, pady = 5, padx = 5)
     
     
+# [한국어]
+# startup: 메인 AerialVision 시각화 창을 생성.
+# @res: 해상도 문자열 ('small', 'medium', 'big')
+# @TEFILES: [CUDA소스파일목록, PTX파일목록, stat파일목록]
 def startup(res, TEFILES):
     global vars
     # The Main Window Stuff
@@ -564,9 +622,11 @@ def startup(res, TEFILES):
     
     # Here we extract the available data that can be graphed by the user
 
+    # [한국어] 추가된 모든 GPGPU-Sim 로그 파일을 파싱
     for files in Filenames:
         vars[files] = lexyacc.parseMe(files)
     
+    # [한국어] 모든 값이 0/NULL인 변수 제거
     markForDel = {}
     
      
@@ -584,6 +644,7 @@ def startup(res, TEFILES):
         for variables in markForDel[files]:
             del vars[files][variables]
 
+    # [한국어] CFLOG 파일 정보를 organizedata에 전달 후 데이터 재배열
     organizedata.setCFLOGInfoFiles(TEFILES)
     for files in Filenames:
         vars[files] = organizedata.organizedata(vars[files])
@@ -638,6 +699,8 @@ def startup(res, TEFILES):
     
     instance.mainloop()
     
+# [한국어]
+# textManageFiles: 소스코드 뷰용 파일 관리 팝업창(미완성 UI).
 def textManageFiles():
     textManageFiles = Tk.Toplevel(bg = 'white')
     title = Tk.Label(textManageFiles, text = 'Manage Files', font = ("Gill Sans MT", 15, "bold", "underline"), bg= 'white' )
@@ -732,6 +795,8 @@ def textRemTab(textTabs):
     textTabs.delete(Pmw.SELECT)
     
 
+# [한국어]
+# manageFiles: Time Lapse View용 파일 추가/삭제/새로고침 대화창.
 def manageFiles():
     manageFilesWindow = Tk.Toplevel(bg = 'white')
     manageFilesWindow.title("Manage Files")
@@ -820,6 +885,9 @@ def manageFilesDelFile(filesListbox, listbox):
     except:
         listbox.insert(Tk.END, "Delete File: " + filesListbox.get('active'))
 
+# [한국어]
+# manageFilesSubmit: 파일 관리 대화창에서 Submit Changes 클릭 시
+# Add/Refresh/Delete 요청을 실제로 vars와 Filenames에 반영.
 def manageFilesSubmit(window, listbox):
     global vars
     submittedEntries = listbox.get(0, Tk.END)
@@ -874,4 +942,3 @@ def manageFilesSubmit(window, listbox):
 
             
     
-

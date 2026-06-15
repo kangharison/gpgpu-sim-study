@@ -47,54 +47,123 @@
  * Users Notice.
  */
 
+/*
+ * [한국어 설명] CUDA 드라이버 API 헤더 (cuda_api.h)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 CUDA 드라이버 API(Low-Level API)의 전체 타입 정의와 함수 선언을 담고 있다.
+ * NVIDIA의 실제 cuda.h와 동일한 ABI를 제공하여, CUDA 애플리케이션이 실제 NVIDIA GPU 없이도
+ * GPGPU-Sim의 libcuda.so와 링크될 수 있도록 한다.
+ * CUDA 드라이버 API는 cudaXxx 형태의 런타임 API(cuda_runtime_api.h)보다 낮은 레벨로,
+ * cuXxx 접두사를 사용하며 컨텍스트·모듈·함수 객체를 명시적으로 관리한다.
+ * GPGPU-Sim은 이 헤더의 선언들을 libcuda/cuda_runtime_api.c와
+ * libopencl/opencl_runtime_api.cc에서 구현하여 시뮬레이터 내부 코드로 CUDA 호출을
+ * 리다이렉트한다. 버전 매크로(__CUDA_API_VERSION = 10010, CUDA_VERSION = 10010)가
+ * CUDA 10.1 호환성을 선언한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * CUDA 애플리케이션 → 링크 시 libcuda.so(GPGPU-Sim 구현) → 이 헤더의 cuXxx 함수들
+ * → gpgpusim_entrypoint.cc / cuda_runtime_api.c → 내부 시뮬레이터(gpgpu-sim/,
+ * cuda-sim/) 순서로 호출이 흘러간다.
+ * 이 파일은 그 흐름의 최외곽 인터페이스이며, CUDA 애플리케이션 컴파일 시 include되는
+ * 헤더이다. 실행 컨텍스트는 호스트 CPU 유저스페이스이며, GPU 디바이스 코드(PTX/SASS)와는
+ * 무관하다.
+ * API 버전 호환성 매크로(__CUDA_API_VERSION >= 3020 등)가 cuXxx 함수들을 버전별 내부
+ * 이름(cuMemAlloc_v2 등)으로 리매핑하여 바이너리 하위호환성을 보장한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: stdlib.h (malloc/free 등 기본 타입), stdint.h (uint32_t/uint64_t 크기 정수).
+ * 이 파일 자체는 순수 선언만 포함하며 외부 헤더를 최소한으로만 포함한다.
+ * 구현은 libcuda/cuda_runtime_api.c가 담당하며, 이 헤더를 #include하여 함수 시그니처를
+ * 일치시킨다. 데이터 흐름: CUDA 애플리케이션이 cuMemAlloc()을 호출하면 → 이 헤더의
+ * 선언에 따라 → libcuda.so의 구현으로 → gpgpu_t::gpu_malloc()으로 이어진다.
+ * 공유 핵심 자료구조: CUcontext(CUctx_st), CUmodule(CUmod_st), CUfunction(CUfunc_st)
+ * 핸들 타입이 libcuda와 cuda_runtime_api 사이의 인터페이스를 형성한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * CUresult         : 모든 드라이버 API 함수의 반환 타입. CUDA_SUCCESS=0, 각종 에러 코드 정의
+ * CUdevice (int)   : GPU 디바이스 핸들 (인덱스 번호)
+ * CUcontext        : CUDA 컨텍스트 핸들 (*CUctx_st) — 하나의 GPU 사용 세션
+ * CUmodule         : 로드된 PTX/cubin 모듈 핸들 (*CUmod_st)
+ * CUfunction       : 모듈 내의 커널 함수 핸들 (*CUfunc_st)
+ * CUdeviceptr      : GPU 디바이스 메모리 주소 (64비트 플랫폼에서는 unsigned long long)
+ * cuInit()         : 드라이버 초기화 — 모든 API 호출 전 반드시 호출
+ * cuMemAlloc()     : GPU 디바이스 메모리 할당
+ * cuLaunchKernel() : 커널 실행 — GridDim/BlockDim/SharedMem/Stream/Args 지정
+ * cuMemcpyHtoD/DtoH(): 호스트↔디바이스 메모리 복사
+ * CUdevice_attribute: GPU 속성 쿼리 enum (SM 수, 클럭, 공유 메모리 크기 등 101개)
+ */
+
 #ifndef __cuda_cuda_h__
 #define __cuda_cuda_h__
 
-#include <stdlib.h>
-#ifdef _MSC_VER
-typedef unsigned __int32 cuuint32_t;
-typedef unsigned __int64 cuuint64_t;
+#include <stdlib.h>   /* [한국어] size_t, NULL 등 기본 타입 제공 — cuMemAllocHost 등 크기 파라미터에 필요 */
+#ifdef _MSC_VER        /* [한국어] Visual C++ 컴파일러 분기: MSVC는 stdint.h 대신 자체 __int32/__int64 사용 */
+typedef unsigned __int32 cuuint32_t;  /* [한국어] MSVC 전용 32비트 부호 없는 정수 별칭 — cuuint32_t를 플랫폼 독립적으로 사용하기 위한 래퍼 */
+typedef unsigned __int64 cuuint64_t;  /* [한국어] MSVC 전용 64비트 부호 없는 정수 별칭 — 대형 메모리 오프셋/크기 표현에 사용 */
 #else
-#include <stdint.h>
-typedef uint32_t cuuint32_t;
-typedef uint64_t cuuint64_t;
+#include <stdint.h>   /* [한국어] C99 표준 stdint.h: uint32_t/uint64_t 등 크기가 보장된 정수 타입 제공 (GCC/Clang) */
+typedef uint32_t cuuint32_t;  /* [한국어] GCC/Clang 플랫폼에서의 32비트 부호 없는 정수 별칭 — CUDA API 내부 파라미터 타입으로 사용 */
+typedef uint64_t cuuint64_t;  /* [한국어] GCC/Clang 플랫폼에서의 64비트 부호 없는 정수 별칭 — 스트림 값/타임스탬프 등 64비트 값에 사용 */
 #endif
 
 /**
  * CUDA API versioning support
  */
+/* [한국어] __CUDA_DEPRECATED 매크로: CUDA API 중 deprecated(폐기 예정) 함수에 붙이는 컴파일러 경고 어트리뷰트.
+ * 내부 빌드(__CUDA_API_VERSION_INTERNAL), Doxygen 문서 생성, 또는 CUDA_ENABLE_DEPRECATED 명시 시에는
+ * 경고 없이 사용 가능하도록 빈 정의로 두고, 일반 사용자 코드에서는 컴파일러별 deprecated 어트리뷰트를 붙여
+ * "이 함수는 곧 제거된다"는 경고를 발생시킨다. */
 #if defined(__CUDA_API_VERSION_INTERNAL) || defined(__DOXYGEN_ONLY__) || \
     defined(CUDA_ENABLE_DEPRECATED)
-#define __CUDA_DEPRECATED
+#define __CUDA_DEPRECATED                               /* [한국어] 내부/Doxygen/DEPRECATED 허용 빌드: 경고 없이 deprecated 함수 사용 가능 */
 #elif defined(_MSC_VER)
-#define __CUDA_DEPRECATED __declspec(deprecated)
+#define __CUDA_DEPRECATED __declspec(deprecated)        /* [한국어] MSVC: __declspec(deprecated)으로 컴파일러 경고 발생 */
 #elif defined(__GNUC__)
-#define __CUDA_DEPRECATED __attribute__((deprecated))
+#define __CUDA_DEPRECATED __attribute__((deprecated))   /* [한국어] GCC/Clang: __attribute__((deprecated))으로 컴파일러 경고 발생 */
 #else
-#define __CUDA_DEPRECATED
+#define __CUDA_DEPRECATED                               /* [한국어] 알 수 없는 컴파일러: 경고 불가, 빈 정의로 호환성 유지 */
 #endif
 
+/* [한국어] __CUDA_API_VERSION: 이 헤더가 노출하는 CUDA 드라이버 API의 버전 번호.
+ * 이 값에 따라 하위 #if 블록들이 cuMemAlloc → cuMemAlloc_v2 등의 이름 리매핑을 활성화한다.
+ * CUDA_FORCE_API_VERSION을 외부에서 정의하면 구버전 API 호환 모드로 강제 전환된다(현재는 3010만 허용).
+ * 기본값 10010 = CUDA 10.1 (major*1000 + minor*10 형식) — GPGPU-Sim이 CUDA 10.1 드라이버를 에뮬레이션함을 의미. */
 #if defined(CUDA_FORCE_API_VERSION)
 #if (CUDA_FORCE_API_VERSION == 3010)
-#define __CUDA_API_VERSION 3010
+#define __CUDA_API_VERSION 3010                         /* [한국어] 강제 지정: CUDA 3.1 드라이버 API 호환 모드 — v2 리매핑 등 최신 기능 비활성화 */
 #else
-#error "Unsupported value of CUDA_FORCE_API_VERSION"
+#error "Unsupported value of CUDA_FORCE_API_VERSION"   /* [한국어] 지원하지 않는 버전 강제 지정 시 컴파일 에러로 명시적 차단 */
 #endif
 #else
-#define __CUDA_API_VERSION 10010
+#define __CUDA_API_VERSION 10010                        /* [한국어] 기본값: CUDA 10.1 드라이버 API — GPGPU-Sim이 에뮬레이션하는 대상 버전 */
 #endif /* CUDA_FORCE_API_VERSION */
 
+/* [한국어] Per-Thread Default Stream(PTDS) 매크로: CUDA 스트림의 기본 동작 방식을 제어한다.
+ * 일반 모드에서는 NULL 스트림이 모든 스레드에서 공유(레거시 동작)되지만,
+ * CUDA_API_PER_THREAD_DEFAULT_STREAM을 정의하면 각 호스트 스레드가 독립적인 기본 스트림을
+ * 가져 스레드 간 암묵적 동기화를 제거할 수 있다.
+ * _ptds(Per-Thread Default Stream)와 _ptsz(Per-Thread Stream Zero) 접미사 버전이 실제 구현 심볼이며,
+ * 이 매크로들이 API 이름을 해당 심볼로 리매핑한다. */
 #if defined(__CUDA_API_VERSION_INTERNAL) || \
     defined(CUDA_API_PER_THREAD_DEFAULT_STREAM)
-#define __CUDA_API_PER_THREAD_DEFAULT_STREAM
-#define __CUDA_API_PTDS(api) api##_ptds
-#define __CUDA_API_PTSZ(api) api##_ptsz
+#define __CUDA_API_PER_THREAD_DEFAULT_STREAM                /* [한국어] PTDS 모드 활성화 표시 — 하위 #if 블록에서 이 매크로 존재 여부로 분기 */
+#define __CUDA_API_PTDS(api) api##_ptds  /* [한국어] 동기 API에 _ptds 접미사 추가 — 해당 함수의 Per-Thread 기본 스트림 버전 심볼로 리매핑 */
+#define __CUDA_API_PTSZ(api) api##_ptsz  /* [한국어] 비동기 API에 _ptsz 접미사 추가 — Per-Thread Stream Zero 버전 심볼로 리매핑 */
 #else
-#define __CUDA_API_PTDS(api) api
-#define __CUDA_API_PTSZ(api) api
+#define __CUDA_API_PTDS(api) api  /* [한국어] PTDS 비활성화: 함수명 그대로 유지 — 레거시 공유 NULL 스트림 동작 */
+#define __CUDA_API_PTSZ(api) api  /* [한국어] PTSZ 비활성화: 함수명 그대로 유지 — 레거시 공유 NULL 스트림 동작 */
 #endif
 
+/* [한국어] ABI 버전 리매핑 블록: CUDA 드라이버 API는 버전이 올라가면서 일부 함수의 시그니처가 변경되었다.
+ * 하위 호환성을 유지하기 위해 구버전 링커가 참조하는 심볼(cuMemAlloc 등)은 유지하면서,
+ * 헤더를 include하여 새로 컴파일하는 코드는 자동으로 최신 버전 심볼(_v2 등)을 사용하도록
+ * 전처리기 #define으로 이름을 리매핑한다. 이를 통해 구버전 바이너리(이미 cuMemAlloc로 빌드된 것)와
+ * 신버전 바이너리(cuMemAlloc_v2로 빌드된 것)가 동일한 libcuda.so에 공존할 수 있다.
+ * GPGPU-Sim의 구현 파일에서는 _v2 심볼을 실제로 구현하면 된다. */
 #if defined(__CUDA_API_VERSION_INTERNAL) || __CUDA_API_VERSION >= 3020
+/* [한국어] CUDA 3.2+ 리매핑: CUdeviceptr이 32→64비트로 확장되며 함수 시그니처가 변경된 API들.
+ * 메모리 관리(Alloc/Free/Copy/Set), 배열, 텍스처 참조, 그래픽스 자원 등이 _v2로 업그레이드됨. */
 #define cuDeviceTotalMem cuDeviceTotalMem_v2
 #define cuCtxCreate cuCtxCreate_v2
 #define cuModuleGetGlobal cuModuleGetGlobal_v2
@@ -105,30 +174,30 @@ typedef uint64_t cuuint64_t;
 #define cuMemGetAddressRange cuMemGetAddressRange_v2
 #define cuMemAllocHost cuMemAllocHost_v2
 #define cuMemHostGetDevicePointer cuMemHostGetDevicePointer_v2
-#define cuMemcpyHtoD __CUDA_API_PTDS(cuMemcpyHtoD_v2)
-#define cuMemcpyDtoH __CUDA_API_PTDS(cuMemcpyDtoH_v2)
-#define cuMemcpyDtoD __CUDA_API_PTDS(cuMemcpyDtoD_v2)
-#define cuMemcpyDtoA __CUDA_API_PTDS(cuMemcpyDtoA_v2)
-#define cuMemcpyAtoD __CUDA_API_PTDS(cuMemcpyAtoD_v2)
-#define cuMemcpyHtoA __CUDA_API_PTDS(cuMemcpyHtoA_v2)
-#define cuMemcpyAtoH __CUDA_API_PTDS(cuMemcpyAtoH_v2)
-#define cuMemcpyAtoA __CUDA_API_PTDS(cuMemcpyAtoA_v2)
-#define cuMemcpyHtoAAsync __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2)
-#define cuMemcpyAtoHAsync __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2)
-#define cuMemcpy2D __CUDA_API_PTDS(cuMemcpy2D_v2)
-#define cuMemcpy2DUnaligned __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2)
-#define cuMemcpy3D __CUDA_API_PTDS(cuMemcpy3D_v2)
-#define cuMemcpyHtoDAsync __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2)
-#define cuMemcpyDtoHAsync __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2)
-#define cuMemcpyDtoDAsync __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2)
-#define cuMemcpy2DAsync __CUDA_API_PTSZ(cuMemcpy2DAsync_v2)
-#define cuMemcpy3DAsync __CUDA_API_PTSZ(cuMemcpy3DAsync_v2)
-#define cuMemsetD8 __CUDA_API_PTDS(cuMemsetD8_v2)
-#define cuMemsetD16 __CUDA_API_PTDS(cuMemsetD16_v2)
-#define cuMemsetD32 __CUDA_API_PTDS(cuMemsetD32_v2)
-#define cuMemsetD2D8 __CUDA_API_PTDS(cuMemsetD2D8_v2)
-#define cuMemsetD2D16 __CUDA_API_PTDS(cuMemsetD2D16_v2)
-#define cuMemsetD2D32 __CUDA_API_PTDS(cuMemsetD2D32_v2)
+#define cuMemcpyHtoD __CUDA_API_PTDS(cuMemcpyHtoD_v2)    /* [한국어] Host→Device 복사: _v2(64비트 주소) + PTDS 스트림 접미사 조합 */
+#define cuMemcpyDtoH __CUDA_API_PTDS(cuMemcpyDtoH_v2)    /* [한국어] Device→Host 복사: _v2 + PTDS */
+#define cuMemcpyDtoD __CUDA_API_PTDS(cuMemcpyDtoD_v2)    /* [한국어] Device→Device 복사: _v2 + PTDS */
+#define cuMemcpyDtoA __CUDA_API_PTDS(cuMemcpyDtoA_v2)    /* [한국어] Device→Array 복사: _v2 + PTDS */
+#define cuMemcpyAtoD __CUDA_API_PTDS(cuMemcpyAtoD_v2)    /* [한국어] Array→Device 복사: _v2 + PTDS */
+#define cuMemcpyHtoA __CUDA_API_PTDS(cuMemcpyHtoA_v2)    /* [한국어] Host→Array 복사: _v2 + PTDS */
+#define cuMemcpyAtoH __CUDA_API_PTDS(cuMemcpyAtoH_v2)    /* [한국어] Array→Host 복사: _v2 + PTDS */
+#define cuMemcpyAtoA __CUDA_API_PTDS(cuMemcpyAtoA_v2)    /* [한국어] Array→Array 복사: _v2 + PTDS */
+#define cuMemcpyHtoAAsync __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2)  /* [한국어] 비동기 Host→Array: _v2 + PTSZ */
+#define cuMemcpyAtoHAsync __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2)  /* [한국어] 비동기 Array→Host: _v2 + PTSZ */
+#define cuMemcpy2D __CUDA_API_PTDS(cuMemcpy2D_v2)         /* [한국어] 2D 메모리 복사(피치 포함): _v2 + PTDS */
+#define cuMemcpy2DUnaligned __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2)  /* [한국어] 2D 비정렬 복사: _v2 + PTDS */
+#define cuMemcpy3D __CUDA_API_PTDS(cuMemcpy3D_v2)         /* [한국어] 3D 메모리 복사: _v2 + PTDS */
+#define cuMemcpyHtoDAsync __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2)  /* [한국어] 비동기 H→D 복사: _v2 + PTSZ */
+#define cuMemcpyDtoHAsync __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2)  /* [한국어] 비동기 D→H 복사: _v2 + PTSZ */
+#define cuMemcpyDtoDAsync __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2)  /* [한국어] 비동기 D→D 복사: _v2 + PTSZ */
+#define cuMemcpy2DAsync __CUDA_API_PTSZ(cuMemcpy2DAsync_v2)      /* [한국어] 비동기 2D 복사: _v2 + PTSZ */
+#define cuMemcpy3DAsync __CUDA_API_PTSZ(cuMemcpy3DAsync_v2)      /* [한국어] 비동기 3D 복사: _v2 + PTSZ */
+#define cuMemsetD8 __CUDA_API_PTDS(cuMemsetD8_v2)         /* [한국어] 8비트 단위 디바이스 메모리 초기화: _v2 + PTDS */
+#define cuMemsetD16 __CUDA_API_PTDS(cuMemsetD16_v2)       /* [한국어] 16비트 단위 초기화: _v2 + PTDS */
+#define cuMemsetD32 __CUDA_API_PTDS(cuMemsetD32_v2)       /* [한국어] 32비트 단위 초기화: _v2 + PTDS */
+#define cuMemsetD2D8 __CUDA_API_PTDS(cuMemsetD2D8_v2)     /* [한국어] 2D 8비트 초기화: _v2 + PTDS */
+#define cuMemsetD2D16 __CUDA_API_PTDS(cuMemsetD2D16_v2)   /* [한국어] 2D 16비트 초기화: _v2 + PTDS */
+#define cuMemsetD2D32 __CUDA_API_PTDS(cuMemsetD2D32_v2)   /* [한국어] 2D 32비트 초기화: _v2 + PTDS */
 #define cuArrayCreate cuArrayCreate_v2
 #define cuArrayGetDescriptor cuArrayGetDescriptor_v2
 #define cuArray3DCreate cuArray3DCreate_v2
@@ -137,6 +206,7 @@ typedef uint64_t cuuint64_t;
 #define cuTexRefGetAddress cuTexRefGetAddress_v2
 #define cuGraphicsResourceGetMappedPointer cuGraphicsResourceGetMappedPointer_v2
 #endif /* __CUDA_API_VERSION_INTERNAL || __CUDA_API_VERSION >= 3020 */
+/* [한국어] CUDA 4.0+ 리매핑: 컨텍스트/스트림/이벤트 소멸 함수가 반환값 시그니처 변경으로 _v2로 업그레이드됨 */
 #if defined(__CUDA_API_VERSION_INTERNAL) || __CUDA_API_VERSION >= 4000
 #define cuCtxDestroy cuCtxDestroy_v2
 #define cuCtxPopCurrent cuCtxPopCurrent_v2
@@ -144,9 +214,11 @@ typedef uint64_t cuuint64_t;
 #define cuStreamDestroy cuStreamDestroy_v2
 #define cuEventDestroy cuEventDestroy_v2
 #endif /* __CUDA_API_VERSION_INTERNAL || __CUDA_API_VERSION >= 4000 */
+/* [한국어] CUDA 4.1+ 리매핑: cuTexRefSetAddress2D가 _v3으로 업그레이드됨 (2D 텍스처 주소 설정 API 변경) */
 #if defined(__CUDA_API_VERSION_INTERNAL) || __CUDA_API_VERSION >= 4010
 #define cuTexRefSetAddress2D cuTexRefSetAddress2D_v3
 #endif /* __CUDA_API_VERSION_INTERNAL || __CUDA_API_VERSION >= 4010 */
+/* [한국어] CUDA 6.5+ 리매핑: JIT 링크 API(cuLink*)와 호스트 메모리 등록/그래픽스 플래그 함수가 _v2로 변경됨 */
 #if defined(__CUDA_API_VERSION_INTERNAL) || __CUDA_API_VERSION >= 6050
 #define cuLinkCreate cuLinkCreate_v2
 #define cuLinkAddData cuLinkAddData_v2
@@ -156,12 +228,16 @@ typedef uint64_t cuuint64_t;
 #define cuMemHostRegister cuMemHostRegister_v2
 #define cuGraphicsResourceSetMapFlags cuGraphicsResourceSetMapFlags_v2
 #endif /* __CUDA_API_VERSION_INTERNAL || __CUDA_API_VERSION >= 6050 */
+/* [한국어] CUDA 10.1+ 리매핑: cuStreamBeginCapture가 _v2로 변경 (캡처 모드 파라미터 추가).
+ * PTSZ 접미사를 통해 Per-Thread Stream Zero 버전으로도 리매핑됨. */
 #if defined(__CUDA_API_VERSION_INTERNAL) || __CUDA_API_VERSION >= 10010
 #define cuStreamBeginCapture __CUDA_API_PTSZ(cuStreamBeginCapture_v2)
 #elif defined(__CUDA_API_PER_THREAD_DEFAULT_STREAM)
 #define cuStreamBeginCapture __CUDA_API_PTSZ(cuStreamBeginCapture)
 #endif /* __CUDA_API_VERSION_INTERNAL || __CUDA_API_VERSION >= 10010 */
 
+/* [한국어] 외부 빌드에서 CUDA 3.2~4.0 사이 버전에 대한 cuTexRefSetAddress2D 특수 처리.
+ * 4.1 이전까지는 _v2, 4.1 이후부터는 _v3을 사용 — 중간 버전 범위 호환성 유지. */
 #if !defined(__CUDA_API_VERSION_INTERNAL)
 #if defined(__CUDA_API_VERSION) && __CUDA_API_VERSION >= 3020 && \
     __CUDA_API_VERSION < 4010
@@ -170,53 +246,57 @@ typedef uint64_t cuuint64_t;
           __CUDA_API_VERSION < 4010 */
 #endif /* __CUDA_API_VERSION_INTERNAL */
 
+/* [한국어] PTDS 활성화 시 스트림 관련 API 전체를 _ptsz/_ptds 접미사 버전으로 리매핑하는 블록.
+ * CUDA_API_PER_THREAD_DEFAULT_STREAM이 정의된 경우에만 활성화된다.
+ * 이 블록의 함수들은 스트림을 암묵적으로 사용하는 API들로, PTDS 모드에서는 각 스레드의
+ * 독립 스트림을 사용하는 심볼(_ptsz)로 바인딩되어 스레드 간 암묵적 동기화를 제거한다. */
 #if defined(__CUDA_API_PER_THREAD_DEFAULT_STREAM)
-#define cuMemcpy __CUDA_API_PTDS(cuMemcpy)
-#define cuMemcpyAsync __CUDA_API_PTSZ(cuMemcpyAsync)
-#define cuMemcpyPeer __CUDA_API_PTDS(cuMemcpyPeer)
-#define cuMemcpyPeerAsync __CUDA_API_PTSZ(cuMemcpyPeerAsync)
-#define cuMemcpy3DPeer __CUDA_API_PTDS(cuMemcpy3DPeer)
-#define cuMemcpy3DPeerAsync __CUDA_API_PTSZ(cuMemcpy3DPeerAsync)
-#define cuMemPrefetchAsync __CUDA_API_PTSZ(cuMemPrefetchAsync)
+#define cuMemcpy __CUDA_API_PTDS(cuMemcpy)               /* [한국어] 범용 메모리 복사(방향 자동 감지): PTDS 동기 버전으로 리매핑 */
+#define cuMemcpyAsync __CUDA_API_PTSZ(cuMemcpyAsync)     /* [한국어] 비동기 범용 복사: PTSZ 버전으로 리매핑 */
+#define cuMemcpyPeer __CUDA_API_PTDS(cuMemcpyPeer)       /* [한국어] P2P(GPU간) 복사: PTDS 버전 */
+#define cuMemcpyPeerAsync __CUDA_API_PTSZ(cuMemcpyPeerAsync)   /* [한국어] 비동기 P2P 복사: PTSZ 버전 */
+#define cuMemcpy3DPeer __CUDA_API_PTDS(cuMemcpy3DPeer)         /* [한국어] 3D P2P 복사: PTDS 버전 */
+#define cuMemcpy3DPeerAsync __CUDA_API_PTSZ(cuMemcpy3DPeerAsync) /* [한국어] 비동기 3D P2P 복사: PTSZ 버전 */
+#define cuMemPrefetchAsync __CUDA_API_PTSZ(cuMemPrefetchAsync)  /* [한국어] Unified Memory 프리페치: PTSZ 버전 */
 
-#define cuMemsetD8Async __CUDA_API_PTSZ(cuMemsetD8Async)
-#define cuMemsetD16Async __CUDA_API_PTSZ(cuMemsetD16Async)
-#define cuMemsetD32Async __CUDA_API_PTSZ(cuMemsetD32Async)
-#define cuMemsetD2D8Async __CUDA_API_PTSZ(cuMemsetD2D8Async)
-#define cuMemsetD2D16Async __CUDA_API_PTSZ(cuMemsetD2D16Async)
-#define cuMemsetD2D32Async __CUDA_API_PTSZ(cuMemsetD2D32Async)
+#define cuMemsetD8Async __CUDA_API_PTSZ(cuMemsetD8Async)    /* [한국어] 비동기 8비트 초기화: PTSZ 버전 */
+#define cuMemsetD16Async __CUDA_API_PTSZ(cuMemsetD16Async)  /* [한국어] 비동기 16비트 초기화: PTSZ 버전 */
+#define cuMemsetD32Async __CUDA_API_PTSZ(cuMemsetD32Async)  /* [한국어] 비동기 32비트 초기화: PTSZ 버전 */
+#define cuMemsetD2D8Async __CUDA_API_PTSZ(cuMemsetD2D8Async)   /* [한국어] 비동기 2D 8비트 초기화: PTSZ 버전 */
+#define cuMemsetD2D16Async __CUDA_API_PTSZ(cuMemsetD2D16Async) /* [한국어] 비동기 2D 16비트 초기화: PTSZ 버전 */
+#define cuMemsetD2D32Async __CUDA_API_PTSZ(cuMemsetD2D32Async) /* [한국어] 비동기 2D 32비트 초기화: PTSZ 버전 */
 
-#define cuStreamGetPriority __CUDA_API_PTSZ(cuStreamGetPriority)
-#define cuStreamGetFlags __CUDA_API_PTSZ(cuStreamGetFlags)
-#define cuStreamGetCtx __CUDA_API_PTSZ(cuStreamGetCtx)
-#define cuStreamWaitEvent __CUDA_API_PTSZ(cuStreamWaitEvent)
-#define cuStreamEndCapture __CUDA_API_PTSZ(cuStreamEndCapture)
-#define cuStreamIsCapturing __CUDA_API_PTSZ(cuStreamIsCapturing)
-#define cuStreamGetCaptureInfo __CUDA_API_PTSZ(cuStreamGetCaptureInfo)
-#define cuStreamAddCallback __CUDA_API_PTSZ(cuStreamAddCallback)
-#define cuStreamAttachMemAsync __CUDA_API_PTSZ(cuStreamAttachMemAsync)
-#define cuStreamQuery __CUDA_API_PTSZ(cuStreamQuery)
-#define cuStreamSynchronize __CUDA_API_PTSZ(cuStreamSynchronize)
-#define cuEventRecord __CUDA_API_PTSZ(cuEventRecord)
-#define cuLaunchKernel __CUDA_API_PTSZ(cuLaunchKernel)
-#define cuLaunchHostFunc __CUDA_API_PTSZ(cuLaunchHostFunc)
-#define cuGraphicsMapResources __CUDA_API_PTSZ(cuGraphicsMapResources)
-#define cuGraphicsUnmapResources __CUDA_API_PTSZ(cuGraphicsUnmapResources)
+#define cuStreamGetPriority __CUDA_API_PTSZ(cuStreamGetPriority)       /* [한국어] 스트림 우선순위 조회: PTSZ */
+#define cuStreamGetFlags __CUDA_API_PTSZ(cuStreamGetFlags)             /* [한국어] 스트림 플래그 조회: PTSZ */
+#define cuStreamGetCtx __CUDA_API_PTSZ(cuStreamGetCtx)                 /* [한국어] 스트림이 속한 컨텍스트 조회: PTSZ */
+#define cuStreamWaitEvent __CUDA_API_PTSZ(cuStreamWaitEvent)           /* [한국어] 스트림이 이벤트 완료 대기: PTSZ */
+#define cuStreamEndCapture __CUDA_API_PTSZ(cuStreamEndCapture)         /* [한국어] 그래프 캡처 종료: PTSZ */
+#define cuStreamIsCapturing __CUDA_API_PTSZ(cuStreamIsCapturing)       /* [한국어] 캡처 중 여부 조회: PTSZ */
+#define cuStreamGetCaptureInfo __CUDA_API_PTSZ(cuStreamGetCaptureInfo) /* [한국어] 캡처 정보 조회: PTSZ */
+#define cuStreamAddCallback __CUDA_API_PTSZ(cuStreamAddCallback)       /* [한국어] 스트림에 콜백 등록: PTSZ */
+#define cuStreamAttachMemAsync __CUDA_API_PTSZ(cuStreamAttachMemAsync) /* [한국어] Unified Memory를 스트림에 연결: PTSZ */
+#define cuStreamQuery __CUDA_API_PTSZ(cuStreamQuery)                   /* [한국어] 스트림 완료 여부 폴링(비블로킹): PTSZ */
+#define cuStreamSynchronize __CUDA_API_PTSZ(cuStreamSynchronize)       /* [한국어] 스트림 동기화(블로킹 대기): PTSZ */
+#define cuEventRecord __CUDA_API_PTSZ(cuEventRecord)                   /* [한국어] 이벤트 기록(타임스탬프 찍기): PTSZ */
+#define cuLaunchKernel __CUDA_API_PTSZ(cuLaunchKernel)                 /* [한국어] 커널 실행 — GridDim/BlockDim/Shared/Stream/Args 지정: PTSZ */
+#define cuLaunchHostFunc __CUDA_API_PTSZ(cuLaunchHostFunc)             /* [한국어] 스트림에 호스트 함수 등록(스트림 순서 보장 콜백): PTSZ */
+#define cuGraphicsMapResources __CUDA_API_PTSZ(cuGraphicsMapResources) /* [한국어] 그래픽스 자원을 CUDA에 매핑: PTSZ */
+#define cuGraphicsUnmapResources __CUDA_API_PTSZ(cuGraphicsUnmapResources) /* [한국어] 그래픽스 자원 매핑 해제: PTSZ */
 
-#define cuStreamWriteValue32 __CUDA_API_PTSZ(cuStreamWriteValue32)
-#define cuStreamWaitValue32 __CUDA_API_PTSZ(cuStreamWaitValue32)
-#define cuStreamWriteValue64 __CUDA_API_PTSZ(cuStreamWriteValue64)
-#define cuStreamWaitValue64 __CUDA_API_PTSZ(cuStreamWaitValue64)
-#define cuStreamBatchMemOp __CUDA_API_PTSZ(cuStreamBatchMemOp)
+#define cuStreamWriteValue32 __CUDA_API_PTSZ(cuStreamWriteValue32)     /* [한국어] 스트림 순서에 따른 32비트 값 쓰기(스트림 메모리 OP): PTSZ */
+#define cuStreamWaitValue32 __CUDA_API_PTSZ(cuStreamWaitValue32)       /* [한국어] 32비트 값이 조건 만족 시까지 스트림 블로킹: PTSZ */
+#define cuStreamWriteValue64 __CUDA_API_PTSZ(cuStreamWriteValue64)     /* [한국어] 64비트 값 쓰기(스트림 메모리 OP): PTSZ */
+#define cuStreamWaitValue64 __CUDA_API_PTSZ(cuStreamWaitValue64)       /* [한국어] 64비트 값 조건 대기: PTSZ */
+#define cuStreamBatchMemOp __CUDA_API_PTSZ(cuStreamBatchMemOp)         /* [한국어] 여러 스트림 메모리 OP를 일괄 제출: PTSZ */
 
-#define cuLaunchCooperativeKernel __CUDA_API_PTSZ(cuLaunchCooperativeKernel)
+#define cuLaunchCooperativeKernel __CUDA_API_PTSZ(cuLaunchCooperativeKernel) /* [한국어] Cooperative Group 커널 실행(그리드 전체 동기화 가능): PTSZ */
 
 #define cuSignalExternalSemaphoresAsync \
-  __CUDA_API_PTSZ(cuSignalExternalSemaphoresAsync)
+  __CUDA_API_PTSZ(cuSignalExternalSemaphoresAsync)  /* [한국어] 외부 세마포어(Vulkan/D3D 펜스 등) 시그널: PTSZ */
 #define cuWaitExternalSemaphoresAsync \
-  __CUDA_API_PTSZ(cuWaitExternalSemaphoresAsync)
+  __CUDA_API_PTSZ(cuWaitExternalSemaphoresAsync)    /* [한국어] 외부 세마포어 대기: PTSZ */
 
-#define cuGraphLaunch __CUDA_API_PTSZ(cuGraphLaunch)
+#define cuGraphLaunch __CUDA_API_PTSZ(cuGraphLaunch) /* [한국어] 실행 가능 그래프(CUgraphExec)를 스트림에 제출: PTSZ */
 #endif
 
 /**
@@ -240,6 +320,10 @@ typedef uint64_t cuuint64_t;
 /**
  * CUDA API version number
  */
+/* [한국어] CUDA_VERSION: 이 헤더가 선언하는 CUDA 드라이버 API의 버전 번호.
+ * 형식: major*1000 + minor*10 (10010 = CUDA 10.1).
+ * 애플리케이션 코드에서 #if CUDA_VERSION >= 10010 등의 조건으로 버전별 API 사용 가능 여부를 확인한다.
+ * GPGPU-Sim은 CUDA 10.1 드라이버를 에뮬레이션하므로 이 값을 10010으로 고정한다. */
 #define CUDA_VERSION 10010
 
 #ifdef __cplusplus
@@ -251,38 +335,110 @@ extern "C" {
  * CUdeviceptr is defined as an unsigned integer type whose size matches the
  * size of a pointer on the target platform.
  */
+/* [한국어] CUdeviceptr: GPU 디바이스 메모리 주소를 나타내는 정수 타입.
+ * 64비트 플랫폼(_WIN64 또는 __LP64__)에서는 unsigned long long(8바이트),
+ * 32비트 플랫폼에서는 unsigned int(4바이트)로 정의되어 플랫폼 포인터 크기에 맞춘다.
+ * 실제 포인터 타입(void*)이 아닌 정수 타입으로 정의된 이유는 호스트 포인터와
+ * 디바이스 포인터의 혼용을 컴파일 타임에 방지하기 위해서이다.
+ * GPGPU-Sim 내부에서는 gpgpu_t::gpu_malloc()이 반환하는 시뮬레이션 주소가 이 타입으로 전달된다.
+ * CUDA 3.2 이전에는 32비트 고정이었으며, 3.2부터 플랫폼 종속 64비트 타입으로 확장되었다. */
 #if __CUDA_API_VERSION >= 3020
 
 #if defined(_WIN64) || defined(__LP64__)
-typedef unsigned long long CUdeviceptr;
+typedef unsigned long long CUdeviceptr;  /* [한국어] 64비트 플랫폼: 8바이트 디바이스 포인터 — 4GB 이상 GPU 메모리 주소 표현 가능 */
 #else
-typedef unsigned int CUdeviceptr;
+typedef unsigned int CUdeviceptr;        /* [한국어] 32비트 플랫폼: 4바이트 디바이스 포인터 — 최대 4GB GPU 메모리 주소 표현 */
 #endif
 
 #endif /* __CUDA_API_VERSION >= 3020 */
 
+/* [한국어] CUdevice: GPU 디바이스를 식별하는 정수 인덱스.
+ * cuDeviceGet()으로 획득하며, 0부터 시작하는 GPU 번호이다.
+ * GPGPU-Sim에서는 시뮬레이션 대상 GPU가 단 하나이므로 항상 0이 된다. */
 typedef int CUdevice;                 /**< CUDA device */
+/* [한국어] CUcontext: CUDA 컨텍스트 핸들 (불투명 포인터 *CUctx_st).
+ * 하나의 GPU 사용 세션을 나타내며, 메모리 공간·스트림·모듈·이벤트의 컨테이너 역할을 한다.
+ * cuCtxCreate()로 생성하고 cuCtxDestroy()로 소멸한다.
+ * GPGPU-Sim의 libcuda 구현에서는 CUctx_st 구조체가 시뮬레이터 내부 상태와 연결된다. */
 typedef struct CUctx_st *CUcontext;   /**< CUDA context */
+/* [한국어] CUmodule: 로드된 PTX/cubin 모듈 핸들 (*CUmod_st).
+ * cuModuleLoad() 또는 cuModuleLoadData()로 PTX/cubin 바이너리를 로드하면 생성된다.
+ * 내부적으로 하나 이상의 커널 함수(CUfunction)를 포함하며, cuModuleGetFunction()으로 함수 핸들을 추출한다.
+ * GPGPU-Sim에서는 PTX 파싱이 여기서 시작되어 cuda-sim/의 PTX IR로 변환된다. */
 typedef struct CUmod_st *CUmodule;    /**< CUDA module */
+/* [한국어] CUfunction: 로드된 모듈 내의 커널 함수 핸들 (*CUfunc_st).
+ * cuModuleGetFunction()으로 모듈에서 특정 이름의 함수를 조회하여 획득한다.
+ * cuLaunchKernel()의 첫 번째 인자로 전달되어 어떤 커널을 실행할지 지정한다.
+ * GPGPU-Sim 내부에서는 function_info 객체와 대응된다. */
 typedef struct CUfunc_st *CUfunction; /**< CUDA function */
+/* [한국어] CUarray: CUDA 텍스처/서피스 전용 다차원 배열 핸들 (*CUarray_st).
+ * 텍스처 메모리(하드웨어 캐시 최적화)에 데이터를 올릴 때 사용하며,
+ * cuArrayCreate()로 생성하고 cuMemcpyHtoA() 등으로 데이터를 채운다.
+ * 텍스처 참조(CUtexref)에 바인딩하여 커널에서 텍스처 패치 명령으로 접근한다. */
 typedef struct CUarray_st *CUarray;   /**< CUDA array */
+/* [한국어] CUmipmappedArray: MIP맵 레벨을 가진 CUDA 다차원 배열 핸들 (*CUmipmappedArray_st).
+ * 텍스처 LOD(Level of Detail) 필터링을 위한 MIP맵 계층 구조를 지원한다.
+ * cuMipmappedArrayCreate()로 생성하며, 각 MIP 레벨은 cuMipmappedArrayGetLevel()로 접근한다. */
 typedef struct CUmipmappedArray_st
     *CUmipmappedArray;                  /**< CUDA mipmapped array */
+/* [한국어] CUtexref: CUDA 텍스처 참조 핸들 (*CUtexref_st) — 구버전(레거시) 텍스처 API.
+ * cuTexRefSetArray() 또는 cuTexRefSetAddress()로 텍스처 메모리를 바인딩하고,
+ * cuTexRefSetFilterMode()/cuTexRefSetAddressMode() 등으로 샘플링 파라미터를 설정한다.
+ * CUDA 3.x 이후로는 텍스처 객체(CUtexObject) API가 권장되며, 이 API는 deprecated이다. */
 typedef struct CUtexref_st *CUtexref;   /**< CUDA texture reference */
+/* [한국어] CUsurfref: CUDA 서피스 참조 핸들 (*CUsurfref_st) — 구버전(레거시) 서피스 API.
+ * 커널에서 surf1Dread/surf2Dwrite 등의 서피스 접근 명령을 사용하기 위한 핸들이다.
+ * CUarray를 바인딩하여 사용하며, CUsurfObject API로 대체되었다(deprecated). */
 typedef struct CUsurfref_st *CUsurfref; /**< CUDA surface reference */
+/* [한국어] CUevent: CUDA 이벤트 핸들 (*CUevent_st).
+ * cuEventRecord()로 스트림의 특정 지점에 타임스탬프를 찍고,
+ * cuEventSynchronize()/cuEventElapsedTime()으로 GPU 실행 시간을 측정한다.
+ * 스트림 간 동기화(cuStreamWaitEvent)에도 사용된다.
+ * GPGPU-Sim의 stream_manager는 시뮬레이션 사이클 카운터로 이벤트 타이밍을 에뮬레이션한다. */
 typedef struct CUevent_st *CUevent;     /**< CUDA event */
+/* [한국어] CUstream: CUDA 스트림 핸들 (*CUstream_st).
+ * GPU 명령들의 순서를 제어하는 큐이다. 같은 스트림 내의 명령들은 순차 실행되며,
+ * 서로 다른 스트림 간에는 명시적 동기화 없이 병렬 실행될 수 있다.
+ * NULL은 기본 스트림(legacy default stream)을 의미한다.
+ * GPGPU-Sim의 stream_manager.cc가 스트림 큐를 관리하고 커널 디스패치를 조율한다. */
 typedef struct CUstream_st *CUstream;   /**< CUDA stream */
+/* [한국어] CUgraphicsResource: OpenGL/D3D 그래픽스 자원과 CUDA 사이의 상호운용 핸들 (*CUgraphicsResource_st).
+ * cuGraphicsGLRegisterBuffer() 등으로 OpenGL VBO를 CUDA에 등록하고,
+ * cuGraphicsMapResources()로 CUDA에서 접근 가능한 디바이스 포인터를 획득한다.
+ * GPGPU-Sim에서는 OpenGL 상호운용이 지원되지 않으므로 이 핸들은 stub으로 처리된다. */
 typedef struct CUgraphicsResource_st
     *CUgraphicsResource; /**< CUDA graphics interop resource */
+/* [한국어] CUtexObject: 텍스처 객체 핸들 — unsigned long long 불투명 값.
+ * 구버전 CUtexref API를 대체하는 신버전 텍스처 API(CUDA 5.0+).
+ * cuTexObjectCreate()로 생성하며, 커널 인자로 직접 전달할 수 있어 레지스터 파일에 저장된다.
+ * GPGPU-Sim 시뮬레이터에서는 이 값을 내부 텍스처 디스크립터 테이블 인덱스로 해석한다. */
 typedef unsigned long long
     CUtexObject; /**< An opaque value that represents a CUDA texture object */
+/* [한국어] CUsurfObject: 서피스 객체 핸들 — unsigned long long 불투명 값.
+ * 구버전 CUsurfref를 대체하는 신버전 서피스 API(CUDA 5.0+).
+ * cuSurfObjectCreate()로 생성하며, 커널 인자로 직접 전달 가능하다. */
 typedef unsigned long long
     CUsurfObject; /**< An opaque value that represents a CUDA surface object */
+/* [한국어] CUexternalMemory: 외부(Vulkan/D3D12/POSIX fd) 메모리를 CUDA에 임포트한 핸들 (*CUextMemory_st).
+ * cuImportExternalMemory()로 생성하며, 멀티-API 상호운용에 사용된다.
+ * GPGPU-Sim에서는 외부 메모리 임포트가 지원되지 않으므로 stub으로 처리된다. */
 typedef struct CUextMemory_st *CUexternalMemory; /**< CUDA external memory */
+/* [한국어] CUexternalSemaphore: 외부(Vulkan/D3D12) 동기화 객체를 CUDA에 임포트한 핸들 (*CUextSemaphore_st).
+ * cuImportExternalSemaphore()로 생성하며, GPU와 다른 그래픽스 API 간의 동기화에 사용된다.
+ * GPGPU-Sim에서는 stub으로 처리된다. */
 typedef struct CUextSemaphore_st
     *CUexternalSemaphore;                   /**< CUDA external semaphore */
+/* [한국어] CUgraph: CUDA 그래프 핸들 (*CUgraph_st) — CUDA 10.0+ 기능.
+ * GPU 연산들의 DAG(유향 비순환 그래프)를 캡처하여 반복 실행할 때 드라이버 오버헤드를 제거한다.
+ * cuGraphCreate()로 직접 생성하거나 cuStreamBeginCapture()로 스트림 캡처를 통해 생성한다. */
 typedef struct CUgraph_st *CUgraph;         /**< CUDA graph */
+/* [한국어] CUgraphNode: CUDA 그래프 내의 개별 노드 핸들 (*CUgraphNode_st).
+ * 커널 실행, 메모리 복사, memset, 호스트 함수, 자식 그래프 등 다양한 연산 타입의 노드를 표현한다.
+ * cuGraphAddKernelNode() 등으로 노드를 추가하고 의존성(엣지)을 설정한다. */
 typedef struct CUgraphNode_st *CUgraphNode; /**< CUDA graph node */
+/* [한국어] CUgraphExec: 인스턴스화된 실행 가능 그래프 핸들 (*CUgraphExec_st).
+ * cuGraphInstantiate()로 CUgraph를 컴파일하여 실행 가능 형태로 변환한 결과물이다.
+ * cuGraphLaunch()로 스트림에 제출하여 반복 실행하며, cuGraphExecUpdate()로 파라미터를 갱신할 수 있다. */
 typedef struct CUgraphExec_st *CUgraphExec; /**< CUDA executable graph */
 
 #ifndef CU_UUID_HAS_BEEN_DEFINED
@@ -326,6 +482,7 @@ typedef enum CUipcMem_flags_enum {
 
 /**
  * CUDA Mem Attach Flags
+ * [한국어] CUDA CUmemAttach_flags_enum 타입를 정의한다
  */
 typedef enum CUmemAttach_flags_enum {
   CU_MEM_ATTACH_GLOBAL =
@@ -338,6 +495,7 @@ typedef enum CUmemAttach_flags_enum {
 
 /**
  * Context creation flags
+ * [한국어] CUDA CUctx_flags_enum 타입를 정의한다
  */
 typedef enum CUctx_flags_enum {
   CU_CTX_SCHED_AUTO = 0x00,  /**< Automatic scheduling */
@@ -358,6 +516,7 @@ typedef enum CUctx_flags_enum {
 
 /**
  * Stream creation flags
+ * [한국어] CUDA CUstream_flags_enum 타입를 정의한다
  */
 typedef enum CUstream_flags_enum {
   CU_STREAM_DEFAULT = 0x0, /**< Default stream flag */
@@ -387,6 +546,7 @@ typedef enum CUstream_flags_enum {
 
 /**
  * Event creation flags
+ * [한국어] CUDA CUevent_flags_enum 타입를 정의한다
  */
 typedef enum CUevent_flags_enum {
   CU_EVENT_DEFAULT = 0x0,        /**< Default event flag */
@@ -399,6 +559,7 @@ typedef enum CUevent_flags_enum {
 #if __CUDA_API_VERSION >= 8000
 /**
  * Flags for ::cuStreamWaitValue32 and ::cuStreamWaitValue64
+ * [한국어] CUDA CUstreamWaitValue_flags_enum 타입를 정의한다
  */
 typedef enum CUstreamWaitValue_flags_enum {
   CU_STREAM_WAIT_VALUE_GEQ =
@@ -427,6 +588,7 @@ typedef enum CUstreamWaitValue_flags_enum {
 
 /**
  * Flags for ::cuStreamWriteValue32
+ * [한국어] CUDA CUstreamWriteValue_flags_enum 타입를 정의한다
  */
 typedef enum CUstreamWriteValue_flags_enum {
   CU_STREAM_WRITE_VALUE_DEFAULT = 0x0, /**< Default behavior */
@@ -441,6 +603,7 @@ typedef enum CUstreamWriteValue_flags_enum {
 
 /**
  * Operations for ::cuStreamBatchMemOp
+ * [한국어] CUDA CUstreamBatchMemOpType_enum 타입를 정의한다
  */
 typedef enum CUstreamBatchMemOpType_enum {
   CU_STREAM_MEM_OP_WAIT_VALUE_32 =
@@ -493,6 +656,7 @@ typedef union CUstreamBatchMemOpParams_union {
 
 /**
  * Occupancy calculator flag
+ * [한국어] CUDA CUoccupancy_flags_enum 타입를 정의한다
  */
 typedef enum CUoccupancy_flags_enum {
   CU_OCCUPANCY_DEFAULT = 0x0, /**< Default behavior */
@@ -503,6 +667,7 @@ typedef enum CUoccupancy_flags_enum {
 
 /**
  * Array formats
+ * [한국어] CUDA CUarray_format_enum 타입를 정의한다
  */
 typedef enum CUarray_format_enum {
   CU_AD_FORMAT_UNSIGNED_INT8 = 0x01,  /**< Unsigned 8-bit integers */
@@ -517,6 +682,7 @@ typedef enum CUarray_format_enum {
 
 /**
  * Texture reference addressing modes
+ * [한국어] CUDA CUaddress_mode_enum 타입를 정의한다
  */
 typedef enum CUaddress_mode_enum {
   CU_TR_ADDRESS_MODE_WRAP = 0,   /**< Wrapping address mode */
@@ -527,6 +693,7 @@ typedef enum CUaddress_mode_enum {
 
 /**
  * Texture reference filtering modes
+ * [한국어] CUDA CUfilter_mode_enum 타입를 정의한다
  */
 typedef enum CUfilter_mode_enum {
   CU_TR_FILTER_MODE_POINT = 0, /**< Point filter mode */
@@ -535,6 +702,7 @@ typedef enum CUfilter_mode_enum {
 
 /**
  * Device properties
+ * [한국어] CUDA CUdevice_attribute_enum 타입를 정의한다
  */
 typedef enum CUdevice_attribute_enum {
   CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK =
@@ -777,6 +945,7 @@ typedef struct CUdevprop_st {
 
 /**
  * Pointer information
+ * [한국어] CUDA CUpointer_attribute_enum 타입를 정의한다
  */
 typedef enum CUpointer_attribute_enum {
   CU_POINTER_ATTRIBUTE_CONTEXT =
@@ -805,6 +974,7 @@ typedef enum CUpointer_attribute_enum {
 
 /**
  * Function properties
+ * [한국어] CUDA CUfunction_attribute_enum 타입를 정의한다
  */
 typedef enum CUfunction_attribute_enum {
   /**
@@ -883,6 +1053,7 @@ typedef enum CUfunction_attribute_enum {
 
 /**
  * Function cache configurations
+ * [한국어] 커널 함수 L1/공유메모리 캐시 선호도를 정의한다
  */
 typedef enum CUfunc_cache_enum {
   CU_FUNC_CACHE_PREFER_NONE =
@@ -897,6 +1068,7 @@ typedef enum CUfunc_cache_enum {
 
 /**
  * Shared memory configurations
+ * [한국어] 공유 메모리 뱅크 구성를 정의한다
  */
 typedef enum CUsharedconfig_enum {
   CU_SHARED_MEM_CONFIG_DEFAULT_BANK_SIZE =
@@ -910,6 +1082,7 @@ typedef enum CUsharedconfig_enum {
 /**
  * Shared memory carveout configurations. These may be passed to
  * ::cuFuncSetAttribute
+ * [한국어] 공유 메모리/L1 캐시 carveout 비율를 정의한다
  */
 typedef enum CUshared_carveout_enum {
   CU_SHAREDMEM_CARVEOUT_DEFAULT =
@@ -922,6 +1095,7 @@ typedef enum CUshared_carveout_enum {
 
 /**
  * Memory types
+ * [한국어] CUDA 메모리 타입를 정의한다
  */
 typedef enum CUmemorytype_enum {
   CU_MEMORYTYPE_HOST = 0x01,   /**< Host memory */
@@ -932,6 +1106,7 @@ typedef enum CUmemorytype_enum {
 
 /**
  * Compute Modes
+ * [한국어] CUDA 컴퓨팅 모드를 정의한다
  */
 typedef enum CUcomputemode_enum {
   CU_COMPUTEMODE_DEFAULT =
@@ -945,6 +1120,7 @@ typedef enum CUcomputemode_enum {
 
 /**
  * Memory advise values
+ * [한국어] Unified Memory 접근 힌트를 정의한다
  */
 typedef enum CUmem_advise_enum {
   CU_MEM_ADVISE_SET_READ_MOSTLY =
@@ -978,6 +1154,7 @@ typedef enum CUmem_range_attribute_enum {
 
 /**
  * Online compiler and linker options
+ * [한국어] JIT 컴파일/링크 옵션를 정의한다
  */
 typedef enum CUjit_option_enum {
   /**
@@ -1153,6 +1330,7 @@ typedef enum CUjit_option_enum {
 
 /**
  * Online compilation targets
+ * [한국어] JIT 컴파일 대상 컴퓨팅 버전를 정의한다
  */
 typedef enum CUjit_target_enum {
   CU_TARGET_COMPUTE_20 = 20, /**< Compute device class 2.0 */
@@ -1174,6 +1352,7 @@ typedef enum CUjit_target_enum {
 
 /**
  * Cubin matching fallback strategies
+ * [한국어] cubin 폴백 전략를 정의한다
  */
 typedef enum CUjit_fallback_enum {
   CU_PREFER_PTX =
@@ -1186,6 +1365,7 @@ typedef enum CUjit_fallback_enum {
 
 /**
  * Caching modes for dlcm
+ * [한국어] L1 캐시 모드(-dlcm)를 정의한다
  */
 typedef enum CUjit_cacheMode_enum {
   CU_JIT_CACHE_OPTION_NONE = 0, /**< Compile with no -dlcm flag specified */
@@ -1195,6 +1375,7 @@ typedef enum CUjit_cacheMode_enum {
 
 /**
  * Device code formats
+ * [한국어] JIT 링커 입력 형식를 정의한다
  */
 typedef enum CUjitInputType_enum {
   /**
@@ -1236,6 +1417,7 @@ typedef struct CUlinkState_st *CUlinkState;
 
 /**
  * Flags to register a graphics resource
+ * [한국어] 그래픽스 자원 등록 플래그를 정의한다
  */
 typedef enum CUgraphicsRegisterFlags_enum {
   CU_GRAPHICS_REGISTER_FLAGS_NONE = 0x00,
@@ -1247,6 +1429,7 @@ typedef enum CUgraphicsRegisterFlags_enum {
 
 /**
  * Flags for mapping and unmapping interop resources
+ * [한국어] 그래픽스 자원 매핑 플래그를 정의한다
  */
 typedef enum CUgraphicsMapResourceFlags_enum {
   CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE = 0x00,
@@ -1256,6 +1439,7 @@ typedef enum CUgraphicsMapResourceFlags_enum {
 
 /**
  * Array indices for cube faces
+ * [한국어] 큐브맵 면 인덱스를 정의한다
  */
 typedef enum CUarray_cubemap_face_enum {
   CU_CUBEMAP_FACE_POSITIVE_X = 0x00, /**< Positive X face of cubemap */
@@ -1268,6 +1452,7 @@ typedef enum CUarray_cubemap_face_enum {
 
 /**
  * Limits
+ * [한국어] 컨텍스트별 리소스 한도를 정의한다
  */
 typedef enum CUlimit_enum {
   CU_LIMIT_STACK_SIZE = 0x00,       /**< GPU thread stack size */
@@ -1285,6 +1470,7 @@ typedef enum CUlimit_enum {
 
 /**
  * Resource types
+ * [한국어] 텍스처/서피스 자원 타입를 정의한다
  */
 typedef enum CUresourcetype_enum {
   CU_RESOURCE_TYPE_ARRAY = 0x00,           /**< Array resoure */
@@ -1348,6 +1534,7 @@ typedef struct CUDA_HOST_NODE_PARAMS_st {
 
 /**
  * Graph node types
+ * [한국어] CUDA 그래프 노드 타입를 정의한다
  */
 typedef enum CUgraphNodeType_enum {
   CU_GRAPH_NODE_TYPE_KERNEL = 0, /**< GPU kernel node */
@@ -1361,6 +1548,7 @@ typedef enum CUgraphNodeType_enum {
 
 /**
  * Possible stream capture statuses returned by ::cuStreamIsCapturing
+ * [한국어] 스트림 캡처 상태를 정의한다
  */
 typedef enum CUstreamCaptureStatus_enum {
   CU_STREAM_CAPTURE_STATUS_NONE = 0,   /**< Stream is not capturing */
@@ -1377,6 +1565,7 @@ typedef enum CUstreamCaptureStatus_enum {
 /**
  * Possible modes for stream capture thread interactions. For more details see
  * ::cuStreamBeginCapture and ::cuThreadExchangeStreamCaptureMode
+ * [한국어] 스트림 캡처 모드를 정의한다
  */
 typedef enum CUstreamCaptureMode_enum {
   CU_STREAM_CAPTURE_MODE_GLOBAL = 0,
@@ -1388,6 +1577,7 @@ typedef enum CUstreamCaptureMode_enum {
 
 /**
  * Error codes
+ * [한국어] CUDA cudaError_enum 타입를 정의한다
  */
 typedef enum cudaError_enum {
   /**
@@ -1890,6 +2080,7 @@ typedef enum cudaError_enum {
 
 /**
  * P2P Attributes
+ * [한국어] CUDA CUdevice_P2PAttribute_enum 타입를 정의한다
  */
 typedef enum CUdevice_P2PAttribute_enum {
   CU_DEVICE_P2P_ATTRIBUTE_PERFORMANCE_RANK =
@@ -2155,6 +2346,7 @@ typedef struct CUDA_TEXTURE_DESC_st {
 
 /**
  * Resource view format
+ * [한국어] CUDA CUresourceViewFormat_enum 타입를 정의한다
  */
 typedef enum CUresourceViewFormat_enum {
   CU_RES_VIEW_FORMAT_NONE =
@@ -2253,6 +2445,7 @@ typedef struct CUDA_LAUNCH_PARAMS_st {
 
 /**
  * External memory handle types
+ * [한국어] CUDA CUexternalMemoryHandleType_enum 타입를 정의한다
  */
 typedef enum CUexternalMemoryHandleType_enum {
   /**
@@ -2373,6 +2566,7 @@ typedef struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC_st {
 
 /**
  * External semaphore handle types
+ * [한국어] CUDA CUexternalSemaphoreHandleType_enum 타입를 정의한다
  */
 typedef enum CUexternalSemaphoreHandleType_enum {
   /**
@@ -2673,6 +2867,7 @@ CUresult CUDAAPI cuGetErrorString(CUresult error, const char **pStr);
  * \sa
  * ::CUresult,
  * ::cudaGetErrorName
+ * [한국어] CUDA 오류 코드의 이름 문자열을 반환한다
  */
 CUresult CUDAAPI cuGetErrorName(CUresult error, const char **pStr);
 
@@ -2707,6 +2902,7 @@ CUresult CUDAAPI cuGetErrorName(CUresult error, const char **pStr);
  * ::CUDA_ERROR_SYSTEM_DRIVER_MISMATCH,
  * ::CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE
  * \notefnerr
+ * [한국어] CUDA 드라이버 API를 초기화한다 (모든 API 호출 전 필수)
  */
 CUresult CUDAAPI cuInit(unsigned int Flags);
 
@@ -2745,6 +2941,7 @@ CUresult CUDAAPI cuInit(unsigned int Flags);
  * \sa
  * ::cudaDriverGetVersion,
  * ::cudaRuntimeGetVersion
+ * [한국어] 드라이버가 지원하는 CUDA 버전을 반환한다
  */
 CUresult CUDAAPI cuDriverGetVersion(int *driverVersion);
 
@@ -2787,6 +2984,7 @@ CUresult CUDAAPI cuDriverGetVersion(int *driverVersion);
  * ::cuDeviceGetUuid,
  * ::cuDeviceGetLuid,
  * ::cuDeviceTotalMem
+ * [한국어] ordinal에 해당하는 GPU 디바이스 핸들을 반환한다
  */
 CUresult CUDAAPI cuDeviceGet(CUdevice *device, int ordinal);
 
@@ -2815,6 +3013,7 @@ CUresult CUDAAPI cuDeviceGet(CUdevice *device, int ordinal);
  * ::cuDeviceGet,
  * ::cuDeviceTotalMem,
  * ::cudaGetDeviceCount
+ * [한국어] 컴퓨팅 가능한 GPU 디바이스 개수를 반환한다
  */
 CUresult CUDAAPI cuDeviceGetCount(int *count);
 
@@ -2846,6 +3045,7 @@ CUresult CUDAAPI cuDeviceGetCount(int *count);
  * ::cuDeviceGet,
  * ::cuDeviceTotalMem,
  * ::cudaGetDeviceProperties
+ * [한국어] 디바이스의 이름 문자열을 반환한다
  */
 CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev);
 
@@ -2875,6 +3075,7 @@ CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev);
  * ::cuDeviceGet,
  * ::cuDeviceTotalMem,
  * ::cudaGetDeviceProperties
+ * [한국어] 디바이스의 UUID를 반환한다
  */
 CUresult CUDAAPI cuDeviceGetUuid(CUuuid *uuid, CUdevice dev);
 #endif
@@ -2905,6 +3106,7 @@ CUresult CUDAAPI cuDeviceGetUuid(CUuuid *uuid, CUdevice dev);
  * ::cuDeviceGet,
  * ::cuDeviceTotalMem,
  * ::cudaGetDeviceProperties
+ * [한국어] 디바이스의 LUID와 노드 마스크를 반환한다
  */
 CUresult CUDAAPI cuDeviceGetLuid(char *luid, unsigned int *deviceNodeMask,
                                  CUdevice dev);
@@ -2936,6 +3138,7 @@ CUresult CUDAAPI cuDeviceGetLuid(char *luid, unsigned int *deviceNodeMask,
  * ::cuDeviceGetUuid,
  * ::cuDeviceGet,
  * ::cudaMemGetInfo
+ * [한국어] 디바이스의 총 메모리 크기를 반환한다
  */
 CUresult CUDAAPI cuDeviceTotalMem(size_t *bytes, CUdevice dev);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -3156,6 +3359,7 @@ CUresult CUDAAPI cuDeviceTotalMem(size_t *bytes, CUdevice dev);
  * ::cuDeviceTotalMem,
  * ::cudaDeviceGetAttribute,
  * ::cudaGetDeviceProperties
+ * [한국어] 지정한 디바이스 속성 값을 조회한다
  */
 CUresult CUDAAPI cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
                                       CUdevice dev);
@@ -3341,6 +3545,7 @@ __CUDA_DEPRECATED CUresult CUDAAPI cuDeviceComputeCapability(int *major,
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] 디바이스의 기본(primary) 컨텍스트 참조를 획득한다
  */
 CUresult CUDAAPI cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev);
 
@@ -3375,6 +3580,7 @@ CUresult CUDAAPI cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] 디바이스 기본 컨텍스트의 참조를 해제한다
  */
 CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice dev);
 
@@ -3440,6 +3646,7 @@ CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice dev);
  * ::cuCtxCreate,
  * ::cuCtxGetFlags,
  * ::cudaSetDeviceFlags
+ * [한국어] 기본 컨텍스트 생성 플래그를 설정한다
  */
 CUresult CUDAAPI cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags);
 
@@ -3466,6 +3673,7 @@ CUresult CUDAAPI cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags);
  * ::cuDevicePrimaryCtxSetFlags,
  * ::cuCtxGetFlags,
  * ::cudaGetDeviceFlags
+ * [한국어] 기본 컨텍스트의 활성 상태와 플래그를 조회한다
  */
 CUresult CUDAAPI cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
                                             int *active);
@@ -3505,6 +3713,7 @@ CUresult CUDAAPI cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize,
  * ::cudaDeviceReset
+ * [한국어] 디바이스의 기본 컨텍스트를 초기화한다
  */
 CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice dev);
 
@@ -3615,6 +3824,7 @@ CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice dev);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] CUDA 컨텍스트를 생성한다
  */
 CUresult CUDAAPI cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -3655,6 +3865,7 @@ CUresult CUDAAPI cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] CUDA 컨텍스트를 소멸시킨다
  */
 CUresult CUDAAPI cuCtxDestroy(CUcontext ctx);
 #endif /* __CUDA_API_VERSION >= 4000 */
@@ -3691,6 +3902,7 @@ CUresult CUDAAPI cuCtxDestroy(CUcontext ctx);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] 현재 스레드의 컨텍스트 스택에 컨텍스트를 푸시한다
  */
 CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx);
 
@@ -3725,6 +3937,7 @@ CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] 현재 스레드의 컨텍스트 스택에서 팝한다
  */
 CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx);
 
@@ -3755,6 +3968,7 @@ CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx);
  * ::cuCtxCreate,
  * ::cuCtxDestroy,
  * ::cudaSetDevice
+ * [한국어] 현재 스레드에 바인딩할 컨텍스트를 설정한다
  */
 CUresult CUDAAPI cuCtxSetCurrent(CUcontext ctx);
 
@@ -3778,6 +3992,7 @@ CUresult CUDAAPI cuCtxSetCurrent(CUcontext ctx);
  * ::cuCtxCreate,
  * ::cuCtxDestroy,
  * ::cudaGetDevice
+ * [한국어] 현재 스레드에 바인딩된 컨텍스트를 조회한다
  */
 CUresult CUDAAPI cuCtxGetCurrent(CUcontext *pctx);
 #endif /* __CUDA_API_VERSION >= 4000 */
@@ -3809,6 +4024,7 @@ CUresult CUDAAPI cuCtxGetCurrent(CUcontext *pctx);
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize,
  * ::cudaGetDevice
+ * [한국어] 컨텍스트가 속한 디바이스를 조회한다
  */
 CUresult CUDAAPI cuCtxGetDevice(CUdevice *device);
 
@@ -3838,6 +4054,7 @@ CUresult CUDAAPI cuCtxGetDevice(CUdevice *device);
  * ::cuCtxGetSharedMemConfig,
  * ::cuCtxGetStreamPriorityRange,
  * ::cudaGetDeviceFlags
+ * [한국어] 컨텍스트 생성 시 사용된 플래그를 조회한다
  */
 CUresult CUDAAPI cuCtxGetFlags(unsigned int *flags);
 #endif /* __CUDA_API_VERSION >= 7000 */
@@ -3869,6 +4086,7 @@ CUresult CUDAAPI cuCtxGetFlags(unsigned int *flags);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cudaDeviceSynchronize
+ * [한국어] 컨텍스트의 모든 GPU 작업이 완료될 때까지 대기한다
  */
 CUresult CUDAAPI cuCtxSynchronize(void);
 
@@ -3961,6 +4179,7 @@ CUresult CUDAAPI cuCtxSynchronize(void);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSynchronize,
  * ::cudaDeviceSetLimit
+ * [한국어] 컨텍스트별 리소스 한도를 설정한다
  */
 CUresult CUDAAPI cuCtxSetLimit(CUlimit limit, size_t value);
 
@@ -4002,6 +4221,7 @@ CUresult CUDAAPI cuCtxSetLimit(CUlimit limit, size_t value);
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize,
  * ::cudaDeviceGetLimit
+ * [한국어] 컨텍스트별 리소스 한도를 조회한다
  */
 CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit);
 
@@ -4048,6 +4268,7 @@ CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit);
  * ::cuCtxSynchronize,
  * ::cuFuncSetCacheConfig,
  * ::cudaDeviceGetCacheConfig
+ * [한국어] 컨텍스트의 L1/공유메모리 캐시 설정을 조회한다
  */
 CUresult CUDAAPI cuCtxGetCacheConfig(CUfunc_cache *pconfig);
 
@@ -4101,6 +4322,7 @@ CUresult CUDAAPI cuCtxGetCacheConfig(CUfunc_cache *pconfig);
  * ::cuCtxSynchronize,
  * ::cuFuncSetCacheConfig,
  * ::cudaDeviceSetCacheConfig
+ * [한국어] 컨텍스트의 L1/공유메모리 캐시 설정을 변경한다
  */
 CUresult CUDAAPI cuCtxSetCacheConfig(CUfunc_cache config);
 
@@ -4146,6 +4368,7 @@ CUresult CUDAAPI cuCtxSetCacheConfig(CUfunc_cache config);
  * ::cuCtxGetSharedMemConfig,
  * ::cuFuncSetCacheConfig,
  * ::cudaDeviceGetSharedMemConfig
+ * [한국어] 컨텍스트의 공유 메모리 뱅크 크기를 조회한다
  */
 CUresult CUDAAPI cuCtxGetSharedMemConfig(CUsharedconfig *pConfig);
 
@@ -4199,6 +4422,7 @@ CUresult CUDAAPI cuCtxGetSharedMemConfig(CUsharedconfig *pConfig);
  * ::cuCtxGetSharedMemConfig,
  * ::cuFuncSetCacheConfig,
  * ::cudaDeviceSetSharedMemConfig
+ * [한국어] 컨텍스트의 공유 메모리 뱅크 크기를 설정한다
  */
 CUresult CUDAAPI cuCtxSetSharedMemConfig(CUsharedconfig config);
 #endif
@@ -4238,6 +4462,7 @@ CUresult CUDAAPI cuCtxSetSharedMemConfig(CUsharedconfig config);
  * ::cuCtxSetCacheConfig,
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize
+ * [한국어] 컨텍스트의 CUDA 드라이버 API 버전을 조회한다
  */
 CUresult CUDAAPI cuCtxGetApiVersion(CUcontext ctx, unsigned int *version);
 
@@ -4277,6 +4502,7 @@ CUresult CUDAAPI cuCtxGetApiVersion(CUcontext ctx, unsigned int *version);
  * ::cuCtxSetLimit,
  * ::cuCtxSynchronize,
  * ::cudaDeviceGetStreamPriorityRange
+ * [한국어] 사용 가능한 스트림 우선순위 범위를 조회한다
  */
 CUresult CUDAAPI cuCtxGetStreamPriorityRange(int *leastPriority,
                                              int *greatestPriority);
@@ -4424,6 +4650,7 @@ __CUDA_DEPRECATED CUresult CUDAAPI cuCtxDetach(CUcontext ctx);
  * ::cuModuleLoadDataEx,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload
+ * [한국어] PTX/cubin 파일로부터 CUDA 모듈을 로드한다
  */
 CUresult CUDAAPI cuModuleLoad(CUmodule *module, const char *fname);
 
@@ -4461,6 +4688,7 @@ CUresult CUDAAPI cuModuleLoad(CUmodule *module, const char *fname);
  * ::cuModuleLoadDataEx,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload
+ * [한국어] 메모리 이미지로부터 CUDA 모듈을 로드한다
  */
 CUresult CUDAAPI cuModuleLoadData(CUmodule *module, const void *image);
 
@@ -4504,6 +4732,7 @@ CUresult CUDAAPI cuModuleLoadData(CUmodule *module, const void *image);
  * ::cuModuleLoadData,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload
+ * [한국어] JIT 옵션을 지정하여 메모리 이미지에서 모듈을 로드한다
  */
 CUresult CUDAAPI cuModuleLoadDataEx(CUmodule *module, const void *image,
                                     unsigned int numOptions,
@@ -4548,6 +4777,7 @@ CUresult CUDAAPI cuModuleLoadDataEx(CUmodule *module, const void *image,
  * ::cuModuleLoadData,
  * ::cuModuleLoadDataEx,
  * ::cuModuleUnload
+ * [한국어] fat binary로부터 CUDA 모듈을 로드한다
  */
 CUresult CUDAAPI cuModuleLoadFatBinary(CUmodule *module, const void *fatCubin);
 
@@ -4573,6 +4803,7 @@ CUresult CUDAAPI cuModuleLoadFatBinary(CUmodule *module, const void *fatCubin);
  * ::cuModuleLoadData,
  * ::cuModuleLoadDataEx,
  * ::cuModuleLoadFatBinary
+ * [한국어] 로드된 CUDA 모듈을 언로드한다
  */
 CUresult CUDAAPI cuModuleUnload(CUmodule hmod);
 
@@ -4603,6 +4834,7 @@ CUresult CUDAAPI cuModuleUnload(CUmodule hmod);
  * ::cuModuleLoadDataEx,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload
+ * [한국어] 모듈 내에서 지정한 이름의 커널 함수 핸들을 획득한다
  */
 CUresult CUDAAPI cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
                                      const char *name);
@@ -4640,6 +4872,7 @@ CUresult CUDAAPI cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
  * ::cuModuleUnload,
  * ::cudaGetSymbolAddress,
  * ::cudaGetSymbolSize
+ * [한국어] 모듈 내 전역 변수의 디바이스 주소와 크기를 조회한다
  */
 CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes,
                                    CUmodule hmod, const char *name);
@@ -4676,6 +4909,7 @@ CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload,
  * ::cudaGetTextureReference
+ * [한국어] 모듈에서 텍스처 참조 핸들을 획득한다
  */
 CUresult CUDAAPI cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod,
                                    const char *name);
@@ -4709,6 +4943,7 @@ CUresult CUDAAPI cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod,
  * ::cuModuleLoadFatBinary,
  * ::cuModuleUnload,
  * ::cudaGetSurfaceReference
+ * [한국어] 모듈에서 서피스 참조 핸들을 획득한다
  */
 CUresult CUDAAPI cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule hmod,
                                     const char *name);
@@ -4752,6 +4987,7 @@ CUresult CUDAAPI cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule hmod,
  * ::cuLinkAddFile,
  * ::cuLinkComplete,
  * ::cuLinkDestroy
+ * [한국어] JIT 링커 상태 객체를 생성한다
  */
 CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
                               void **optionValues, CUlinkState *stateOut);
@@ -4790,6 +5026,7 @@ CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
  * ::cuLinkAddFile,
  * ::cuLinkComplete,
  * ::cuLinkDestroy
+ * [한국어] 링커에 PTX/cubin 데이터를 추가한다
  */
 CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
                                void *data, size_t size, const char *name,
@@ -4831,6 +5068,7 @@ CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
  * ::cuLinkAddData,
  * ::cuLinkComplete,
  * ::cuLinkDestroy
+ * [한국어] 링커에 파일 형태의 입력을 추가한다
  */
 CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
                                const char *path, unsigned int numOptions,
@@ -4858,6 +5096,7 @@ CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
  * ::cuLinkAddFile,
  * ::cuLinkDestroy,
  * ::cuModuleLoadData
+ * [한국어] 링크를 완료하고 생성된 cubin을 반환한다
  */
 CUresult CUDAAPI cuLinkComplete(CUlinkState state, void **cubinOut,
                                 size_t *sizeOut);
@@ -4872,6 +5111,7 @@ CUresult CUDAAPI cuLinkComplete(CUlinkState state, void **cubinOut,
  * ::CUDA_ERROR_INVALID_HANDLE
  *
  * \sa ::cuLinkCreate
+ * [한국어] 링커 상태 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuLinkDestroy(CUlinkState state);
 
@@ -4921,6 +5161,7 @@ CUresult CUDAAPI cuLinkDestroy(CUlinkState state);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemGetInfo
+ * [한국어] GPU 메모리의 여유/전체 크기를 조회한다
  */
 CUresult CUDAAPI cuMemGetInfo(size_t *free, size_t *total);
 
@@ -4956,6 +5197,7 @@ CUresult CUDAAPI cuMemGetInfo(size_t *free, size_t *total);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMalloc
+ * [한국어] GPU 디바이스 메모리를 할당한다
  */
 CUresult CUDAAPI cuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
 
@@ -5019,6 +5261,7 @@ CUresult CUDAAPI cuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMallocPitch
+ * [한국어] 피치가 정렬된 2D GPU 메모리를 할당한다
  */
 CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch,
                                  size_t WidthInBytes, size_t Height,
@@ -5052,6 +5295,7 @@ CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaFree
+ * [한국어] GPU 디바이스 메모리를 해제한다
  */
 CUresult CUDAAPI cuMemFree(CUdeviceptr dptr);
 
@@ -5087,6 +5331,7 @@ CUresult CUDAAPI cuMemFree(CUdeviceptr dptr);
  * ::cuMemGetInfo, ::cuMemHostAlloc,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32
+ * [한국어] 할당된 메모리 영역의 기본 주소와 크기를 조회한다
  */
 CUresult CUDAAPI cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize,
                                       CUdeviceptr dptr);
@@ -5136,6 +5381,7 @@ CUresult CUDAAPI cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMallocHost
+ * [한국어] 페이지 잠금(page-locked) 호스트 메모리를 할당한다
  */
 CUresult CUDAAPI cuMemAllocHost(void **pp, size_t bytesize);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -5168,6 +5414,7 @@ CUresult CUDAAPI cuMemAllocHost(void **pp, size_t bytesize);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaFreeHost
+ * [한국어] 페이지 잠금 호스트 메모리를 해제한다
  */
 CUresult CUDAAPI cuMemFreeHost(void *p);
 
@@ -5252,6 +5499,7 @@ CUresult CUDAAPI cuMemFreeHost(void *p);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaHostAlloc
+ * [한국어] 플래그를 지정하여 호스트 메모리를 할당한다
  */
 CUresult CUDAAPI cuMemHostAlloc(void **pp, size_t bytesize, unsigned int Flags);
 
@@ -5309,6 +5557,7 @@ CUresult CUDAAPI cuMemHostAlloc(void **pp, size_t bytesize, unsigned int Flags);
  * ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaHostGetDevicePointer
+ * [한국어] 등록된 호스트 메모리에 대응하는 디바이스 포인터를 조회한다
  */
 CUresult CUDAAPI cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p,
                                            unsigned int Flags);
@@ -5338,6 +5587,7 @@ CUresult CUDAAPI cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p,
  * ::cuMemAllocHost,
  * ::cuMemHostAlloc,
  * ::cudaHostGetFlags
+ * [한국어] 등록된 호스트 메모리의 플래그를 조회한다
  */
 CUresult CUDAAPI cuMemHostGetFlags(unsigned int *pFlags, void *p);
 
@@ -5469,6 +5719,7 @@ CUresult CUDAAPI cuMemHostGetFlags(unsigned int *pFlags, void *p);
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cuDeviceGetAttribute, ::cuStreamAttachMemAsync,
  * ::cudaMallocManaged
+ * [한국어] CPU와 GPU가 공유하는 Unified Memory를 할당한다
  */
 CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
                                    unsigned int flags);
@@ -5504,6 +5755,7 @@ CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
  * ::cuDeviceGetAttribute,
  * ::cuDeviceGetPCIBusId,
  * ::cudaDeviceGetByPCIBusId
+ * [한국어] PCI 버스 ID 문자열로 디바이스 핸들을 조회한다
  */
 CUresult CUDAAPI cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId);
 
@@ -5536,6 +5788,7 @@ CUresult CUDAAPI cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId);
  * ::cuDeviceGetAttribute,
  * ::cuDeviceGetByPCIBusId,
  * ::cudaDeviceGetPCIBusId
+ * [한국어] 디바이스의 PCI 버스 ID 문자열을 반환한다
  */
 CUresult CUDAAPI cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev);
 
@@ -5581,6 +5834,7 @@ CUresult CUDAAPI cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev);
  * ::cuIpcOpenMemHandle,
  * ::cuIpcCloseMemHandle,
  * ::cudaIpcGetEventHandle
+ * [한국어] 이벤트에 대한 IPC 핸들을 획득한다
  */
 CUresult CUDAAPI cuIpcGetEventHandle(CUipcEventHandle *pHandle, CUevent event);
 
@@ -5621,6 +5875,7 @@ CUresult CUDAAPI cuIpcGetEventHandle(CUipcEventHandle *pHandle, CUevent event);
  * ::cuIpcOpenMemHandle,
  * ::cuIpcCloseMemHandle,
  * ::cudaIpcOpenEventHandle
+ * [한국어] IPC 이벤트 핸들을 열어 이벤트를 복원한다
  */
 CUresult CUDAAPI cuIpcOpenEventHandle(CUevent *phEvent,
                                       CUipcEventHandle handle);
@@ -5662,6 +5917,7 @@ CUresult CUDAAPI cuIpcOpenEventHandle(CUevent *phEvent,
  * ::cuIpcOpenMemHandle,
  * ::cuIpcCloseMemHandle,
  * ::cudaIpcGetMemHandle
+ * [한국어] 디바이스 메모리에 대한 IPC 핸들을 획득한다
  */
 CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle *pHandle, CUdeviceptr dptr);
 
@@ -5721,6 +5977,7 @@ CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle *pHandle, CUdeviceptr dptr);
  * ::cuCtxEnablePeerAccess,
  * ::cuDeviceCanAccessPeer,
  * ::cudaIpcOpenMemHandle
+ * [한국어] IPC 메모리 핸들을 열어 다른 프로세스의 메모리에 접근한다
  */
 CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr *pdptr, CUipcMemHandle handle,
                                     unsigned int Flags);
@@ -5755,6 +6012,7 @@ CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr *pdptr, CUipcMemHandle handle,
  * ::cuIpcGetMemHandle,
  * ::cuIpcOpenMemHandle,
  * ::cudaIpcCloseMemHandle
+ * [한국어] IPC로 열린 메모리 핸들을 닫는다
  */
 CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr dptr);
 
@@ -5843,6 +6101,7 @@ CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr dptr);
  * ::cuMemHostGetFlags,
  * ::cuMemHostGetDevicePointer,
  * ::cudaHostRegister
+ * [한국어] 기존 호스트 메모리를 CUDA에 등록한다
  */
 CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
                                    unsigned int Flags);
@@ -5870,6 +6129,7 @@ CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
  * \sa
  * ::cuMemHostRegister,
  * ::cudaHostUnregister
+ * [한국어] CUDA에 등록된 호스트 메모리 등록을 해제한다
  */
 CUresult CUDAAPI cuMemHostUnregister(void *p);
 
@@ -5909,6 +6169,7 @@ CUresult CUDAAPI cuMemHostUnregister(void *p);
  * ::cudaMemcpy,
  * ::cudaMemcpyToSymbol,
  * ::cudaMemcpyFromSymbol
+ * [한국어] 동기적 범용 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
 
@@ -5940,6 +6201,7 @@ CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
  * ::cuMemcpyPeerAsync,
  * ::cuMemcpy3DPeerAsync,
  * ::cudaMemcpyPeer
+ * [한국어] 동기적 P2P(peer-to-peer) 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
                               CUdeviceptr srcDevice, CUcontext srcContext,
@@ -5981,6 +6243,7 @@ CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpy,
  * ::cudaMemcpyToSymbol
+ * [한국어] 호스트에서 디바이스로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
                               size_t ByteCount);
@@ -6018,6 +6281,7 @@ CUresult CUDAAPI cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpy,
  * ::cudaMemcpyFromSymbol
+ * [한국어] 디바이스에서 호스트로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice,
                               size_t ByteCount);
@@ -6055,6 +6319,7 @@ CUresult CUDAAPI cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice,
  * ::cudaMemcpy,
  * ::cudaMemcpyToSymbol,
  * ::cudaMemcpyFromSymbol
+ * [한국어] 디바이스 낶으로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                               size_t ByteCount);
@@ -6092,6 +6357,7 @@ CUresult CUDAAPI cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpyToArray
+ * [한국어] 디바이스에서 CUDA 배열로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyDtoA(CUarray dstArray, size_t dstOffset,
                               CUdeviceptr srcDevice, size_t ByteCount);
@@ -6132,6 +6398,7 @@ CUresult CUDAAPI cuMemcpyDtoA(CUarray dstArray, size_t dstOffset,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpyFromArray
+ * [한국어] CUDA 배열에서 디바이스로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
                               size_t srcOffset, size_t ByteCount);
@@ -6170,6 +6437,7 @@ CUresult CUDAAPI cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpyToArray
+ * [한국어] 호스트에서 CUDA 배열로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyHtoA(CUarray dstArray, size_t dstOffset,
                               const void *srcHost, size_t ByteCount);
@@ -6207,6 +6475,7 @@ CUresult CUDAAPI cuMemcpyHtoA(CUarray dstArray, size_t dstOffset,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpyFromArray
+ * [한국어] CUDA 배열에서 호스트로 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
                               size_t ByteCount);
@@ -6249,6 +6518,7 @@ CUresult CUDAAPI cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpyArrayToArray
+ * [한국어] CUDA 배열 간 동기 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyAtoA(CUarray dstArray, size_t dstOffset,
                               CUarray srcArray, size_t srcOffset,
@@ -6416,6 +6686,7 @@ CUresult CUDAAPI cuMemcpyAtoA(CUarray dstArray, size_t dstOffset,
  * ::cudaMemcpy2D,
  * ::cudaMemcpy2DToArray,
  * ::cudaMemcpy2DFromArray
+ * [한국어] 2D 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy2D(const CUDA_MEMCPY2D *pCopy);
 
@@ -6579,6 +6850,7 @@ CUresult CUDAAPI cuMemcpy2D(const CUDA_MEMCPY2D *pCopy);
  * ::cudaMemcpy2D,
  * ::cudaMemcpy2DToArray,
  * ::cudaMemcpy2DFromArray
+ * [한국어] 비정렬 2D 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy);
 
@@ -6753,6 +7025,7 @@ CUresult CUDAAPI cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMemcpy3D
+ * [한국어] 3D 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy3D(const CUDA_MEMCPY3D *pCopy);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -6779,6 +7052,7 @@ CUresult CUDAAPI cuMemcpy3D(const CUDA_MEMCPY3D *pCopy);
  * \sa ::cuMemcpyDtoD, ::cuMemcpyPeer, ::cuMemcpyDtoDAsync, ::cuMemcpyPeerAsync,
  * ::cuMemcpy3DPeerAsync,
  * ::cudaMemcpy3DPeer
+ * [한국어] 3D P2P 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy);
 
@@ -6823,6 +7097,7 @@ CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy);
  * ::cudaMemcpyAsync,
  * ::cudaMemcpyToSymbolAsync,
  * ::cudaMemcpyFromSymbolAsync
+ * [한국어] 비동기 범용 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
                                size_t ByteCount, CUstream hStream);
@@ -6857,6 +7132,7 @@ CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
  * \sa ::cuMemcpyDtoD, ::cuMemcpyPeer, ::cuMemcpy3DPeer, ::cuMemcpyDtoDAsync,
  * ::cuMemcpy3DPeerAsync,
  * ::cudaMemcpyPeerAsync
+ * [한국어] 비동기 P2P 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
                                    CUdeviceptr srcDevice, CUcontext srcContext,
@@ -6902,6 +7178,7 @@ CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemcpyAsync,
  * ::cudaMemcpyToSymbolAsync
+ * [한국어] 비동기 호스트→디바이스 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
                                    size_t ByteCount, CUstream hStream);
@@ -6944,6 +7221,7 @@ CUresult CUDAAPI cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemcpyAsync,
  * ::cudaMemcpyFromSymbolAsync
+ * [한국어] 비동기 디바이스→호스트 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
                                    size_t ByteCount, CUstream hStream);
@@ -6986,6 +7264,7 @@ CUresult CUDAAPI cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
  * ::cudaMemcpyAsync,
  * ::cudaMemcpyToSymbolAsync,
  * ::cudaMemcpyFromSymbolAsync
+ * [한국어] 비동기 디바이스→디바이스 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                                    size_t ByteCount, CUstream hStream);
@@ -7029,6 +7308,7 @@ CUresult CUDAAPI cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemcpyToArrayAsync
+ * [한국어] 비동기 호스트→배열 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
                                    const void *srcHost, size_t ByteCount,
@@ -7072,6 +7352,7 @@ CUresult CUDAAPI cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemcpyFromArrayAsync
+ * [한국어] 비동기 배열→호스트 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray,
                                    size_t srcOffset, size_t ByteCount,
@@ -7244,6 +7525,7 @@ CUresult CUDAAPI cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray,
  * ::cudaMemcpy2DAsync,
  * ::cudaMemcpy2DToArrayAsync,
  * ::cudaMemcpy2DFromArrayAsync
+ * [한국어] 비동기 2D 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream);
 
@@ -7423,6 +7705,7 @@ CUresult CUDAAPI cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream);
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemcpy3DAsync
+ * [한국어] 비동기 3D 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -7451,6 +7734,7 @@ CUresult CUDAAPI cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
  * \sa ::cuMemcpyDtoD, ::cuMemcpyPeer, ::cuMemcpyDtoDAsync, ::cuMemcpyPeerAsync,
  * ::cuMemcpy3DPeerAsync,
  * ::cudaMemcpy3DPeerAsync
+ * [한국어] 비동기 3D P2P 메모리 복사를 수행한다
  */
 CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
                                      CUstream hStream);
@@ -7490,6 +7774,7 @@ CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
  * ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset
+ * [한국어] 8비트 단위로 디바이스 메모리를 동기 초기화한다
  */
 CUresult CUDAAPI cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N);
 
@@ -7526,6 +7811,7 @@ CUresult CUDAAPI cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N);
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset
+ * [한국어] 16비트 단위로 디바이스 메모리를 동기 초기화한다
  */
 CUresult CUDAAPI cuMemsetD16(CUdeviceptr dstDevice, unsigned short us,
                              size_t N);
@@ -7563,6 +7849,7 @@ CUresult CUDAAPI cuMemsetD16(CUdeviceptr dstDevice, unsigned short us,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32Async,
  * ::cudaMemset
+ * [한국어] 32비트 단위로 디바이스 메모리를 동기 초기화한다
  */
 CUresult CUDAAPI cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N);
 
@@ -7604,6 +7891,7 @@ CUresult CUDAAPI cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N);
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2D
+ * [한국어] 2D 8비트 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                               unsigned char uc, size_t Width, size_t Height);
@@ -7647,6 +7935,7 @@ CUresult CUDAAPI cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2D
+ * [한국어] 2D 16비트 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                                unsigned short us, size_t Width, size_t Height);
@@ -7690,6 +7979,7 @@ CUresult CUDAAPI cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2D
+ * [한국어] 2D 32비트 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                                unsigned int ui, size_t Width, size_t Height);
@@ -7729,6 +8019,7 @@ CUresult CUDAAPI cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemsetAsync
+ * [한국어] 8비트 단위 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
                                  size_t N, CUstream hStream);
@@ -7768,6 +8059,7 @@ CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemsetAsync
+ * [한국어] 16비트 단위 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
                                   size_t N, CUstream hStream);
@@ -7807,6 +8099,7 @@ CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32,
  * ::cudaMemsetAsync
+ * [한국어] 32비트 단위 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
                                   size_t N, CUstream hStream);
@@ -7851,6 +8144,7 @@ CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2DAsync
+ * [한국어] 2D 8비트 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
                                    unsigned char uc, size_t Width,
@@ -7897,6 +8191,7 @@ CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2DAsync
+ * [한국어] 2D 16비트 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned short us, size_t Width,
@@ -7943,6 +8238,7 @@ CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemsetD8, ::cuMemsetD8Async, ::cuMemsetD16, ::cuMemsetD16Async,
  * ::cuMemsetD32, ::cuMemsetD32Async,
  * ::cudaMemset2DAsync
+ * [한국어] 2D 32비트 비동기 디바이스 메모리 초기화를 수행한다
  */
 CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned int ui, size_t Width,
@@ -8050,6 +8346,7 @@ CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMallocArray
+ * [한국어] 1D/2D CUDA 배열을 생성한다
  */
 CUresult CUDAAPI cuArrayCreate(CUarray *pHandle,
                                const CUDA_ARRAY_DESCRIPTOR *pAllocateArray);
@@ -8086,6 +8383,7 @@ CUresult CUDAAPI cuArrayCreate(CUarray *pHandle,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaArrayGetInfo
+ * [한국어] CUDA 배열의 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
                                       CUarray hArray);
@@ -8120,6 +8418,7 @@ CUresult CUDAAPI cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaFreeArray
+ * [한국어] CUDA 배열을 소멸시킨다
  */
 CUresult CUDAAPI cuArrayDestroy(CUarray hArray);
 
@@ -8331,6 +8630,7 @@ CUresult CUDAAPI cuArrayDestroy(CUarray hArray);
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaMalloc3DArray
+ * [한국어] 3D CUDA 배열을 생성한다
  */
 CUresult CUDAAPI cuArray3DCreate(CUarray *pHandle,
                                  const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray);
@@ -8371,6 +8671,7 @@ CUresult CUDAAPI cuArray3DCreate(CUarray *pHandle,
  * ::cuMemHostGetDevicePointer, ::cuMemsetD2D8, ::cuMemsetD2D16,
  * ::cuMemsetD2D32, ::cuMemsetD8, ::cuMemsetD16, ::cuMemsetD32,
  * ::cudaArrayGetInfo
+ * [한국어] 3D CUDA 배열의 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuArray3DGetDescriptor(
     CUDA_ARRAY3D_DESCRIPTOR *pArrayDescriptor, CUarray hArray);
@@ -8549,6 +8850,7 @@ CUresult CUDAAPI cuArray3DGetDescriptor(
  * ::cuMipmappedArrayGetLevel,
  * ::cuArrayCreate,
  * ::cudaMallocMipmappedArray
+ * [한국어] CUDA 드라이버 API: Mipmapped배열생성한다
  */
 CUresult CUDAAPI
 cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
@@ -8583,6 +8885,7 @@ cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
  * ::cuMipmappedArrayDestroy,
  * ::cuArrayCreate,
  * ::cudaGetMipmappedArrayLevel
+ * [한국어] MIP맵 배열에서 지정한 레벨의 배열을 추출한다
  */
 CUresult CUDAAPI cuMipmappedArrayGetLevel(CUarray *pLevelArray,
                                           CUmipmappedArray hMipmappedArray,
@@ -8610,6 +8913,7 @@ CUresult CUDAAPI cuMipmappedArrayGetLevel(CUarray *pLevelArray,
  * ::cuMipmappedArrayGetLevel,
  * ::cuArrayCreate,
  * ::cudaFreeMipmappedArray
+ * [한국어] MIP맵 배열을 소멸시킨다
  */
 CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray);
 
@@ -8864,6 +9168,7 @@ CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray);
  * ::cuMemHostRegister,
  * ::cuMemHostUnregister,
  * ::cudaPointerGetAttributes
+ * [한국어] 포인터의 속성 값을 조회한다
  */
 CUresult CUDAAPI cuPointerGetAttribute(void *data,
                                        CUpointer_attribute attribute,
@@ -8941,6 +9246,7 @@ CUresult CUDAAPI cuPointerGetAttribute(void *data,
  * \sa ::cuMemcpy, ::cuMemcpyPeer, ::cuMemcpyAsync,
  * ::cuMemcpy3DPeerAsync, ::cuMemAdvise,
  * ::cudaMemPrefetchAsync
+ * [한국어] Unified Memory 영역을 지정한 디바이스로 비동기 프리페치한다
  */
 CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
                                     CUdevice dstDevice, CUstream hStream);
@@ -9084,6 +9390,7 @@ CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
  * \sa ::cuMemcpy, ::cuMemcpyPeer, ::cuMemcpyAsync,
  * ::cuMemcpy3DPeerAsync, ::cuMemPrefetchAsync,
  * ::cudaMemAdvise
+ * [한국어] Unified Memory 영역에 대한 접근 힌트를 설정한다
  */
 CUresult CUDAAPI cuMemAdvise(CUdeviceptr devPtr, size_t count,
                              CUmem_advise advice, CUdevice device);
@@ -9154,6 +9461,7 @@ CUresult CUDAAPI cuMemAdvise(CUdeviceptr devPtr, size_t count,
  * \sa ::cuMemRangeGetAttributes, ::cuMemPrefetchAsync,
  * ::cuMemAdvise,
  * ::cudaMemRangeGetAttribute
+ * [한국어] 메모리 범위의 속성 값을 조회한다
  */
 CUresult CUDAAPI cuMemRangeGetAttribute(void *data, size_t dataSize,
                                         CUmem_range_attribute attribute,
@@ -9197,6 +9505,7 @@ CUresult CUDAAPI cuMemRangeGetAttribute(void *data, size_t dataSize,
  * \sa ::cuMemRangeGetAttribute, ::cuMemAdvise
  * ::cuMemPrefetchAsync,
  * ::cudaMemRangeGetAttributes
+ * [한국어] 메모리 범위의 다중 속성 값을 조회한다
  */
 CUresult CUDAAPI cuMemRangeGetAttributes(void **data, size_t *dataSizes,
                                          CUmem_range_attribute *attributes,
@@ -9245,6 +9554,7 @@ CUresult CUDAAPI cuMemRangeGetAttributes(void **data, size_t *dataSizes,
  * ::cuMemHostAlloc,
  * ::cuMemHostRegister,
  * ::cuMemHostUnregister
+ * [한국어] 포인터의 속성 값을 설정한다
  */
 CUresult CUDAAPI cuPointerSetAttribute(const void *value,
                                        CUpointer_attribute attribute,
@@ -9294,6 +9604,7 @@ CUresult CUDAAPI cuPointerSetAttribute(const void *value,
  * ::cuPointerGetAttribute,
  * ::cuPointerSetAttribute,
  * ::cudaPointerGetAttributes
+ * [한국어] 포인터의 다중 속성 값을 조회한다
  */
 CUresult CUDAAPI cuPointerGetAttributes(unsigned int numAttributes,
                                         CUpointer_attribute *attributes,
@@ -9347,6 +9658,7 @@ CUresult CUDAAPI cuPointerGetAttributes(unsigned int numAttributes,
  * ::cuStreamAddCallback,
  * ::cudaStreamCreate,
  * ::cudaStreamCreateWithFlags
+ * [한국어] CUDA 스트림을 생성한다
  */
 CUresult CUDAAPI cuStreamCreate(CUstream *phStream, unsigned int Flags);
 
@@ -9397,6 +9709,7 @@ CUresult CUDAAPI cuStreamCreate(CUstream *phStream, unsigned int Flags);
  * ::cuStreamSynchronize,
  * ::cuStreamAddCallback,
  * ::cudaStreamCreateWithPriority
+ * [한국어] 우선순위를 지정하여 CUDA 스트림을 생성한다
  */
 CUresult CUDAAPI cuStreamCreateWithPriority(CUstream *phStream,
                                             unsigned int flags, int priority);
@@ -9429,6 +9742,7 @@ CUresult CUDAAPI cuStreamCreateWithPriority(CUstream *phStream,
  * ::cuCtxGetStreamPriorityRange,
  * ::cuStreamGetFlags,
  * ::cudaStreamGetPriority
+ * [한국어] 스트림의 우선순위를 조회한다
  */
 CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority);
 
@@ -9456,6 +9770,7 @@ CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority);
  * ::cuStreamCreate,
  * ::cuStreamGetPriority,
  * ::cudaStreamGetFlags
+ * [한국어] 스트림 생성 시 지정된 플래그를 조회한다
  */
 CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags);
 
@@ -9505,6 +9820,7 @@ CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags);
  * ::cuStreamAddCallback,
  * ::cudaStreamCreate,
  * ::cudaStreamCreateWithFlags
+ * [한국어] 스트림이 속한 컨텍스트를 조회한다
  */
 CUresult CUDAAPI cuStreamGetCtx(CUstream hStream, CUcontext *pctx);
 
@@ -9539,6 +9855,7 @@ CUresult CUDAAPI cuStreamGetCtx(CUstream hStream, CUcontext *pctx);
  * ::cuStreamAddCallback,
  * ::cuStreamDestroy,
  * ::cudaStreamWaitEvent
+ * [한국어] 스트림이 지정한 이벤트 완료를 기다리도록 한다
  */
 CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
                                    unsigned int Flags);
@@ -9615,6 +9932,7 @@ CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
  * ::cuStreamAttachMemAsync,
  * ::cuStreamLaunchHostFunc,
  * ::cudaStreamAddCallback
+ * [한국어] 스트림 완료 시 호출될 CPU 콜백을 등록한다
  */
 CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
                                      CUstreamCallback callback, void *userData,
@@ -9659,6 +9977,7 @@ CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
  * ::cuStreamIsCapturing,
  * ::cuStreamEndCapture,
  * ::cuThreadExchangeStreamCaptureMode
+ * [한국어] 스트림의 그래프 캡처를 시작한다
  */
 CUresult CUDAAPI cuStreamBeginCapture(CUstream hStream,
                                       CUstreamCaptureMode mode);
@@ -9732,6 +10051,7 @@ CUresult CUDAAPI cuStreamBeginCapture(CUstream hStream,
  *
  * \sa
  * ::cuStreamBeginCapture
+ * [한국어] 현재 스레드의 스트림 캡처 모드를 교체한다
  */
 CUresult CUDAAPI cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode);
 
@@ -9765,6 +10085,7 @@ CUresult CUDAAPI cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode);
  * ::cuStreamCreate,
  * ::cuStreamBeginCapture,
  * ::cuStreamIsCapturing
+ * [한국어] 스트림 캡처를 종료하고 CUDA 그래프를 생성한다
  */
 CUresult CUDAAPI cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
 
@@ -9805,6 +10126,7 @@ CUresult CUDAAPI cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
  * ::cuStreamCreate,
  * ::cuStreamBeginCapture,
  * ::cuStreamEndCapture
+ * [한국어] 스트림의 현재 캡처 상태를 조회한다
  */
 CUresult CUDAAPI cuStreamIsCapturing(CUstream hStream,
                                      CUstreamCaptureStatus *captureStatus);
@@ -9835,6 +10157,7 @@ CUresult CUDAAPI cuStreamIsCapturing(CUstream hStream,
  * \sa
  * ::cuStreamBeginCapture,
  * ::cuStreamIsCapturing
+ * [한국어] 스트림 캡처에 대한 정보를 조회한다
  */
 CUresult CUDAAPI cuStreamGetCaptureInfo(CUstream hStream,
                                         CUstreamCaptureStatus *captureStatus,
@@ -9932,6 +10255,7 @@ CUresult CUDAAPI cuStreamGetCaptureInfo(CUstream hStream,
  * ::cuStreamDestroy,
  * ::cuMemAllocManaged,
  * ::cudaStreamAttachMemAsync
+ * [한국어] Unified Memory 영역을 스트림에 비동기로 연결한다
  */
 CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
                                         size_t length, unsigned int flags);
@@ -9965,6 +10289,7 @@ CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
  * ::cuStreamSynchronize,
  * ::cuStreamAddCallback,
  * ::cudaStreamQuery
+ * [한국어] 스트림의 모든 이전 작업 완료 여부를 폧링한다
  */
 CUresult CUDAAPI cuStreamQuery(CUstream hStream);
 
@@ -9994,6 +10319,7 @@ CUresult CUDAAPI cuStreamQuery(CUstream hStream);
  * ::cuStreamQuery,
  * ::cuStreamAddCallback,
  * ::cudaStreamSynchronize
+ * [한국어] 스트림의 모든 작업이 완료될 때까지 블로킹 대기한다
  */
 CUresult CUDAAPI cuStreamSynchronize(CUstream hStream);
 
@@ -10025,6 +10351,7 @@ CUresult CUDAAPI cuStreamSynchronize(CUstream hStream);
  * ::cuStreamSynchronize,
  * ::cuStreamAddCallback,
  * ::cudaStreamDestroy
+ * [한국어] CUDA 스트림을 소멸시킨다
  */
 CUresult CUDAAPI cuStreamDestroy(CUstream hStream);
 #endif /* __CUDA_API_VERSION >= 4000 */
@@ -10081,6 +10408,7 @@ CUresult CUDAAPI cuStreamDestroy(CUstream hStream);
  * ::cuEventElapsedTime,
  * ::cudaEventCreate,
  * ::cudaEventCreateWithFlags
+ * [한국어] CUDA 이벤트를 생성한다
  */
 CUresult CUDAAPI cuEventCreate(CUevent *phEvent, unsigned int Flags);
 
@@ -10122,6 +10450,7 @@ CUresult CUDAAPI cuEventCreate(CUevent *phEvent, unsigned int Flags);
  * ::cuEventDestroy,
  * ::cuEventElapsedTime,
  * ::cudaEventRecord
+ * [한국어] 이벤트를 스트림의 현재 지점에 기록한다
  */
 CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream);
 
@@ -10154,6 +10483,7 @@ CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream);
  * ::cuEventDestroy,
  * ::cuEventElapsedTime,
  * ::cudaEventQuery
+ * [한국어] 이벤트가 완료되었는지 폧링한다
  */
 CUresult CUDAAPI cuEventQuery(CUevent hEvent);
 
@@ -10185,6 +10515,7 @@ CUresult CUDAAPI cuEventQuery(CUevent hEvent);
  * ::cuEventDestroy,
  * ::cuEventElapsedTime,
  * ::cudaEventSynchronize
+ * [한국어] 이벤트가 완료될 때까지 블로킹 대기한다
  */
 CUresult CUDAAPI cuEventSynchronize(CUevent hEvent);
 
@@ -10215,6 +10546,7 @@ CUresult CUDAAPI cuEventSynchronize(CUevent hEvent);
  * ::cuEventSynchronize,
  * ::cuEventElapsedTime,
  * ::cudaEventDestroy
+ * [한국어] CUDA 이벤트를 소멸시킨다
  */
 CUresult CUDAAPI cuEventDestroy(CUevent hEvent);
 #endif /* __CUDA_API_VERSION >= 4000 */
@@ -10260,6 +10592,7 @@ CUresult CUDAAPI cuEventDestroy(CUevent hEvent);
  * ::cuEventSynchronize,
  * ::cuEventDestroy,
  * ::cudaEventElapsedTime
+ * [한국어] 두 이벤트 사이의 경과 시간을 밀리초 단위로 측정한다
  */
 CUresult CUDAAPI cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
                                     CUevent hEnd);
@@ -10403,6 +10736,7 @@ CUresult CUDAAPI cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
 * \sa ::cuDestroyExternalMemory,
 * ::cuExternalMemoryGetMappedBuffer,
 * ::cuExternalMemoryGetMappedMipmappedArray
+ * [한국어] CUDA 드라이버 API: ImportExternalMemory한다
 */
 CUresult CUDAAPI
 cuImportExternalMemory(CUexternalMemory *extMem_out,
@@ -10458,6 +10792,7 @@ cuImportExternalMemory(CUexternalMemory *extMem_out,
  * \sa ::cuImportExternalMemory
  * ::cuDestroyExternalMemory,
  * ::cuExternalMemoryGetMappedMipmappedArray
+ * [한국어] 외부 메모리 핸들을 디바이스 버퍼로 매핑한다
  */
 CUresult CUDAAPI cuExternalMemoryGetMappedBuffer(
     CUdeviceptr *devPtr, CUexternalMemory extMem,
@@ -10510,6 +10845,7 @@ CUresult CUDAAPI cuExternalMemoryGetMappedBuffer(
  * \sa ::cuImportExternalMemory
  * ::cuDestroyExternalMemory,
  * ::cuExternalMemoryGetMappedBuffer
+ * [한국어] 외부 메모리 핸들을 MIP맵 배열로 매핑한다
  */
 CUresult CUDAAPI cuExternalMemoryGetMappedMipmappedArray(
     CUmipmappedArray *mipmap, CUexternalMemory extMem,
@@ -10534,6 +10870,7 @@ CUresult CUDAAPI cuExternalMemoryGetMappedMipmappedArray(
  * \sa ::cuImportExternalMemory
  * ::cuExternalMemoryGetMappedBuffer,
  * ::cuExternalMemoryGetMappedMipmappedArray
+ * [한국어] 외부 메모리 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuDestroyExternalMemory(CUexternalMemory extMem);
 
@@ -10631,6 +10968,7 @@ CUresult CUDAAPI cuDestroyExternalMemory(CUexternalMemory extMem);
  * \sa ::cuDestroyExternalSemaphore,
  * ::cuSignalExternalSemaphoresAsync,
  * ::cuWaitExternalSemaphoresAsync
+ * [한국어] 외부 동기화 객체를 CUDA에 임포트한다
  */
 CUresult CUDAAPI cuImportExternalSemaphore(
     CUexternalSemaphore *extSem_out,
@@ -10671,6 +11009,7 @@ CUresult CUDAAPI cuImportExternalSemaphore(
  * \sa ::cuImportExternalSemaphore,
  * ::cuDestroyExternalSemaphore,
  * ::cuWaitExternalSemaphoresAsync
+ * [한국어] 외부 세마포어에 비동기 시그널을 본낸다
  */
 CUresult CUDAAPI cuSignalExternalSemaphoresAsync(
     const CUexternalSemaphore *extSemArray,
@@ -10716,6 +11055,7 @@ CUresult CUDAAPI cuSignalExternalSemaphoresAsync(
  * \sa ::cuImportExternalSemaphore,
  * ::cuDestroyExternalSemaphore,
  * ::cuSignalExternalSemaphoresAsync
+ * [한국어] 외부 세마포어 완료를 비동기로 대기한다
  */
 CUresult CUDAAPI cuWaitExternalSemaphoresAsync(
     const CUexternalSemaphore *extSemArray,
@@ -10740,6 +11080,7 @@ CUresult CUDAAPI cuWaitExternalSemaphoresAsync(
  * \sa ::cuImportExternalSemaphore,
  * ::cuSignalExternalSemaphoresAsync,
  * ::cuWaitExternalSemaphoresAsync
+ * [한국어] 외부 세마포어 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuDestroyExternalSemaphore(CUexternalSemaphore extSem);
 
@@ -10828,6 +11169,7 @@ CUresult CUDAAPI cuDestroyExternalSemaphore(CUexternalSemaphore extSem);
  * ::cuStreamBatchMemOp,
  * ::cuMemHostRegister,
  * ::cuStreamWaitEvent
+ * [한국어] 32비트 메모리 값이 조건을 만족할 때까지 스트림을 대기시킨다
  */
 CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
                                      cuuint32_t value, unsigned int flags);
@@ -10864,6 +11206,7 @@ CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
  * ::cuStreamBatchMemOp,
  * ::cuMemHostRegister,
  * ::cuStreamWaitEvent
+ * [한국어] 64비트 메모리 값이 조건을 만족할 때까지 스트림을 대기시킨다
  */
 CUresult CUDAAPI cuStreamWaitValue64(CUstream stream, CUdeviceptr addr,
                                      cuuint64_t value, unsigned int flags);
@@ -10900,6 +11243,7 @@ CUresult CUDAAPI cuStreamWaitValue64(CUstream stream, CUdeviceptr addr,
  * ::cuStreamBatchMemOp,
  * ::cuMemHostRegister,
  * ::cuEventRecord
+ * [한국어] 스트림 순서에 따라 32비트 메모리 값을 쓴다
  */
 CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
                                       cuuint32_t value, unsigned int flags);
@@ -10935,6 +11279,7 @@ CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
  * ::cuStreamBatchMemOp,
  * ::cuMemHostRegister,
  * ::cuEventRecord
+ * [한국어] 스트림 순서에 따라 64비트 메모리 값을 쓴다
  */
 CUresult CUDAAPI cuStreamWriteValue64(CUstream stream, CUdeviceptr addr,
                                       cuuint64_t value, unsigned int flags);
@@ -10972,6 +11317,7 @@ CUresult CUDAAPI cuStreamWriteValue64(CUstream stream, CUdeviceptr addr,
  * ::cuStreamWriteValue32,
  * ::cuStreamWriteValue64,
  * ::cuMemHostRegister
+ * [한국어] 여러 스트림 메모리 연산을 일괄 제출한다
  */
 CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
                                     CUstreamBatchMemOpParams *paramArray,
@@ -11048,6 +11394,7 @@ CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
  * ::cuLaunchKernel,
  * ::cudaFuncGetAttributes
  * ::cudaFuncSetAttribute
+ * [한국어] 커널 함수의 속성 값을 조회한다
  */
 CUresult CUDAAPI cuFuncGetAttribute(int *pi, CUfunction_attribute attrib,
                                     CUfunction hfunc);
@@ -11098,6 +11445,7 @@ CUresult CUDAAPI cuFuncGetAttribute(int *pi, CUfunction_attribute attrib,
  * ::cuLaunchKernel,
  * ::cudaFuncGetAttributes
  * ::cudaFuncSetAttribute
+ * [한국어] 커널 함수의 속성 값을 설정한다
  */
 CUresult CUDAAPI cuFuncSetAttribute(CUfunction hfunc,
                                     CUfunction_attribute attrib, int value);
@@ -11146,6 +11494,7 @@ CUresult CUDAAPI cuFuncSetAttribute(CUfunction hfunc,
  * ::cuFuncGetAttribute,
  * ::cuLaunchKernel,
  * ::cudaFuncSetCacheConfig
+ * [한국어] 커널 함수의 L1/공유메모리 캐시 설정을 지정한다
  */
 CUresult CUDAAPI cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config);
 
@@ -11199,6 +11548,7 @@ CUresult CUDAAPI cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config);
  * ::cuFuncGetAttribute,
  * ::cuLaunchKernel,
  * ::cudaFuncSetSharedMemConfig
+ * [한국어] 커널 함수의 공유 메모리 뱅크 설정을 지정한다
  */
 CUresult CUDAAPI cuFuncSetSharedMemConfig(CUfunction hfunc,
                                           CUsharedconfig config);
@@ -11315,6 +11665,7 @@ CUresult CUDAAPI cuFuncSetSharedMemConfig(CUfunction hfunc,
  * ::cuFuncSetCacheConfig,
  * ::cuFuncGetAttribute,
  * ::cudaLaunchKernel
+ * [한국어] 지정한 그리드/블록 차원으로 GPU 커널을 실행한다
  */
 CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                                 unsigned int gridDimY, unsigned int gridDimZ,
@@ -11402,6 +11753,7 @@ CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
  * ::cuFuncGetAttribute,
  * ::cuLaunchCooperativeKernelMultiDevice,
  * ::cudaLaunchCooperativeKernel
+ * [한국어] Cooperative Groups를 사용하는 커널을 실행한다
  */
 CUresult CUDAAPI cuLaunchCooperativeKernel(
     CUfunction f, unsigned int gridDimX, unsigned int gridDimY,
@@ -11592,6 +11944,7 @@ CUresult CUDAAPI cuLaunchCooperativeKernel(
  * ::cuFuncGetAttribute,
  * ::cuLaunchCooperativeKernel,
  * ::cudaLaunchCooperativeKernelMultiDevice
+ * [한국어] 여러 디바이스에 걸쳐 Cooperative 커널을 실행한다
  */
 CUresult CUDAAPI cuLaunchCooperativeKernelMultiDevice(
     CUDA_LAUNCH_PARAMS *launchParamsList, unsigned int numDevices,
@@ -11663,6 +12016,7 @@ CUresult CUDAAPI cuLaunchCooperativeKernelMultiDevice(
  * ::cuMemAllocManaged,
  * ::cuStreamAttachMemAsync,
  * ::cuStreamAddCallback
+ * [한국어] 스트림에 호스트 CPU 함수를 등록한다
  */
 CUresult CUDAAPI cuLaunchHostFunc(CUstream hStream, CUhostFn fn,
                                   void *userData);
@@ -12091,6 +12445,7 @@ __CUDA_DEPRECATED CUresult CUDAAPI cuParamSetTexRef(CUfunction hfunc,
  * ::cuGraphGetRootNodes,
  * ::cuGraphGetEdges,
  * ::cuGraphClone
+ * [한국어] CUDA 그래프 객체를 생성한다
  */
 CUresult CUDAAPI cuGraphCreate(CUgraph *phGraph, unsigned int flags);
 
@@ -12194,6 +12549,7 @@ CUresult CUDAAPI cuGraphCreate(CUgraph *phGraph, unsigned int flags);
  * ::cuGraphAddHostNode,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphAddMemsetNode
+ * [한국어] 그래프에 커널 실행 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddKernelNode(
     CUgraphNode *phGraphNode, CUgraph hGraph, const CUgraphNode *dependencies,
@@ -12228,6 +12584,7 @@ CUresult CUDAAPI cuGraphAddKernelNode(
  * ::cuLaunchKernel,
  * ::cuGraphAddKernelNode,
  * ::cuGraphKernelNodeSetParams
+ * [한국어] 커널 노드의 파라미터를 조회한다
  */
 CUresult CUDAAPI cuGraphKernelNodeGetParams(
     CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
@@ -12252,6 +12609,7 @@ CUresult CUDAAPI cuGraphKernelNodeGetParams(
  * ::cuLaunchKernel,
  * ::cuGraphAddKernelNode,
  * ::cuGraphKernelNodeGetParams
+ * [한국어] 커널 노드의 파라미터를 설정한다
  */
 CUresult CUDAAPI cuGraphKernelNodeSetParams(
     CUgraphNode hNode, const CUDA_KERNEL_NODE_PARAMS *nodeParams);
@@ -12304,6 +12662,7 @@ CUresult CUDAAPI cuGraphKernelNodeSetParams(
  * ::cuGraphAddKernelNode,
  * ::cuGraphAddHostNode,
  * ::cuGraphAddMemsetNode
+ * [한국어] 그래프에 메모리 복사 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddMemcpyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                                       const CUgraphNode *dependencies,
@@ -12331,6 +12690,7 @@ CUresult CUDAAPI cuGraphAddMemcpyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
  * ::cuMemcpy3D,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphMemcpyNodeSetParams
+ * [한국어] 메모리 복사 노드의 파라미터를 조회한다
  */
 CUresult CUDAAPI cuGraphMemcpyNodeGetParams(CUgraphNode hNode,
                                             CUDA_MEMCPY3D *nodeParams);
@@ -12355,6 +12715,7 @@ CUresult CUDAAPI cuGraphMemcpyNodeGetParams(CUgraphNode hNode,
  * ::cuMemcpy3D,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphMemcpyNodeGetParams
+ * [한국어] 메모리 복사 노드의 파라미터를 설정한다
  */
 CUresult CUDAAPI cuGraphMemcpyNodeSetParams(CUgraphNode hNode,
                                             const CUDA_MEMCPY3D *nodeParams);
@@ -12399,6 +12760,7 @@ CUresult CUDAAPI cuGraphMemcpyNodeSetParams(CUgraphNode hNode,
  * ::cuGraphAddKernelNode,
  * ::cuGraphAddHostNode,
  * ::cuGraphAddMemcpyNode
+ * [한국어] 그래프에 메모리 초기화 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddMemsetNode(
     CUgraphNode *phGraphNode, CUgraph hGraph, const CUgraphNode *dependencies,
@@ -12425,6 +12787,7 @@ CUresult CUDAAPI cuGraphAddMemsetNode(
  * ::cuMemsetD2D32,
  * ::cuGraphAddMemsetNode,
  * ::cuGraphMemsetNodeSetParams
+ * [한국어] 메모리 초기화 노드의 파라미터를 조회한다
  */
 CUresult CUDAAPI cuGraphMemsetNodeGetParams(
     CUgraphNode hNode, CUDA_MEMSET_NODE_PARAMS *nodeParams);
@@ -12449,6 +12812,7 @@ CUresult CUDAAPI cuGraphMemsetNodeGetParams(
  * ::cuMemsetD2D32,
  * ::cuGraphAddMemsetNode,
  * ::cuGraphMemsetNodeGetParams
+ * [한국어] 메모리 초기화 노드의 파라미터를 설정한다
  */
 CUresult CUDAAPI cuGraphMemsetNodeSetParams(
     CUgraphNode hNode, const CUDA_MEMSET_NODE_PARAMS *nodeParams);
@@ -12492,6 +12856,7 @@ CUresult CUDAAPI cuGraphMemsetNodeSetParams(
  * ::cuGraphAddKernelNode,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphAddMemsetNode
+ * [한국어] 그래프에 호스트 함수 실행 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddHostNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                                     const CUgraphNode *dependencies,
@@ -12518,6 +12883,7 @@ CUresult CUDAAPI cuGraphAddHostNode(CUgraphNode *phGraphNode, CUgraph hGraph,
  * ::cuLaunchHostFunc,
  * ::cuGraphAddHostNode,
  * ::cuGraphHostNodeSetParams
+ * [한국어] 호스트 노드의 파라미터를 조회한다
  */
 CUresult CUDAAPI cuGraphHostNodeGetParams(CUgraphNode hNode,
                                           CUDA_HOST_NODE_PARAMS *nodeParams);
@@ -12542,6 +12908,7 @@ CUresult CUDAAPI cuGraphHostNodeGetParams(CUgraphNode hNode,
  * ::cuLaunchHostFunc,
  * ::cuGraphAddHostNode,
  * ::cuGraphHostNodeGetParams
+ * [한국어] 호스트 노드의 파라미터를 설정한다
  */
 CUresult CUDAAPI cuGraphHostNodeSetParams(
     CUgraphNode hNode, const CUDA_HOST_NODE_PARAMS *nodeParams);
@@ -12582,6 +12949,7 @@ CUresult CUDAAPI cuGraphHostNodeSetParams(
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphAddMemsetNode,
  * ::cuGraphClone
+ * [한국어] 그래프에 자식 그래프 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddChildGraphNode(CUgraphNode *phGraphNode,
                                           CUgraph hGraph,
@@ -12610,6 +12978,7 @@ CUresult CUDAAPI cuGraphAddChildGraphNode(CUgraphNode *phGraphNode,
  * \sa
  * ::cuGraphAddChildGraphNode,
  * ::cuGraphNodeFindInClone
+ * [한국어] 자식 그래프 노드가 참조하는 그래프를 조회한다
  */
 CUresult CUDAAPI cuGraphChildGraphNodeGetGraph(CUgraphNode hNode,
                                                CUgraph *phGraph);
@@ -12649,6 +13018,7 @@ CUresult CUDAAPI cuGraphChildGraphNodeGetGraph(CUgraphNode hNode,
  * ::cuGraphAddHostNode,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphAddMemsetNode
+ * [한국어] 그래프에 빈(no-op) 노드를 추가한다
  */
 CUresult CUDAAPI cuGraphAddEmptyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                                      const CUgraphNode *dependencies,
@@ -12677,6 +13047,7 @@ CUresult CUDAAPI cuGraphAddEmptyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
  * \sa
  * ::cuGraphCreate,
  * ::cuGraphNodeFindInClone
+ * [한국어] CUDA 그래프를 복제한다
  */
 CUresult CUDAAPI cuGraphClone(CUgraph *phGraphClone, CUgraph originalGraph);
 
@@ -12704,6 +13075,7 @@ CUresult CUDAAPI cuGraphClone(CUgraph *phGraphClone, CUgraph originalGraph);
  *
  * \sa
  * ::cuGraphClone
+ * [한국어] 복제된 그래프에서 원본 노드에 대응하는 노드를 찾는다
  */
 CUresult CUDAAPI cuGraphNodeFindInClone(CUgraphNode *phNode,
                                         CUgraphNode hOriginalNode,
@@ -12737,6 +13109,7 @@ CUresult CUDAAPI cuGraphNodeFindInClone(CUgraphNode *phNode,
  * ::cuGraphMemcpyNodeSetParams,
  * ::cuGraphMemsetNodeGetParams,
  * ::cuGraphMemsetNodeSetParams
+ * [한국어] 그래프 노드의 타입을 조회한다
  */
 CUresult CUDAAPI cuGraphNodeGetType(CUgraphNode hNode, CUgraphNodeType *type);
 
@@ -12769,6 +13142,7 @@ CUresult CUDAAPI cuGraphNodeGetType(CUgraphNode hNode, CUgraphNodeType *type);
  * ::cuGraphNodeGetType,
  * ::cuGraphNodeGetDependencies,
  * ::cuGraphNodeGetDependentNodes
+ * [한국어] 그래프에 포함된 모든 노드를 조회한다
  */
 CUresult CUDAAPI cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes,
                                  size_t *numNodes);
@@ -12802,6 +13176,7 @@ CUresult CUDAAPI cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes,
  * ::cuGraphNodeGetType,
  * ::cuGraphNodeGetDependencies,
  * ::cuGraphNodeGetDependentNodes
+ * [한국어] 그래프의 루트 노드 목록을 조회한다
  */
 CUresult CUDAAPI cuGraphGetRootNodes(CUgraph hGraph, CUgraphNode *rootNodes,
                                      size_t *numRootNodes);
@@ -12838,6 +13213,7 @@ CUresult CUDAAPI cuGraphGetRootNodes(CUgraph hGraph, CUgraphNode *rootNodes,
  * ::cuGraphRemoveDependencies,
  * ::cuGraphNodeGetDependencies,
  * ::cuGraphNodeGetDependentNodes
+ * [한국어] 그래프의 의존성 엣지 목록을 조회한다
  */
 CUresult CUDAAPI cuGraphGetEdges(CUgraph hGraph, CUgraphNode *from,
                                  CUgraphNode *to, size_t *numEdges);
@@ -12871,6 +13247,7 @@ CUresult CUDAAPI cuGraphGetEdges(CUgraph hGraph, CUgraphNode *from,
  * ::cuGraphGetEdges,
  * ::cuGraphAddDependencies,
  * ::cuGraphRemoveDependencies
+ * [한국어] 노드의 선행 의존 노드 목록을 조회한다
  */
 CUresult CUDAAPI cuGraphNodeGetDependencies(CUgraphNode hNode,
                                             CUgraphNode *dependencies,
@@ -12905,6 +13282,7 @@ CUresult CUDAAPI cuGraphNodeGetDependencies(CUgraphNode hNode,
  * ::cuGraphGetEdges,
  * ::cuGraphAddDependencies,
  * ::cuGraphRemoveDependencies
+ * [한국어] 노드에 의존하는 후속 노드 목록을 조회한다
  */
 CUresult CUDAAPI cuGraphNodeGetDependentNodes(CUgraphNode hNode,
                                               CUgraphNode *dependentNodes,
@@ -12936,6 +13314,7 @@ CUresult CUDAAPI cuGraphNodeGetDependentNodes(CUgraphNode hNode,
  * ::cuGraphGetEdges,
  * ::cuGraphNodeGetDependencies,
  * ::cuGraphNodeGetDependentNodes
+ * [한국어] 그래프에 노드 간 의존성 엣지를 추가한다
  */
 CUresult CUDAAPI cuGraphAddDependencies(CUgraph hGraph, const CUgraphNode *from,
                                         const CUgraphNode *to,
@@ -12967,6 +13346,7 @@ CUresult CUDAAPI cuGraphAddDependencies(CUgraph hGraph, const CUgraphNode *from,
  * ::cuGraphGetEdges,
  * ::cuGraphNodeGetDependencies,
  * ::cuGraphNodeGetDependentNodes
+ * [한국어] 그래프에서 노드 간 의존성 엣지를 제거한다
  */
 CUresult CUDAAPI cuGraphRemoveDependencies(CUgraph hGraph,
                                            const CUgraphNode *from,
@@ -12994,6 +13374,7 @@ CUresult CUDAAPI cuGraphRemoveDependencies(CUgraph hGraph,
  * ::cuGraphAddHostNode,
  * ::cuGraphAddMemcpyNode,
  * ::cuGraphAddMemsetNode
+ * [한국어] 그래프 노드를 소멸시킨다
  */
 CUresult CUDAAPI cuGraphDestroyNode(CUgraphNode hNode);
 
@@ -13030,6 +13411,7 @@ CUresult CUDAAPI cuGraphDestroyNode(CUgraphNode hNode);
  * ::cuGraphCreate,
  * ::cuGraphLaunch,
  * ::cuGraphExecDestroy
+ * [한국어] 그래프를 실행 가능한 객체(CUgraphExec)로 인스턴스화한다
  */
 CUresult CUDAAPI cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
                                     CUgraphNode *phErrorNode, char *logBuffer,
@@ -13065,6 +13447,7 @@ CUresult CUDAAPI cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
  * ::cuGraphAddKernelNode,
  * ::cuGraphKernelNodeSetParams,
  * ::cuGraphInstantiate
+ * [한국어] CUDA 드라이버 API: GraphExecKernelNode설정Params한다
  */
 CUresult CUDAAPI
 cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNode,
@@ -13095,6 +13478,7 @@ cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNode,
  * \sa
  * ::cuGraphInstantiate,
  * ::cuGraphExecDestroy
+ * [한국어] 실행 가능한 그래프를 지정한 스트림에서 시작한다
  */
 CUresult CUDAAPI cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
 
@@ -13119,6 +13503,7 @@ CUresult CUDAAPI cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
  * \sa
  * ::cuGraphInstantiate,
  * ::cuGraphLaunch
+ * [한국어] 실행 가능한 그래프 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuGraphExecDestroy(CUgraphExec hGraphExec);
 
@@ -13139,6 +13524,7 @@ CUresult CUDAAPI cuGraphExecDestroy(CUgraphExec hGraphExec);
  *
  * \sa
  * ::cuGraphCreate
+ * [한국어] CUDA 그래프 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuGraphDestroy(CUgraph hGraph);
 /** @} */ /* END CUDA_GRAPH */
@@ -13180,6 +13566,7 @@ CUresult CUDAAPI cuGraphDestroy(CUgraph hGraph);
  *
  * \sa
  * ::cudaOccupancyMaxActiveBlocksPerMultiprocessor
+ * [한국어] SM당 최대 활성 블록 수를 계산한다
  */
 CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessor(
     int *numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize);
@@ -13224,6 +13611,7 @@ CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessor(
  *
  * \sa
  * ::cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags
+ * [한국어] 플래그를 지정하여 SM당 최대 활성 블록 수를 계산한다
  */
 CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     int *numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize,
@@ -13280,6 +13668,7 @@ CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
  *
  * \sa
  * ::cudaOccupancyMaxPotentialBlockSize
+ * [한국어] 잠재적 최대 블록 크기를 휴리스틱으로 계산한다
  */
 CUresult CUDAAPI cuOccupancyMaxPotentialBlockSize(
     int *minGridSize, int *blockSize, CUfunction func,
@@ -13330,6 +13719,7 @@ CUresult CUDAAPI cuOccupancyMaxPotentialBlockSize(
  *
  * \sa
  * ::cudaOccupancyMaxPotentialBlockSizeWithFlags
+ * [한국어] 플래그를 지정하여 잠재적 최대 블록 크기를 계산한다
  */
 CUresult CUDAAPI cuOccupancyMaxPotentialBlockSizeWithFlags(
     int *minGridSize, int *blockSize, CUfunction func,
@@ -13379,6 +13769,7 @@ CUresult CUDAAPI cuOccupancyMaxPotentialBlockSizeWithFlags(
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToArray
+ * [한국어] 텍스처 참조에 CUDA 배열을 바인딩한다
  */
 CUresult CUDAAPI cuTexRefSetArray(CUtexref hTexRef, CUarray hArray,
                                   unsigned int Flags);
@@ -13411,6 +13802,7 @@ CUresult CUDAAPI cuTexRefSetArray(CUtexref hTexRef, CUarray hArray,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조에 MIP맵 배열을 바인딩한다
  */
 CUresult CUDAAPI cuTexRefSetMipmappedArray(CUtexref hTexRef,
                                            CUmipmappedArray hMipmappedArray,
@@ -13460,6 +13852,7 @@ CUresult CUDAAPI cuTexRefSetMipmappedArray(CUtexref hTexRef,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTexture
+ * [한국어] 텍스처 참조에 디바이스 메모리 주소를 바인딩한다
  */
 CUresult CUDAAPI cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
                                     CUdeviceptr dptr, size_t bytes);
@@ -13516,6 +13909,7 @@ CUresult CUDAAPI cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTexture2D
+ * [한국어] 텍스처 참조에 2D 디바이스 메모리를 바인딩한다
  */
 CUresult CUDAAPI cuTexRefSetAddress2D(CUtexref hTexRef,
                                       const CUDA_ARRAY_DESCRIPTOR *desc,
@@ -13554,6 +13948,7 @@ CUresult CUDAAPI cuTexRefSetAddress2D(CUtexref hTexRef,
  * ::cudaBindTexture2D,
  * ::cudaBindTextureToArray,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 데이터 포맷을 설정한다
  */
 CUresult CUDAAPI cuTexRefSetFormat(CUtexref hTexRef, CUarray_format fmt,
                                    int NumPackedComponents);
@@ -13601,6 +13996,7 @@ CUresult CUDAAPI cuTexRefSetFormat(CUtexref hTexRef, CUarray_format fmt,
  * ::cudaBindTexture2D,
  * ::cudaBindTextureToArray,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 주소 모드를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetAddressMode(CUtexref hTexRef, int dim,
                                         CUaddress_mode am);
@@ -13638,6 +14034,7 @@ CUresult CUDAAPI cuTexRefSetAddressMode(CUtexref hTexRef, int dim,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToArray
+ * [한국어] 텍스처 참조의 필터 모드를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetFilterMode(CUtexref hTexRef, CUfilter_mode fm);
 
@@ -13676,6 +14073,7 @@ CUresult CUDAAPI cuTexRefSetFilterMode(CUtexref hTexRef, CUfilter_mode fm);
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 MIP맵 필터 모드를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetMipmapFilterMode(CUtexref hTexRef,
                                              CUfilter_mode fm);
@@ -13707,6 +14105,7 @@ CUresult CUDAAPI cuTexRefSetMipmapFilterMode(CUtexref hTexRef,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 MIP맵 레벨 바이어스를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetMipmapLevelBias(CUtexref hTexRef, float bias);
 
@@ -13739,6 +14138,7 @@ CUresult CUDAAPI cuTexRefSetMipmapLevelBias(CUtexref hTexRef, float bias);
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 MIP맵 레벨 클램프를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetMipmapLevelClamp(CUtexref hTexRef,
                                              float minMipmapLevelClamp,
@@ -13771,6 +14171,7 @@ CUresult CUDAAPI cuTexRefSetMipmapLevelClamp(CUtexref hTexRef,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat,
  * ::cudaBindTextureToArray,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 최대 이방성 필터링 정도를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetMaxAnisotropy(CUtexref hTexRef,
                                           unsigned int maxAniso);
@@ -13807,6 +14208,7 @@ CUresult CUDAAPI cuTexRefSetMaxAnisotropy(CUtexref hTexRef,
  * ::cudaBindTexture2D,
  * ::cudaBindTextureToArray,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 경계 색상을 설정한다
  */
 CUresult CUDAAPI cuTexRefSetBorderColor(CUtexref hTexRef, float *pBorderColor);
 
@@ -13848,6 +14250,7 @@ CUresult CUDAAPI cuTexRefSetBorderColor(CUtexref hTexRef, float *pBorderColor);
  * ::cudaBindTexture2D,
  * ::cudaBindTextureToArray,
  * ::cudaBindTextureToMipmappedArray
+ * [한국어] 텍스처 참조의 동작 플래그를 설정한다
  */
 CUresult CUDAAPI cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags);
 
@@ -13876,6 +14279,7 @@ CUresult CUDAAPI cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags);
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조에 바인딩된 디바이스 주소를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef);
 #endif /* __CUDA_API_VERSION >= 3020 */
@@ -13904,6 +14308,7 @@ CUresult CUDAAPI cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef);
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조에 바인딩된 배열을 조회한다
  */
 CUresult CUDAAPI cuTexRefGetArray(CUarray *phArray, CUtexref hTexRef);
 
@@ -13931,6 +14336,7 @@ CUresult CUDAAPI cuTexRefGetArray(CUarray *phArray, CUtexref hTexRef);
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조에 바인딩된 MIP맵 배열을 조회한다
  */
 CUresult CUDAAPI cuTexRefGetMipmappedArray(CUmipmappedArray *phMipmappedArray,
                                            CUtexref hTexRef);
@@ -13960,6 +14366,7 @@ CUresult CUDAAPI cuTexRefGetMipmappedArray(CUmipmappedArray *phMipmappedArray,
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 주소 모드를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetAddressMode(CUaddress_mode *pam, CUtexref hTexRef,
                                         int dim);
@@ -13987,6 +14394,7 @@ CUresult CUDAAPI cuTexRefGetAddressMode(CUaddress_mode *pam, CUtexref hTexRef,
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 필터 모드를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetFilterMode(CUfilter_mode *pfm, CUtexref hTexRef);
 
@@ -14015,6 +14423,7 @@ CUresult CUDAAPI cuTexRefGetFilterMode(CUfilter_mode *pfm, CUtexref hTexRef);
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags
+ * [한국어] 텍스처 참조의 데이터 포맷을 조회한다
  */
 CUresult CUDAAPI cuTexRefGetFormat(CUarray_format *pFormat, int *pNumChannels,
                                    CUtexref hTexRef);
@@ -14042,6 +14451,7 @@ CUresult CUDAAPI cuTexRefGetFormat(CUarray_format *pFormat, int *pNumChannels,
  * ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 MIP맵 필터 모드를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetMipmapFilterMode(CUfilter_mode *pfm,
                                              CUtexref hTexRef);
@@ -14069,6 +14479,7 @@ CUresult CUDAAPI cuTexRefGetMipmapFilterMode(CUfilter_mode *pfm,
  * ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 MIP맵 레벨 바이어스를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetMipmapLevelBias(float *pbias, CUtexref hTexRef);
 
@@ -14097,6 +14508,7 @@ CUresult CUDAAPI cuTexRefGetMipmapLevelBias(float *pbias, CUtexref hTexRef);
  * ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 MIP맵 레벨 클램프를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetMipmapLevelClamp(float *pminMipmapLevelClamp,
                                              float *pmaxMipmapLevelClamp,
@@ -14125,6 +14537,7 @@ CUresult CUDAAPI cuTexRefGetMipmapLevelClamp(float *pminMipmapLevelClamp,
  * ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFlags, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 최대 이방성 값을 조회한다
  */
 CUresult CUDAAPI cuTexRefGetMaxAnisotropy(int *pmaxAniso, CUtexref hTexRef);
 
@@ -14154,6 +14567,7 @@ CUresult CUDAAPI cuTexRefGetMaxAnisotropy(int *pmaxAniso, CUtexref hTexRef);
  *
  * \sa ::cuTexRefSetAddressMode,
  * ::cuTexRefSetAddressMode, ::cuTexRefSetBorderColor
+ * [한국어] 텍스처 참조의 경계 색상을 조회한다
  */
 CUresult CUDAAPI cuTexRefGetBorderColor(float *pBorderColor, CUtexref hTexRef);
 
@@ -14179,6 +14593,7 @@ CUresult CUDAAPI cuTexRefGetBorderColor(float *pBorderColor, CUtexref hTexRef);
  * ::cuTexRefSetFilterMode, ::cuTexRefSetFlags, ::cuTexRefSetFormat,
  * ::cuTexRefGetAddress, ::cuTexRefGetAddressMode, ::cuTexRefGetArray,
  * ::cuTexRefGetFilterMode, ::cuTexRefGetFormat
+ * [한국어] 텍스처 참조의 플래그를 조회한다
  */
 CUresult CUDAAPI cuTexRefGetFlags(unsigned int *pFlags, CUtexref hTexRef);
 
@@ -14204,6 +14619,7 @@ CUresult CUDAAPI cuTexRefGetFlags(unsigned int *pFlags, CUtexref hTexRef);
  * ::CUDA_ERROR_INVALID_VALUE
  *
  * \sa ::cuTexRefDestroy
+ * [한국어] 텍스처 참조 객체를 생성한다
  */
 CUresult CUDAAPI cuTexRefCreate(CUtexref *pTexRef);
 
@@ -14224,6 +14640,7 @@ CUresult CUDAAPI cuTexRefCreate(CUtexref *pTexRef);
  * ::CUDA_ERROR_INVALID_VALUE
  *
  * \sa ::cuTexRefCreate
+ * [한국어] 텍스처 참조 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuTexRefDestroy(CUtexref hTexRef);
 
@@ -14267,6 +14684,7 @@ CUresult CUDAAPI cuTexRefDestroy(CUtexref hTexRef);
  * ::cuModuleGetSurfRef,
  * ::cuSurfRefGetArray,
  * ::cudaBindSurfaceToArray
+ * [한국어] 서피스 참조에 CUDA 배열을 바인딩한다
  */
 CUresult CUDAAPI cuSurfRefSetArray(CUsurfref hSurfRef, CUarray hArray,
                                    unsigned int Flags);
@@ -14291,6 +14709,7 @@ CUresult CUDAAPI cuSurfRefSetArray(CUsurfref hSurfRef, CUarray hArray,
  * ::CUDA_ERROR_INVALID_VALUE
  *
  * \sa ::cuModuleGetSurfRef, ::cuSurfRefSetArray
+ * [한국어] 서피스 참조에 바인딩된 배열을 조회한다
  */
 CUresult CUDAAPI cuSurfRefGetArray(CUarray *phArray, CUsurfref hSurfRef);
 
@@ -14569,6 +14988,7 @@ CUresult CUDAAPI cuSurfRefGetArray(CUarray *phArray, CUsurfref hSurfRef);
  * \sa
  * ::cuTexObjectDestroy,
  * ::cudaCreateTextureObject
+ * [한국어] 텍스처 객체를 생성한다
  */
 CUresult CUDAAPI cuTexObjectCreate(CUtexObject *pTexObject,
                                    const CUDA_RESOURCE_DESC *pResDesc,
@@ -14592,6 +15012,7 @@ CUresult CUDAAPI cuTexObjectCreate(CUtexObject *pTexObject,
  * \sa
  * ::cuTexObjectCreate,
  * ::cudaDestroyTextureObject
+ * [한국어] 텍스처 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuTexObjectDestroy(CUtexObject texObject);
 
@@ -14614,6 +15035,7 @@ CUresult CUDAAPI cuTexObjectDestroy(CUtexObject texObject);
  * \sa
  * ::cuTexObjectCreate,
  * ::cudaGetTextureObjectResourceDesc,
+ * [한국어] 텍스처 객체의 자원 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuTexObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
                                             CUtexObject texObject);
@@ -14637,6 +15059,7 @@ CUresult CUDAAPI cuTexObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
  * \sa
  * ::cuTexObjectCreate,
  * ::cudaGetTextureObjectTextureDesc
+ * [한국어] 텍스처 객체의 텍스처 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuTexObjectGetTextureDesc(CUDA_TEXTURE_DESC *pTexDesc,
                                            CUtexObject texObject);
@@ -14661,6 +15084,7 @@ CUresult CUDAAPI cuTexObjectGetTextureDesc(CUDA_TEXTURE_DESC *pTexDesc,
  * \sa
  * ::cuTexObjectCreate,
  * ::cudaGetTextureObjectResourceViewDesc
+ * [한국어] 텍스처 객체의 자원 뷰 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuTexObjectGetResourceViewDesc(
     CUDA_RESOURCE_VIEW_DESC *pResViewDesc, CUtexObject texObject);
@@ -14707,6 +15131,7 @@ CUresult CUDAAPI cuTexObjectGetResourceViewDesc(
  * \sa
  * ::cuSurfObjectDestroy,
  * ::cudaCreateSurfaceObject
+ * [한국어] 서피스 객체를 생성한다
  */
 CUresult CUDAAPI cuSurfObjectCreate(CUsurfObject *pSurfObject,
                                     const CUDA_RESOURCE_DESC *pResDesc);
@@ -14728,6 +15153,7 @@ CUresult CUDAAPI cuSurfObjectCreate(CUsurfObject *pSurfObject,
  * \sa
  * ::cuSurfObjectCreate,
  * ::cudaDestroySurfaceObject
+ * [한국어] 서피스 객체를 소멸시킨다
  */
 CUresult CUDAAPI cuSurfObjectDestroy(CUsurfObject surfObject);
 
@@ -14750,6 +15176,7 @@ CUresult CUDAAPI cuSurfObjectDestroy(CUsurfObject surfObject);
  * \sa
  * ::cuSurfObjectCreate,
  * ::cudaGetSurfaceObjectResourceDesc
+ * [한국어] 서피스 객체의 자원 디스크립터를 조회한다
  */
 CUresult CUDAAPI cuSurfObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
                                              CUsurfObject surfObject);
@@ -14796,6 +15223,7 @@ CUresult CUDAAPI cuSurfObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
  * ::cuCtxEnablePeerAccess,
  * ::cuCtxDisablePeerAccess,
  * ::cudaDeviceCanAccessPeer
+ * [한국어] 두 디바이스 간 P2P 접근 가능 여부를 조회한다
  */
 CUresult CUDAAPI cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
                                        CUdevice peerDev);
@@ -14850,6 +15278,7 @@ CUresult CUDAAPI cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
  * ::cuDeviceCanAccessPeer,
  * ::cuCtxDisablePeerAccess,
  * ::cudaDeviceEnablePeerAccess
+ * [한국어] 피어 컨텍스트로의 P2P 메모리 접근을 활성화한다
  */
 CUresult CUDAAPI cuCtxEnablePeerAccess(CUcontext peerContext,
                                        unsigned int Flags);
@@ -14878,6 +15307,7 @@ CUresult CUDAAPI cuCtxEnablePeerAccess(CUcontext peerContext,
  * ::cuDeviceCanAccessPeer,
  * ::cuCtxEnablePeerAccess,
  * ::cudaDeviceDisablePeerAccess
+ * [한국어] 피어 컨텍스트로의 P2P 메모리 접근을 비활성화한다
  */
 CUresult CUDAAPI cuCtxDisablePeerAccess(CUcontext peerContext);
 
@@ -14923,6 +15353,7 @@ CUresult CUDAAPI cuCtxDisablePeerAccess(CUcontext peerContext);
  * ::cuCtxDisablePeerAccess,
  * ::cuDeviceCanAccessPeer,
  * ::cudaDeviceGetP2PAttribute
+ * [한국어] 피어 디바이스 간 속성 값을 조회한다
  */
 CUresult CUDAAPI cuDeviceGetP2PAttribute(int *value,
                                          CUdevice_P2PAttribute attrib,
@@ -14972,6 +15403,7 @@ CUresult CUDAAPI cuDeviceGetP2PAttribute(int *value,
  * ::cuGraphicsGLRegisterBuffer,
  * ::cuGraphicsGLRegisterImage,
  * ::cudaGraphicsUnregisterResource
+ * [한국어] 그래픽스 자원의 CUDA 등록을 해제한다
  */
 CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource);
 
@@ -15013,6 +15445,7 @@ CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource);
  * \sa
  * ::cuGraphicsResourceGetMappedPointer,
  * ::cudaGraphicsSubResourceGetMappedArray
+ * [한국어] 매핑된 그래픽스 서브자원에 대한 배열을 조회한다
  */
 CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(
     CUarray *pArray, CUgraphicsResource resource, unsigned int arrayIndex,
@@ -15050,6 +15483,7 @@ CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(
  * \sa
  * ::cuGraphicsResourceGetMappedPointer,
  * ::cudaGraphicsResourceGetMappedMipmappedArray
+ * [한국어] 매핑된 그래픽스 자원의 MIP맵 배열을 조회한다
  */
 CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(
     CUmipmappedArray *pMipmappedArray, CUgraphicsResource resource);
@@ -15090,6 +15524,7 @@ CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(
  * ::cuGraphicsMapResources,
  * ::cuGraphicsSubResourceGetMappedArray,
  * ::cudaGraphicsResourceGetMappedPointer
+ * [한국어] 매핑된 그래픽스 자원의 디바이스 포인터를 조회한다
  */
 CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(
     CUdeviceptr *pDevPtr, size_t *pSize, CUgraphicsResource resource);
@@ -15135,6 +15570,7 @@ CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(
  * \sa
  * ::cuGraphicsMapResources,
  * ::cudaGraphicsResourceSetMapFlags
+ * [한국어] 그래픽스 자원 매핑 플래그를 설정한다
  */
 CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
                                                unsigned int flags);
@@ -15177,6 +15613,7 @@ CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
  * ::cuGraphicsSubResourceGetMappedArray,
  * ::cuGraphicsUnmapResources,
  * ::cudaGraphicsMapResources
+ * [한국어] 그래픽스 자원을 CUDA에서 접근 가능하도록 매핑한다
  */
 CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
                                         CUgraphicsResource *resources,
@@ -15217,13 +15654,14 @@ CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
  * \sa
  * ::cuGraphicsMapResources,
  * ::cudaGraphicsUnmapResources
+ * [한국어] 그래픽스 자원 매핑을 해제한다
  */
 CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
                                           CUgraphicsResource *resources,
                                           CUstream hStream);
 
+/* [한국어] 드라이버 익스포트 테이블 포인터를 조회한다 */
 /** @} */ /* END CUDA_GRAPHICS */
-
 CUresult CUDAAPI cuGetExportTable(const void **ppExportTable,
                                   const CUuuid *pExportTableId);
 

@@ -58,6 +58,15 @@
  * - ram_cell_tech_type_num: SRAM/DRAM 셀 기술 종류 열거형 (itrs_hp/lstp/lop/lp_dram/comm_dram).
  * - pppm[]/pppm_lkg[]/pppm_dyn[] 등: 전력 컴포넌트 선택 마스크 배열.
  * - MAX_NUMBER_GATES_STAGE(20): logical_effort() 결과 배열 최대 크기.
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * const.h의 상수는 대부분 하드코딩된 물리/기술 상수이며 직접 설정 파일을 읽지
+ * 않는다. 그러나 ADDRESS_BITS는 AccelWattch XML에서 정의된 캐시 태그 비트 계산에
+ * 간접 영향을 주고, ram_cell_tech_type_num의 인덱스(0~4)는 XML의
+ * data_arr_ram_cell_tech_type / tag_arr_ram_cell_tech_type 값으로 매핑된다.
+ * 또한 pppm_* 마스크 배열은 io.cc의 operator* 오버로드를 통해 AccelWattch의
+ * 동적/정적 전력 분류에 직접 사용된다. gpgpusim.config의 --power_config_name
+ * 옵션이 지정한 XML이 최종적으로 이 상수들이 사용되는 CACTI 계산 경로를 호출한다.
  */
 
 #ifndef __CONST_H__

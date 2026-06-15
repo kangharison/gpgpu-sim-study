@@ -532,6 +532,24 @@ char *get_app_binary_name() {
   return self_exe_path; /* [한국어] 확장자 제거된 바이너리 이름 반환 (exe_path 스택 버퍼 내부 포인터 — 사용 후 즉시 사용해야 함) */
 }
 
+/*
+ * [한국어]
+ * gpgpu_context::gpgpu_ptx_info_load_from_filename - 파일 기반 PTX의 자원 정보(ptxinfo) 로딩
+ *
+ * @filename: PTX 파일 경로 — 이 파일에 대해 ptxas를 실행하여 자원 사용량을 얻음
+ * @sm_version: ptxas에 전달할 SM 아키텍처 버전 (예: 20, 30, 52)
+ *
+ * 이미 디스크에 존재하는 PTX 파일에 대해 ptxas를 호출하고, 표준에러를 파일명+"as"
+ * 형태의 임시 파일로 리다이렉트한다. 그 후 ptxinfo 렉서/파서를 통해 레지스터 수,
+ * lmem/smem 사용량 등을 파싱하여 gpgpu_context에 등록한다.
+ * CDP가 활성화되면 --compile-only 플래그를 추가하여 링크 단계를 생략한다.
+ * 이 함수는 파일 기반 PTX 로딩 경로에서 사용된다.
+ * 실행 컨텍스트: 커널 로딩 단계, 호스트 유저스페이스 (단일 스레드).
+ *
+ * 호출 체인:
+ *   libcuda (파일 기반 PTX 로딩) → [이 함수]
+ *     → system(ptxas) → ptxinfo_lex_init → ptxinfo_parse → ptxinfo_addinfo
+ */
 void gpgpu_context::gpgpu_ptx_info_load_from_filename(const char *filename,
                                                       unsigned sm_version) {
   std::string ptxas_filename(std::string(filename) + "as");
@@ -562,6 +580,37 @@ void gpgpu_context::gpgpu_ptx_info_load_from_filename(const char *filename,
   fclose(ptxinfo_in);
 }
 
+/*
+ * [한국어]
+ * gpgpu_context::gpgpu_ptxinfo_load_from_string - 문자열(ELF 임베디드 PTX)로부터
+ *   ptxinfo 자원 정보 로딩
+ *
+ * @p_for_info: ELF에서 추출한 PTX 소스 문자열 (CDP 경로에서만 사용, no_of_ptx==0)
+ * @source_num: PTX 소스 번호 (현재는 이 함수 난 낮게 직접 사용하지 않고 파일명 패턴에 사용)
+ * @sm_version: ptxas에 전달할 SM 아키텍처 버전 (no_of_ptx==0 CDP 경로에서 사용)
+ * @no_of_ptx: 임베디드 PTX 파일 개수 — 0보다 크면 개별 파일별로 ptxas 실행, 0이면 CDP dump 전체 처리
+ *
+ * 두 가지 경로를 처리한다:
+ *   1) no_of_ptx > 0: "<binary_name>.<index>.sm_<ver>.ptx" 파일들을 개별적으로
+ *      임시 파일로 복사한 뒤 ptxas 실행 → 각각 ptxinfo 수집 → 마지막에 cat으로 합침.
+ *      중복 정의 오류(result == 65280) 발생 시 fix_duplicate_errors()로 자동 복구 후 재시도.
+ *   2) no_of_ptx == 0 (CDP): p_for_info 문자열 전체를 임시 파일로 dump한 뒤
+ *      동일한 ptxas 파이프라인으로 처리.
+ * CUDART_VERSION >= 3000 환경에서는 -gpgpu_occupancy_sm_number 옵션이 설정되어 있어야
+ * 레지스터 사용량/점유율 계산용 SM 버전을 결정할 수 있다. 설정되지 않으면 오류로 종료.
+ * 임시 파일들은 g_keep_intermediate_files(-keep) 옵션이 꺼진 경우 삭제된다.
+ * 실행 컨텍스트: 커널 로딩 단계, 호스트 유저스페이스 (단일 스레드).
+ *
+ * 관련 gpgpusim.config 옵션:
+ *   -gpgpu_occupancy_sm_number: 레지스터 사용량/점유율 계산용 SM 버전 (필수)
+ *   -keep: 임시 ptxinfo 파일 유지 여부
+ *   -gpgpu_cuda_cdp_enabled: CDP 모드 여부에 따라 --compile-only 플래그 추가
+ *
+ * 호출 체인:
+ *   libcuda (cuModuleLoad 인터셉트) → [이 함수]
+ *     → get_app_binary_name → system(ptxas/sed/cat) → fix_duplicate_errors(중복 오류 시)
+ *     → ptxinfo_parse → ptxinfo_addinfo
+ */
 void gpgpu_context::gpgpu_ptxinfo_load_from_string(const char *p_for_info,
                                                    unsigned source_num,
                                                    unsigned sm_version,

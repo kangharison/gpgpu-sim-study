@@ -58,6 +58,14 @@
  * calc_router_parameters(): 지연→전력→면적 순서로 orchestrate
  * get_router_power()   : 버퍼/크로스바/중재기 전력을 합산해 Component::power 설정
  * buffer_stats()       : Mat 클래스로 VC 버퍼(SRAM) 전력·면적 계산
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * 본 파일의 생성자는 Nuca::sim_nuca()가 인스턴스화할 때 호출되며, XML의
+ * <param name="nuca">(0/1), <param name="cache_policy">, <param name="router">,
+ * 그리고 공정/온도 관련 파라미터(technology_node, temperature)에 간접적으로
+ * 의존한다. g_ip->F_sz_um, g_tp.* 등은 io.cc/parameter.cc에서 XML/구성 파일을
+ * 읽어 초기화되며, gpgpusim.config의 --power_config_name <xml> 옵션이
+ * AccelWattch 파워 모델 초기화를 트리거하여 이 라우터 모델까지 호출한다.
  * cb_stats()           : Crossbar 클래스로 크로스바 전력·면적 계산
  * print_router()       : 라우터 상세 통계 콘솔 출력
  */

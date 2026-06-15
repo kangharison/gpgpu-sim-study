@@ -37,21 +37,68 @@
  * Vijay Kandiah, Northwestern University
  ********************************************************************/
 
-#include "processor.h"
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
-#include <algorithm>
-#include <cmath>
-#include <fstream>
-#include <iostream>
-#include "XML_Parse.h"
-#include "array.h"
-#include "cacti/basic_circuit.h"
-#include "const.h"
-#include "parameter.h"
-#include "version.h"
+/*
+ * [한국어 설명] AccelWattch 최상위 프로세서 전력 모델 구현 (processor.cc)
+ *
+ * === 파일의 역할 ===
+ * Processor 클래스는 McPAT/AccelWattch 전력 모델의 최상위 집계자이다.
+ * XML에서 GPU/CPU 시스템 파라미터를 읽어 Core, SharedCache(L2/L3/L1Dir/L2Dir),
+ * MemoryController, NIUController, PCIeController, FlashController, NoC 등의
+ * 구성요소 객체를 생성하고, 각각의 면적과 전력을 합산하여 전체 프로세서의
+ * power(TDP)와 rt_power(런타임)을 산출한다. 동질(homogeneous) 구성요소는
+ * set_pppm()으로 단일 객체 결과를 전체 개수만큼 확장한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * AccelWattch 전력 모델의 루트. main.cc에서 Processor 객체를 생성한 뒤
+ * compute()/displayEnergy()를 호출하여 전체 전력 보고서를 얻는다.
+ *   main() → new Processor(XML) → computeEnergy()/compute() → displayEnergy()
+ * 실행 컨텍스트: 호스트 유저스페이스, 시뮬레이션 초기화 및 종료 단계.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: processor.h, XML_Parse.h, Core, SharedCache, MemoryController,
+ *       NIUController, PCIeController, FlashController, NoC, array.h,
+ *       cacti/parameter.h, version.h.
+ * 데이터 흐름: XML → set_proc_param() → procdynp/interface_ip
+ *             → 구성요소 생성 → computeEnergy(false) → power/rt_power 집계
+ *             → displayEnergy() 출력.
+ *
+ * === 주요 함수 요약 ===
+ * Processor::Processor()   — XML 파싱, 모든 구성요소 생성/초기화/전력 집계.
+ * Processor::compute()     — 런타임 전력 재계산 (사이클 통계 기반).
+ * Processor::displayEnergy() — 전체 및 하위 구성요소 전력/면적 출력.
+ * Processor::set_proc_param() — XML->sys.*를 procdynp/interface_ip로 복사.
+ * Processor::~Processor()  — 동적 할당 객체 해제.
+ */
+#include "processor.h"          // [한국어] Processor 클래스 선언
+#include <assert.h>              // [한국어] assert
+#include <stdio.h>               // [한국어] printf
+#include <string.h>              // [한국어] string 함수
+#include <algorithm>             // [한국어] std::min/max 등
+#include <cmath>                 // [한국어] sqrt 등
+#include <fstream>               // [한국어] 파일 입출력
+#include <iostream>              // [한국어] cout/cerr
+#include "XML_Parse.h"            // [한국어] ParseXML 및 시스템 파라미터
+#include "array.h"              // [한국어] ArrayST
+#include "cacti/basic_circuit.h" // [한국어] cmos 누설 함수
+#include "const.h"               // [한국어] McPAT 상수
+#include "parameter.h"           // [한국어] CACTI InputParameter
+#include "version.h"            // [한국어] McPAT 버전 정보
 
+/*
+ * [한국어]
+ * Processor::Processor - 최상위 프로세서 전력 모델 생성자
+ *
+ * @XML_interface: ParseXML 객체 포인터 (GPU/CPU 시스템 설정 및 시뮬레이션 통계).
+ * @return: (생성자) — power/rt_power에 전체 전력을 누적.
+ *
+ * 동작 순서:
+ *   1. set_proc_param()으로 프로세서 전역 파라미터 초기화.
+ *   2. 동질(homo*) 플래그에 따라 numCore/numL2/numL3/numNOC 등 결정.
+ *   3. Core, SharedCache(L2/L3/Directory), MemoryController, Flash, NIU,
+ *      PCIe, NoC 객체를 생성하고 computeEnergy() 호출.
+ *   4. 각 구성요소의 면적/전력을 power/rt_power에 합산. 동질 구성요소는
+ *      set_pppm()으로 numXX 배 확장.
+ */
 Processor::Processor(ParseXML *XML_interface)
     : XML(XML_interface),  // TODO: using one global copy may have problems.
       mc(0),
@@ -63,17 +110,21 @@ Processor::Processor(ParseXML *XML_interface)
    * accumulated from 90 to 22nm There is no point to have heterogeneous memory
    * controller on chip, thus McPAT only support homogeneous memory controllers.
    */
+  // [한국어] 전체 런타임 전력 누적값 초기화
   rt_power.reset();
   int i;
   double pppm_t[4] = {1, 1, 1, 1};
   l2_power = 0;
   idle_core_power = 0;
+  // [한국어] XML에서 프로세서 전역 파라미터 복사
   set_proc_param();
+  // [한국어] 동질 코어일 때 numCore를 0/1로 축소
   if (procdynp.homoCore)
     numCore = procdynp.numCore == 0 ? 0 : 1;
   else
     numCore = procdynp.numCore;
 
+  // [한국어] 동질 L2 캐시일 때 numL2를 0/1로 축소
   if (procdynp.homoL2)
     numL2 = procdynp.numL2 == 0 ? 0 : 1;
   else
@@ -84,11 +135,13 @@ Processor::Processor(ParseXML *XML_interface)
     exit(0);
   }
 
+  // [한국어] 동질 L3 캐시일 때 numL3를 0/1로 축소
   if (procdynp.homoL3)
     numL3 = procdynp.numL3 == 0 ? 0 : 1;
   else
     numL3 = procdynp.numL3;
 
+  // [한국어] 동질 NoC일 때 numNOC를 0/1로 축소
   if (procdynp.homoNOC)
     numNOC = procdynp.numNOC == 0 ? 0 : 1;
   else
@@ -110,11 +163,16 @@ Processor::Processor(ParseXML *XML_interface)
   else
     numL2Dir = procdynp.numL2Dir;
 
+  // [한국어] 코어 생성 및 TDP/런타임 전력 집계
   for (i = 0; i < numCore; i++) {
+    // [한국어] i번째 Core 객체 생성
     cores.push_back(new Core(XML, i, &interface_ip));
+    // [한국어] Core TDP 전력 계산
     cores[i]->computeEnergy();
+    // [한국어] Core 런타임 전력 계산
     cores[i]->computeEnergy(false);
     if (procdynp.homoCore) {
+      // [한국어] 동질 코어: 단일 코어 면적 × 코어 수
       core.area.set_area(core.area.get_area() +
                          cores[i]->area.get_area() * procdynp.numCore);
       set_pppm(pppm_t, cores[i]->clockRate * procdynp.numCore, procdynp.numCore,
@@ -122,16 +180,20 @@ Processor::Processor(ParseXML *XML_interface)
       // set the exClockRate
       exClockRate = cores[0]->clockRate;  // TODO; get from XML file
       // cout<<"****EX clock rate:"<<exClockRate<<endl;
+      // [한국어] 동질 코어 TDP 전력 확장
       core.power = core.power + cores[i]->power * pppm_t;
       set_pppm(pppm_t, 1 / cores[i]->executionTime, procdynp.numCore,
                procdynp.numCore, procdynp.numCore);
+      // [한국어] 동질 코어 런타임 전력 확장
       core.rt_power = core.rt_power + cores[i]->rt_power * pppm_t;
       area.set_area(
           area.get_area() +
           core.area.get_area());  // placement and routing overhead is
                                   // 10%, core scales worse than cache
                                   // 40% is accumulated from 90 to 22nm
+      // [한국어] 전체 전력에 코어 합산
       power = power + core.power;
+      // [한국어] 전체 런타임 전력에 코어 합산
       rt_power = rt_power + core.rt_power;
     } else {
       core.area.set_area(core.area.get_area() + cores[i]->area.get_area());
@@ -154,9 +216,11 @@ Processor::Processor(ParseXML *XML_interface)
     }
   }
 
+  // [한국어] Private L2가 아닐 경우 별도 L2 캐시 집계
   if (!XML->sys.Private_L2) {
     if (numL2 > 0)
       for (i = 0; i < numL2; i++) {
+        // [한국어] i번째 Shared L2 생성
         l2array.push_back(new SharedCache(XML, i, &interface_ip));
 
         l2array[i]->computeEnergy();
@@ -197,6 +261,7 @@ Processor::Processor(ParseXML *XML_interface)
       }
   }
 
+  // [한국어] L3 캐시 생성 및 집계
   if (numL3 > 0)
     for (i = 0; i < numL3; i++) {
       l3array.push_back(new SharedCache(XML, i, &interface_ip, L3));
@@ -234,6 +299,7 @@ Processor::Processor(ParseXML *XML_interface)
         rt_power = rt_power + l3array[i]->rt_power * pppm_t;
       }
     }
+  // [한국어] L1 Directory 생성 및 집계
   if (numL1Dir > 0)
     for (i = 0; i < numL1Dir; i++) {
       l1dirarray.push_back(new SharedCache(XML, i, &interface_ip, L1Directory));
@@ -269,6 +335,7 @@ Processor::Processor(ParseXML *XML_interface)
       }
     }
 
+  // [한국어] L2 Directory 생성 및 집계
   if (numL2Dir > 0)
     for (i = 0; i < numL2Dir; i++) {
       l2dirarray.push_back(new SharedCache(XML, i, &interface_ip, L2Directory));
@@ -304,9 +371,12 @@ Processor::Processor(ParseXML *XML_interface)
       }
     }
 
+  // [한국어] 메모리 컨트롤러 생성 및 집계
   if (XML->sys.mc.number_mcs > 0 && XML->sys.mc.memory_channels_per_mc > 0) {
+    // [한국어] Fermi 아키텍처: GDDR5 메모리 컨트롤러
     if (XML->sys.architecture == 1)  // 1 for fermi
       mc = new MemoryController(XML, &interface_ip, MC, GDDR5);
+    // [한국어] Quadro 아키텍처: GDDR3 메모리 컨트롤러
     else if (XML->sys.architecture == 2)  // 2 for quadro
       mc = new MemoryController(XML, &interface_ip, MC, GDDR3);
     else {
@@ -323,6 +393,7 @@ Processor::Processor(ParseXML *XML_interface)
     set_pppm(pppm_t, XML->sys.mc.number_mcs * mc->mcp.clockRate,
              XML->sys.mc.number_mcs, XML->sys.mc.number_mcs,
              XML->sys.mc.number_mcs);
+    // [한국어] MC TDP 전력 × MC 개수 확장
     mcs.power = mc->power * pppm_t;
     power = power + mcs.power;
     set_pppm(pppm_t, 1 / mc->mcp.executionTime, XML->sys.mc.number_mcs,
@@ -331,6 +402,7 @@ Processor::Processor(ParseXML *XML_interface)
     rt_power = rt_power + mcs.rt_power;
   }
 
+  // [한국어] Flash/SSD 컨트롤러 생성 및 집계
   if (XML->sys.flashc.number_mcs > 0)  // flash controller
   {
     flashcontroller = new FlashController(XML, &interface_ip);
@@ -349,6 +421,7 @@ Processor::Processor(ParseXML *XML_interface)
     rt_power = rt_power + flashcontrollers.rt_power;
   }
 
+  // [한국어] NIU(네트워크 인터페이스) 생성 및 집계
   if (XML->sys.niu.number_units > 0) {
     niu = new NIUController(XML, &interface_ip);
     niu->computeEnergy();
@@ -369,6 +442,7 @@ Processor::Processor(ParseXML *XML_interface)
     rt_power = rt_power + nius.rt_power;
   }
 
+  // [한국어] PCIe 컨트롤러 생성 및 집계
   if (XML->sys.pcie.number_units > 0 && XML->sys.pcie.num_channels > 0) {
     pcie = new PCIeController(XML, &interface_ip);
     pcie->computeEnergy();
@@ -389,8 +463,10 @@ Processor::Processor(ParseXML *XML_interface)
     rt_power = rt_power + pcies.rt_power;
   }
 
+  // [한국어] NoC/버스 인터커넥트 생성 및 집계
   if (numNOC > 0) {
     for (i = 0; i < numNOC; i++) {
+      // [한국어] NoC(라우터 기반) 인터커넥트
       if (XML->sys.NoC[i].type) {  // First add up area of routers if NoC is
                                    // used
         nocs.push_back(new NoC(XML, i, &interface_ip, 1));
@@ -403,6 +479,7 @@ Processor::Processor(ParseXML *XML_interface)
           noc.area.set_area(noc.area.get_area() + nocs[i]->area.get_area());
           area.set_area(area.get_area() + nocs[i]->area.get_area());
         }
+      // [한국어] 버스 기반 인터커넥트
       } else {  // Bus based interconnect
         nocs.push_back(
             new NoC(XML, i, &interface_ip, 1,
@@ -479,6 +556,15 @@ Processor::Processor(ParseXML *XML_interface)
   //  final nodes globalClock.optimize_wire();
 }
 
+/*
+ * [한국어]
+ * Processor::compute - 런타임 전력 재계산
+ *
+ * Processor::Processor에서 이미 TDP/초기 런타임 전력을 집계했지만,
+ * 이 함수는 시뮬레이션 중 수집된 실제 사이클 통계를 바탕으로 각 구성요소의
+ * 런타임 전력을 다시 계산한다. core[0]의 클록을 기준으로 executionTime을
+ * 설정하고, 동질 구성요소에 대해 set_pppm()으로 확장한다.
+ */
 void Processor::compute() {
   int i;
   double pppm_t[4] = {1, 1, 1, 1};
@@ -487,7 +573,9 @@ void Processor::compute() {
   // power.reset();
   // core.power.reset();
 
+  // [한국어] 코어 런타임 전력 초기화
   core.rt_power.reset();
+  // [한국어] 코어 런타임 전력 재계산
   for (i = 0; i < numCore; i++) {
     cores[i]->executionTime =
         XML->sys.total_cycles / (XML->sys.core[i].clock_rate * 1e6);
@@ -506,6 +594,7 @@ void Processor::compute() {
     }
   }
 
+  // [한국어] Shared L2 런타임 전력 재계산
   if (!XML->sys.Private_L2) {
     if (numL2 > 0) l2.rt_power.reset();
     for (i = 0; i < numL2; i++) {
@@ -526,6 +615,7 @@ void Processor::compute() {
     }
   }
 
+  // [한국어] L3 런타임 전력 초기화
   l3.rt_power.reset();
   if (numL3 > 0)
     for (i = 0; i < numL3; i++) {
@@ -544,6 +634,7 @@ void Processor::compute() {
       }
     }
 
+  // [한국어] L1 Directory 런타임 전력 초기화
   l1dir.rt_power.reset();
   if (numL1Dir > 0)
     for (i = 0; i < numL1Dir; i++) {
@@ -562,6 +653,7 @@ void Processor::compute() {
       }
     }
 
+  // [한국어] L2 Directory 런타임 전력 초기화
   l2dir.rt_power.reset();
   if (numL2Dir > 0)
     for (i = 0; i < numL2Dir; i++) {
@@ -580,6 +672,7 @@ void Processor::compute() {
       }
     }
 
+  // [한국어] MC 런타임 전력 초기화
   mcs.rt_power.reset();
   if (XML->sys.mc.number_mcs > 0 && XML->sys.mc.memory_channels_per_mc > 0) {
     mc->rt_power.reset();
@@ -633,6 +726,7 @@ void Processor::compute() {
              // * area must be obtain to decide the link routing
             */
   // Compute energy of NoC (w or w/o links) or buses
+  // [한국어] NoC 런타임 전력 초기화
   noc.rt_power.reset();
   for (i = 0; i < numNOC; i++) {
     nocs[i]->nocdynp.executionTime =
@@ -659,6 +753,12 @@ void Processor::compute() {
   //  final nodes globalClock.optimize_wire();
 }
 
+/*
+ * [한국어]
+ * Processor::displayDeviceType - ITRS 장치 유형 출력
+ *
+ * @device_type_: 0=HP, 1=LSTP, 2=LOP, 3=LP-DRAM, 4=COMM-DRAM.
+ */
 void Processor::displayDeviceType(int device_type_, uint32_t indent) {
   string indent_str(indent, ' ');
 
@@ -690,6 +790,10 @@ void Processor::displayDeviceType(int device_type_, uint32_t indent) {
   }
 }
 
+/*
+ * [한국어]
+ * Processor::displayInterconnectType - 인터커넥트 공정 전망 출력
+ */
 void Processor::displayInterconnectType(int interconnect_type_,
                                         uint32_t indent) {
   string indent_str(indent, ' ');
@@ -710,13 +814,24 @@ void Processor::displayInterconnectType(int interconnect_type_,
   }
 }
 
+/*
+ * [한국어]
+ * Processor::displayEnergy - 전체 프로세서 및 하위 구성요소 전력/면적 출력
+ *
+ * @plevel: 출력 상세 수준. plevel>1이면 코어/캐시/MC/NoC 등의 상세 결과도
+ *          재귀적으로 출력한다.
+ * @is_tdp_parm: true이면 TDP(peak) 결과, false이면 런타임 결과.
+ */
 void Processor::displayEnergy(uint32_t indent, int plevel, bool is_tdp_parm) {
   int i;
+  // [한국어] 장채널 소자 사용 여부
   bool long_channel = XML->sys.longer_channel_device;
   string indent_str(indent, ' ');
   string indent_str_next(indent + 2, ' ');
   bool is_tdp = is_tdp_parm;
+  // [한국어] TDP/런타임 출력 분기
   if (is_tdp_parm) {
+    // [한국어] 낮은 출력 레벨일 때 요약 메시지
     if (plevel < 5) {
       cout
           << "\nMcPAT (version " << VER_MAJOR << "." << VER_MINOR << " of "
@@ -746,8 +861,10 @@ void Processor::displayEnergy(uint32_t indent, int plevel, bool is_tdp_parm) {
             "***********************"
          << endl;
     cout << "Processor: " << endl;
+    // [한국어] 전체 칩 면적
     cout << indent_str << "Area = " << area.get_area() * 1e-6 << " mm^2"
          << endl;
+    // [한국어] 전체 피크 전력 (동적 + 누설)
     cout << indent_str << "Peak Power = "
          << power.readOp.dynamic +
                 (long_channel ? power.readOp.longer_channel_leakage
@@ -769,6 +886,7 @@ void Processor::displayEnergy(uint32_t indent, int plevel, bool is_tdp_parm) {
     // power.readOp.longer_channel_leakage <<" W" << endl;
     cout << indent_str << "Gate Leakage = " << power.readOp.gate_leakage << " W"
          << endl;
+    // [한국어] 전체 런타임 동적 전력
     cout << indent_str << "Runtime Dynamic = " << rt_power.readOp.dynamic
          << " W" << endl;
     cout << endl;
@@ -1058,9 +1176,17 @@ void Processor::displayEnergy(uint32_t indent, int plevel, bool is_tdp_parm) {
   }
 }
 
+/*
+ * [한국어]
+ * Processor::set_proc_param - XML에서 프로세서 전역 파라미터 초기화
+ *
+ * homogeneous_* 플래그, 코어/캐시/NoC/Directory/MC 개수, CACTI InputParameter
+ * (기술 노드, 온도, 와이어 타입, 설계 가중치 등)를 XML->sys.*에서 복사한다.
+ */
 void Processor::set_proc_param() {
   bool debug = false;
 
+  // [한국어] 코어 동질성 여부
   procdynp.homoCore = bool(debug ? 1 : XML->sys.homogeneous_cores);
   procdynp.homoL2 = bool(debug ? 1 : XML->sys.homogeneous_L2s);
   procdynp.homoL3 = bool(debug ? 1 : XML->sys.homogeneous_L3s);
@@ -1068,12 +1194,14 @@ void Processor::set_proc_param() {
   procdynp.homoL1Dir = bool(debug ? 1 : XML->sys.homogeneous_L1Directories);
   procdynp.homoL2Dir = bool(debug ? 1 : XML->sys.homogeneous_L2Directories);
 
+  // [한국어] 총 코어 수
   procdynp.numCore = XML->sys.number_of_cores;
   procdynp.numL2 = XML->sys.number_of_L2s;
   procdynp.numL3 = XML->sys.number_of_L3s;
   procdynp.numNOC = XML->sys.number_of_NoCs;
   procdynp.numL1Dir = XML->sys.number_of_L1Directories;
   procdynp.numL2Dir = XML->sys.number_of_L2Directories;
+  // [한국어] 메모리 컨트롤러 수
   procdynp.numMC = XML->sys.mc.number_mcs;
   procdynp.numMCChannel = XML->sys.mc.memory_channels_per_mc;
 
@@ -1124,8 +1252,10 @@ void Processor::set_proc_param() {
   interface_ip.int_prefetch_w = 1;
   interface_ip.page_sz_bits = 0;
   interface_ip.temp = debug ? 360 : XML->sys.temperature;
+  // [한국어] 핵심 기술 노드 [nm]
   interface_ip.F_sz_nm =
       debug ? 90 : XML->sys.core_tech_node;  // XML->sys.core_tech_node;
+  // [한국어] 기술 노드 [um] 변환
   interface_ip.F_sz_um = interface_ip.F_sz_nm / 1000;
 
   //***********This section of code does not have real meaning, they are just to
@@ -1175,6 +1305,10 @@ void Processor::set_proc_param() {
   interface_ip.add_ecc_b_ = true;
 }
 
+/*
+ * [한국어]
+ * Processor::~Processor - 동적 할당한 구성요소 객체 해제
+ */
 Processor::~Processor() {
   while (!cores.empty()) {
     delete cores.back();

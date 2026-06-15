@@ -432,16 +432,36 @@ class InputParameter
 };
 
 
+/*
+ * [한국어]
+ * results_mem_array - 단일 메모리 어레이 설계점의 평탄화된(flat) 결과 구조체
+ *
+ * CACTI 탐색이 끝난 후 최적 태그/데이터 어레이의 상세 타이밍/전력/면적을
+ * 외부(McPAT/AccelWattch)로 전달하기 위해 mem_array에서 복사된 필드 모음.
+ * 필드는 크게 5그룹으로 구성된다:
+ *   1) 파티션 파라미터: Ndwl, Ndbl, Nspd, deg_bl_muxing, Ndsam_lev_1/2,
+ *      number_activated_mats_horizontal_direction, number_subbanks, page_size_in_bits
+ *   2) 경로별 지연: delay_* (뱅크 라우팅, H-tree, 디코더, 비트라인, SA, 출력 드라이버 등)
+ *   3) 접근/사이클 시간: access_time, cycle_time, multisubbank_interleave_cycle_time,
+ *      delay_request_network, delay_inside_mat, delay_reply_network,
+ *      trcd, cas_latency, precharge_delay (DRAM)
+ *   4) 전력 항목: power_* (routing, H-tree, decoder, bitline, SA, precharge,
+ *      comparator, crossbar, total)
+ *   5) 면적/치수 및 DRAM 에너지: area, all_banks_*, bank_*, subarray_*, mat_*,
+ *      routing_area_*, area_efficiency, refresh_power, dram_refresh_period,
+ *      dram_array_availability, dyn_read_energy_from_*, leak_power_subbank_*,
+ *      leak_power_request_and_reply_networks, activate/read/write/precharge_energy
+ */
 typedef struct{
-  int Ndwl;
-  int Ndbl;
-  double Nspd;
-  int deg_bl_muxing;
-  int Ndsam_lev_1;
-  int Ndsam_lev_2;
-  int number_activated_mats_horizontal_direction;
-  int number_subbanks;
-  int page_size_in_bits;
+  int Ndwl;   // [한국어] 워드라인 방향 서브어레이 분할 수
+  int Ndbl;   // [한국어] 비트라인 방향 서브어레이 분할 수
+  double Nspd; // [한국어] 서브어레이당 병렬 데이터선 비율
+  int deg_bl_muxing; // [한국어] 비트라인 멀티플렉싱 차수
+  int Ndsam_lev_1;   // [한국어] 센스앰프 MUX 레벨 1 크기
+  int Ndsam_lev_2;   // [한국어] 센스앰프 MUX 레벨 2 크기
+  int number_activated_mats_horizontal_direction; // [한국어] 수평 방향 동시 활성 mat 수
+  int number_subbanks; // [한국어] 뱅크 내 서브뱅크 수
+  int page_size_in_bits; // [한국어] 페이지 모드/주 메모리의 페이지 크기 [비트]
   double delay_route_to_bank;
   double delay_crossbar;
   double delay_addr_din_horizontal_htree;
@@ -950,64 +970,67 @@ class mem_array
   double subarray_length;// [한국어] 서브어레이 길이 (m) — MAT 내 분할 단위
   double subarray_height;// [한국어] 서브어레이 높이 (m)
 
-  double delay_route_to_bank,
-         delay_input_htree,
-         delay_row_predecode_driver_and_block,
-         delay_row_decoder,
-         delay_bitlines,
-         delay_sense_amp,
-         delay_subarray_output_driver,
-         delay_dout_htree,
-         delay_comparator,
-         delay_matchlines;
+  /* [한국어] 접근 경로별 지연 (초) — 뱅크 라우팅부터 출력 H-tree까지 각 단계별 기여분 */
+  double delay_route_to_bank,         // [한국어] 뱅크 라우팅 지연
+         delay_input_htree,             // [한국어] 주소/데이터 입력 H-tree 지연
+         delay_row_predecode_driver_and_block, // [한국어] 행 예비디코더 드라이버+블록 지연
+         delay_row_decoder,             // [한국어] 행 디코더 지연
+         delay_bitlines,                // [한국어] 비트라인 충전/방전 지연
+         delay_sense_amp,               // [한국어] 감지증폭기 지연
+         delay_subarray_output_driver,  // [한국어] 서브어레이 출력 드라이버 지연
+         delay_dout_htree,              // [한국어] 데이터 출력 H-tree 지연
+         delay_comparator,              // [한국어] 태그 비교기 지연
+         delay_matchlines;              // [한국어] CAM/FA 매치라인 지연
 
-  double all_banks_height,
-         all_banks_width,
-         area_efficiency;
+  double all_banks_height,  // [한국어] 전체 뱅크 조직 높이 (m)
+         all_banks_width,   // [한국어] 전체 뱅크 조직 폭 (m)
+         area_efficiency;   // [한국어] 면적 효율 (%) — 실제 셀 면적 / 총 면적
 
-  powerDef power_routing_to_bank;
-  powerDef power_addr_input_htree;
-  powerDef power_data_input_htree;
-  powerDef power_data_output_htree;
-  powerDef power_htree_in_search;
-  powerDef power_htree_out_search;
-  powerDef power_row_predecoder_drivers;
-  powerDef power_row_predecoder_blocks;
-  powerDef power_row_decoders;
-  powerDef power_bit_mux_predecoder_drivers;
-  powerDef power_bit_mux_predecoder_blocks;
-  powerDef power_bit_mux_decoders;
-  powerDef power_senseamp_mux_lev_1_predecoder_drivers;
-  powerDef power_senseamp_mux_lev_1_predecoder_blocks;
-  powerDef power_senseamp_mux_lev_1_decoders;
-  powerDef power_senseamp_mux_lev_2_predecoder_drivers;
-  powerDef power_senseamp_mux_lev_2_predecoder_blocks;
-  powerDef power_senseamp_mux_lev_2_decoders;
-  powerDef power_bitlines;
-  powerDef power_sense_amps;
-  powerDef power_prechg_eq_drivers;
-  powerDef power_output_drivers_at_subarray;
-  powerDef power_dataout_vertical_htree;
-  powerDef power_comparators;
+  /* [한국어] 일반 SRAM/캐시 경로의 동적+누설 전력 (powerDef: read/write/search Op) */
+  powerDef power_routing_to_bank;     // [한국어] 뱅크 라우팅 전력
+  powerDef power_addr_input_htree;    // [한국어] 주소 입력 H-tree 전력
+  powerDef power_data_input_htree;    // [한국어] 데이터 입력 H-tree 전력
+  powerDef power_data_output_htree;   // [한국어] 데이터 출력 H-tree 전력
+  powerDef power_htree_in_search;     // [한국어] 검색 입력 H-tree 전력 (CAM/FA)
+  powerDef power_htree_out_search;    // [한국어] 검색 출력 H-tree 전력 (CAM/FA)
+  powerDef power_row_predecoder_drivers; // [한국어] 행 예비디코더 드라이버 전력
+  powerDef power_row_predecoder_blocks;  // [한국어] 행 예비디코더 블록 전력
+  powerDef power_row_decoders;           // [한국어] 행 디코더 전력
+  powerDef power_bit_mux_predecoder_drivers; // [한국어] 비트 MUX 예비디코더 드라이버 전력
+  powerDef power_bit_mux_predecoder_blocks;  // [한국어] 비트 MUX 예비디코더 블록 전력
+  powerDef power_bit_mux_decoders;           // [한국어] 비트 MUX 디코더 전력
+  powerDef power_senseamp_mux_lev_1_predecoder_drivers; // [한국어] SA MUX L1 예비디코더 드라이버 전력
+  powerDef power_senseamp_mux_lev_1_predecoder_blocks;  // [한국어] SA MUX L1 예비디코더 블록 전력
+  powerDef power_senseamp_mux_lev_1_decoders;           // [한국어] SA MUX L1 디코더 전력
+  powerDef power_senseamp_mux_lev_2_predecoder_drivers; // [한국어] SA MUX L2 예비디코더 드라이버 전력
+  powerDef power_senseamp_mux_lev_2_predecoder_blocks;  // [한국어] SA MUX L2 예비디코더 블록 전력
+  powerDef power_senseamp_mux_lev_2_decoders;           // [한국어] SA MUX L2 디코더 전력
+  powerDef power_bitlines;          // [한국어] 비트라인 전력
+  powerDef power_sense_amps;        // [한국어] 감지증폭기 전력
+  powerDef power_prechg_eq_drivers; // [한국어] 프리차지/이퀄라이즈 드라이버 전력
+  powerDef power_output_drivers_at_subarray; // [한국어] 서브어레이 출력 드라이버 전력
+  powerDef power_dataout_vertical_htree;     // [한국어] 수직 데이터 출력 H-tree 전력
+  powerDef power_comparators;       // [한국어] 태그 비교기 전력
 
-  powerDef power_cam_bitline_precharge_eq_drv;
-  powerDef power_searchline;
-  powerDef power_searchline_precharge;
-  powerDef power_matchlines;
-  powerDef power_matchline_precharge;
-  powerDef power_matchline_to_wordline_drv;
+  /* [한국어] CAM/FA(Fully Associative) 전용 검색 경로 전력 */
+  powerDef power_cam_bitline_precharge_eq_drv; // [한국어] CAM 비트라인 프리차지/이퀄라이즈 드라이버 전력
+  powerDef power_searchline;        // [한국어] 검색 라인(searchline) 전력
+  powerDef power_searchline_precharge; // [한국어] 검색 라인 프리차지 전력
+  powerDef power_matchlines;        // [한국어] 매치라인 전력
+  powerDef power_matchline_precharge; // [한국어] 매치라인 프리차지 전력
+  powerDef power_matchline_to_wordline_drv; // [한국어] 매치라인→워드라인 드라이버 전력
 
-  min_values_t *arr_min;
-  enum Wire_type wt;
+  min_values_t *arr_min; // [한국어] 이 후보가 속한 어레이 클래스의 최솟값 추적기
+  enum Wire_type wt;     // [한국어] 이 후보에 사용된 와이어 타입
 
-  // dram stats
-  double activate_energy, read_energy, write_energy, precharge_energy,
-  refresh_power, leak_power_subbank_closed_page, leak_power_subbank_open_page,
-  leak_power_request_and_reply_networks;
+  /* [한국어] DRAM 주 메모리 통계 — 활성화/읽기/쓰기/프리차지 에너지 및 누설 전력 */
+  double activate_energy, read_energy, write_energy, precharge_energy, // [한국어] 각 동작 에너지 (J)
+  refresh_power, leak_power_subbank_closed_page, leak_power_subbank_open_page, // [한국어] 리프레시/누설 전력 (W)
+  leak_power_request_and_reply_networks; // [한국어] 요청/응답 네트워크 누설 전력 (W)
 
-  double precharge_delay;
+  double precharge_delay; // [한국어] DRAM 프리차지 지연 (초)
 
-  static bool lt(const mem_array * m1, const mem_array * m2);
+  static bool lt(const mem_array * m1, const mem_array * m2); // [한국어] mem_array 후보 정렬용 6-key 사전순 비교자
 };
 
 

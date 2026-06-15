@@ -38,6 +38,11 @@
  *
  * === 타 모듈과의 연결 ===
  * - Module (상속): 계층적 이름 지원
+ * - BookSimConfig / gpgpusim.config:
+ *     * spec_sw_allocator = "prio"일 때 투기적 스위치 할당기가 이 중재자를 사용(기본값).
+ *     * vc_allocator/sw_allocator가 "prio"를 지정하면 해당 할당기도 PriorityArbiter를 사용.
+ *     * class_priority 값이 요청의 pri로 전달되어 클래스별 우선순위 차별에 활용.
+ *     * alloc_iters 횟수만큼 매 사이클 Arbitrate()가 반복되어 _rr_ptr이 갱신.
  *
  * === 주요 함수/구조체 요약 ===
  * - PriorityArbiter(): _rr_ptr=0, _inputs 설정

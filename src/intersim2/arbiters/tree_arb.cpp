@@ -39,6 +39,10 @@
  * === 타 모듈과의 연결 ===
  * - Arbiter (상속): AddRequest(), Arbitrate(), Clear() super 호출
  * - Arbiter::NewArbiter(): 그룹/전역 중재자 생성
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type = "tree(groups,sub_arb_type)"일 때 NewArbiter()가 이 클래스를 생성.
+ *     * sub_arb_type("round_robin"/"matrix")이 그룹/전역 중재자 알고리즘으로 사용됨.
+ *     * alloc_iters가 1 이상이면 매 사이클 그룹/전역 중재자의 UpdateState()가 반복 호출됨.
  *
  * === 주요 함수/구조체 요약 ===
  * - TreeArbiter(): groups개 그룹 중재자(크기=_group_size) + 전역 중재자(크기=groups) 생성

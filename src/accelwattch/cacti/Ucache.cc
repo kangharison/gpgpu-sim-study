@@ -55,6 +55,18 @@ using namespace std;
 const uint32_t nthreads = NTHREADS;
 
 
+/*
+ * [한국어]
+ * min_values_t::update_min_values - 두 개의 최솟값 집계기를 병합
+ *
+ * @val: 병합할 원본 min_values_t 포인터
+ *
+ * 현재 객체의 delay/dynamic/leakage/area/cycle 최솟값과 val의 최솟값을
+ * 비교하여 더 작은 쪽으로 갱신한다. 멀티스레드 탐색에서 각 스레드의
+ * 부분 결과를 하나의 전역 최솟값으로 합칠 때 사용된다.
+ *
+ * 호출 체인: calc_time_mt_wrapper() → [이 함수] (스레드 결과 병합)
+ */
 void min_values_t::update_min_values(const min_values_t * val)
 {
   min_delay   = (min_delay > val->min_delay) ? val->min_delay : min_delay;
@@ -66,6 +78,18 @@ void min_values_t::update_min_values(const min_values_t * val)
 
 
 
+/*
+ * [한국어]
+ * min_values_t::update_min_values - UCA 최종 결과로 최솟값 갱신
+ *
+ * @res: CACTI 탐색이 완료된 uca_org_t 참조
+ *
+ * access_time, power, area, cycle_time을 기준으로 목적 함수 정규화에
+ * 사용할 최솟값을 추출한다. find_optimal_uca() 전에 전체 후보의 기준값을
+ * 만들 때 호출된다.
+ *
+ * 호출 체인: solve() → find_optimal_uca() 전 cache_min 업데이트 → [이 함수]
+ */
 void min_values_t::update_min_values(const uca_org_t & res)
 {
   min_delay   = (min_delay > res.access_time) ? res.access_time : min_delay;
@@ -75,6 +99,18 @@ void min_values_t::update_min_values(const uca_org_t & res)
   min_cyc     = (min_cyc > res.cycle_time) ? res.cycle_time : min_cyc;
 }
 
+/*
+ * [한국어]
+ * min_values_t::update_min_values - NUCA 구성으로 최솟값 갱신
+ *
+ * @res: NUCA 설계 후보 nuca_org_t 포인터
+ *
+ * NUCA 탐색 루프에서 생성된 각 nuca_org_t의 delay, power, area,
+ * cycle_time을 비교해 최솟값을 갱신한다. find_optimal_nuca()의 비용
+ * 정규화 분모를 만드는 데 사용된다.
+ *
+ * 호출 체인: sim_nuca() → minval.update_min_values(nuca_list.back()) → [이 함수]
+ */
 void min_values_t::update_min_values(const nuca_org_t * res)
 {
   min_delay   = (min_delay > res->nuca_pda.delay) ? res->nuca_pda.delay : min_delay;
@@ -84,6 +120,18 @@ void min_values_t::update_min_values(const nuca_org_t * res)
   min_cyc     = (min_cyc > res->nuca_pda.cycle_time) ? res->nuca_pda.cycle_time : min_cyc;
 }
 
+/*
+ * [한국어]
+ * min_values_t::update_min_values - 단일 메모리 어레이 후보로 최솟값 갱신
+ *
+ * @res: 설계 공간의 한 mem_array 후보 포인터
+ *
+ * calculate_time()이 생성한 mem_array의 access_time/power/area/cycle_time을
+ * 사용해 최솟값을 추출한다. 멀티스레드 탐색 시 각 스레드의 data_res,
+ * tag_res에 누적되는 핵심 연산이다.
+ *
+ * 호출 체인: calc_time_mt_wrapper() → data_res->update_min_values() → [이 함수]
+ */
 void min_values_t::update_min_values(const mem_array * res)
 {
   min_delay   = (min_delay > res->access_time) ? res->access_time : min_delay;
@@ -95,6 +143,21 @@ void min_values_t::update_min_values(const mem_array * res)
 
 
 
+/*
+ * [한국어]
+ * calc_time_mt_wrapper - 멀티스레드로 calculate_time()을 반복 호출하는 POSIX 스레드 루프
+ *
+ * @void_obj: calc_time_mt_wrapper_struct 포인터 (tid, pure_ram, pure_cam, is_tag, Nspd_min 등)
+ *
+ * 각 스레드는 Ndwl(0..log2(MAXDATAN)), Ndbl, Ndcm, Nspd, wire_type, Ndsam_lev_1/2
+ * 조합 중 자신의 tid에 해당하는 부분 집합을 탐색한다.
+ * 유효한 파티션을 발견하면 mem_array를 data_arr/tag_arr에 추가하고,
+ * data_res/tag_res에 최솟값을 누적한다.
+ * force_cache_config 모드일 때는 g_ip->ndwl/ndbl/ndcm/nspd/ndsam1/2로
+ * 탐색 범위를 강제한다.
+ *
+ * 호출 체인: solve() → pthread_create(..., calc_time_mt_wrapper, ...) → [이 함수] → calculate_time()
+ */
 void * calc_time_mt_wrapper(void * void_obj)
 {
   calc_time_mt_wrapper_struct * calc_obj = (calc_time_mt_wrapper_struct *) void_obj;
@@ -228,6 +291,32 @@ void * calc_time_mt_wrapper(void * void_obj)
 
 
 
+/*
+ * [한국어]
+ * calculate_time - 주어진 파티션 파라미터로 하나의 메모리 어레이를 평가
+ *
+ * @is_tag              : 태그 어레이 여부 (true=태그, false=데이터)
+ * @pure_ram            : 순수 RAM 모드 (1이면 태그 없음)
+ * @pure_cam            : 순수 CAM 모드
+ * @Nspd                : 서브어레이당 병렬 데이터선 비율
+ * @Ndwl                : 워드라인 방향 분할 수
+ * @Ndbl                : 비트라인 방향 분할 수
+ * @Ndcm                : 열 MUX 수
+ * @Ndsam_lev_1         : SA mux 레벨 1 크기
+ * @Ndsam_lev_2         : SA mux 레벨 2 크기
+ * @ptr_array           : 결과를 채울 mem_array (flag_results_populate==0일 때)
+ * @flag_results_populate: 1이면 ptr_results/uca_org_t에 상세 분해 결과 채움 (TODO)
+ * @ptr_results         : results_mem_array 상세 출력 버퍼
+ * @ptr_fin_res         : 최종 UCA 결과 버퍼
+ * @is_main_mem         : 주 메모리(DRAM) 모드 여부
+ * @return              : 파티션이 물리적으로 유효하면 true, 아니면 false
+ *
+ * DynamicParameter를 생성해 유효성을 검사하고, UCA 객체를 인스턴스화하여
+ * access_time, cycle_time, power, area 등을 추출한다.
+ * flag_results_populate==0인 일반 탐색 경로에서는 ptr_array에만 핵심값을 복사한다.
+ *
+ * 호출 체인: calc_time_mt_wrapper() → [이 함수] → DynamicParameter() → UCA()
+ */
 bool calculate_time(
     bool is_tag,
     int pure_ram,
@@ -446,6 +535,19 @@ bool calculate_time(
 
 
 
+/*
+ * [한국어]
+ * check_uca_org - 완성된 UCA 조직이 입력 편차 제약을 만족하는지 검사
+ *
+ * @u      : 태그+데이터 어레이가 결합된 uca_org_t 후보
+ * @minval : 전체 후보 중 최솟값 추적기
+ * @return : delay/dynamic/leakage/cycle/area 모두 허용 편차 이내이면 true
+ *
+ * g_ip->*_dev(예: delay_dev, area_dev)는 .cfg 파일에서 설정된 백분율 상한이다.
+ * (현재값 - 최솟값) / 최솟값 × 100이 상한을 초과하면 false를 반환한다.
+ *
+ * 호출 체인: find_optimal_uca() → [이 함수]
+ */
 bool check_uca_org(uca_org_t & u, min_values_t *minval)
 {
   if (((u.access_time - minval->min_delay)*100/minval->min_delay) > g_ip->delay_dev) {
@@ -470,6 +572,19 @@ bool check_uca_org(uca_org_t & u, min_values_t *minval)
   return true;
 }
 
+/*
+ * [한국어]
+ * check_mem_org - 단일 mem_array 후보가 편차 제약을 만족하는지 검사
+ *
+ * @u      : 단일 태그 또는 데이터 어레이 후보
+ * @minval : 해당 어레이 클래스의 최솟값 추적기
+ * @return : 모든 메트릭이 g_ip->*_dev 이내이면 true
+ *
+ * filter_tag_arr()에서 태그 어레이 후보들을 비용 평가하기 전에
+ * 먼저 편차 제약을 통과했는지 확인할 때 사용된다.
+ *
+ * 호출 체인: filter_tag_arr() → [이 함수]
+ */
 bool check_mem_org(mem_array & u, const min_values_t *minval)
 {
   if (((u.access_time - minval->min_delay)*100/minval->min_delay) > g_ip->delay_dev) {
@@ -497,6 +612,25 @@ bool check_mem_org(mem_array & u, const min_values_t *minval)
 
 
 
+/*
+ * [한국어]
+ * find_optimal_uca - 전체 UCA 후보 리스트에서 목적 함수를 최소화하는 설계점 선택
+ *
+ * @res    : 선택된 최적 uca_org_t를 기록할 출력 포인터
+ * @minval : delay/dynamic/leakage/area/cycle 최솟값 추적기
+ * @ulist  : 평가할 uca_org_t 후보 리스트
+ *
+ * g_ip->ed 값에 따라:
+ *   ed==1: ED(energy×delay) 곱 최소화
+ *   ed==2: ED²(energy×delay²) 최소화
+ *   그 외: 가중합 (delay_wt, cycle_time_wt, dynamic_power_wt,
+ *          leakage_power_wt, area_wt) 최소화 + 편차 제약 통과 필수
+ *
+ * 최소 비용 후보를 찾으면 ulist에서 제거(res가 소유권을 가져감)하여
+ * 나중에 메모리 해제가 중복되지 않도록 한다.
+ *
+ * 호출 체인: solve() → [이 함수]
+ */
 void find_optimal_uca(uca_org_t *res, min_values_t * minval, list<uca_org_t> & ulist)
 {
   double cost = 0;
@@ -582,6 +716,19 @@ void find_optimal_uca(uca_org_t *res, min_values_t * minval, list<uca_org_t> & u
 
 
 
+/*
+ * [한국어]
+ * filter_tag_arr - 태그 어레이 후보 리스트를 가중 비용으로 1개로 압축
+ *
+ * @min  : 태그 어레이 클래스의 최솟값 추적기
+ * @list : 태그 어레이 mem_array 포인터 리스트 (in-place로 줄어듦)
+ *
+ * 리스트를 뒤에서부터 순회하며 check_mem_org()를 통과한 후보에 대해
+ * delay/dynamic/leakage/area/cycle 가중합 비용을 계산한다.
+ * 최소 비용 후보 하나만 남기고 나머지는 delete로 해제한다.
+ *
+ * 호출 체인: solve() → [이 함수] → check_mem_org()
+ */
 void filter_tag_arr(const min_values_t * min, list<mem_array *> & list)
 {
   double cost = BIGNUM;
@@ -639,6 +786,19 @@ void filter_tag_arr(const min_values_t * min, list<mem_array *> & list)
 
 
 
+/*
+ * [한국어]
+ * filter_data_arr - 데이터 어레이 후보에서 지연·전력이 모두 최솟값 대비 50% 초과인
+ *                   후보를 제거
+ *
+ * @curr_list: 데이터 어레이 mem_array 포인터 리스트
+ *
+ * 탐색 공간을 줄이기 위해 명백히 열등한 후보를 삭제한다.
+ * (access_time > 1.5×min_delay) AND (dynamic_power > 1.5×min_dyn)인
+ * 항목을 제거하여 이후 uca_org_t 조합 평가 부담을 줄인다.
+ *
+ * 호출 체인: solve() → [이 함수]
+ */
 void filter_data_arr(list<mem_array *> & curr_list)
 {
   if (curr_list.empty() == true)
@@ -880,6 +1040,19 @@ void solve(uca_org_t *fin_res)
   delete t_min;
 }
 
+/*
+ * [한국어]
+ * update - 최종 선택된 UCA 설계점의 전력을 재계산 (leakage feedback)
+ *
+ * @fin_res: 최종 uca_org_t 결과 포인터
+ *
+ * solve()에서 선택된 tag_array2/data_array2의 파티션 파라미터를 기반으로
+ * UCA 객체를 다시 생성하여 최신 power 값을 fin_res->tag_array2/data_array2에
+ * 덮어쓴다. 이후 find_energy()를 호출해 전체 캐시 전력을 갱신한다.
+ * 온도 변화나 정밀한 leakage 재계산이 필요할 때 사용된다.
+ *
+ * 호출 체인: cacti_interface() → [이 함수] (필요 시)
+ */
 void update(uca_org_t *fin_res)
 {
   if(fin_res->tag_array2)

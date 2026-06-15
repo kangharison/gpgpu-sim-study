@@ -60,6 +60,30 @@
 # Ali Bakhoda, George L. Yuan, at the University of British Columbia, 
 # Vancouver, BC V6T 1Z4
 
+"""
+[한국어 설명] AerialVision 소스코드 뷰 PTX 통계 파서 (lexyacctexteditor.py)
+
+=== 파일의 역할 ===
+"Source Code View" 탭에서 사용하는 PTX/CUDA 소스 라인별 통계 파일(.stats)과
+PTX 파일(.ptx)을 파싱한다.
+- textEditorParseMe: .stats 파일에서 라인 번호별 통계 배열을 딕셔너리로 변환
+- ptxToCudaMapping: .ptx 파일의 .loc 디버그 지시어를 읽어 PTX 라인→CUDA 라인 매핑 생성
+
+=== 전체 아키텍처에서의 위치 ===
+  aerialvision/guiclasses.py - newTextTab.showData()
+        ↓
+  aerialvision/lexyacctexteditor.py (이 파일)
+        ↓
+  aerialvision/variableclasses.py - cudaLineNo/ptxLineNo 클래스
+
+=== 타 모듈과의 연결 ===
+- guiclasses.py: showData()에서 textEditorParseMe, ptxToCudaMapping 호출
+- organizedata.py: setCFLOGInfoFiles()로부터 PTX/stat 파일 경로 수신
+
+=== 주요 함수/구조체 요약 ===
+- textEditorParseMe(filename): .stats 파일 파싱, {라인번호: [통계값]} 반환
+- ptxToCudaMapping(filename): .ptx의 .loc 정보로 {CUDA라인: [PTX라인]} 반환
+"""
 
 
 import sys
@@ -69,6 +93,10 @@ import ply.lex as lex
 import ply.yacc as yacc
 import variableclasses as vc
 
+# [한국어]
+# textEditorParseMe: .stats 파일을 파싱하여 {라인번호: [통계값 리스트]} 딕셔너리를 반환.
+# 파일 형식: "<filename.ptx>: <라인번호>: <통계값1> <통계값2> ..."
+# 예: "/path/kernel.ptx: 100: 5 120 0 ..."
 def textEditorParseMe(filename):
     
     tokens = ['FILENAME', 'NUMBERSEQUENCE']
@@ -99,6 +127,7 @@ def textEditorParseMe(filename):
 
     def p_sentence(p):
       '''sentence : FILENAME NUMBERSEQUENCE'''
+      # [한국어] NUMBERSEQUENCE를 ':'로 분리하여 라인번호와 통계값 리스트 추출
       tmp1 = []
       tmp = p[2].split(':')
       for x in tmp:
@@ -122,6 +151,7 @@ def textEditorParseMe(filename):
         line = file.readline()
         if not line : break
         if (line.startswith('kernel line :')) :
+            # [한국어] 'kernel line :' 헤더 행은 컬럼명 정보이므로 파싱하지 않고 건다.
             line = line.strip()
             ptxLineStatName = line.split(' ')
             ptxLineStatName = ptxLineStatName[3:]
@@ -132,6 +162,12 @@ def textEditorParseMe(filename):
     return organized
   
   
+# [한국어]
+# ptxToCudaMapping: PTX 파일의 .loc 지시어를 분석하여
+# CUDA 소스 라인 번호 -> 해당 PTX 라인 번호 리스트 매핑을 반환.
+# .loc 형식: ".loc <파일번호> <CUDA라인> <컬럼>"
+# @filename: .ptx 파일 경로
+# @return: {CUDA라인: [PTX라인번호, ...]}
 def ptxToCudaMapping(filename):
   map = {}
   file = open(filename, 'r')
@@ -142,12 +178,14 @@ def ptxToCudaMapping(filename):
     line = file.readline()
     if not line: break
     try:
+      # [한국어] 현재 loc(CUDA 라인)에 현재 PTX 라인 번호(count)를 추가
       map[loc].append(count)
     except:
       map[loc] = []
       map[loc].append(count)
 
-    m = re.search('\.loc\s+(\d+)\s+(\d+)\s+(\d+)', line)
+    # [한국어] .loc 지시어를 만나면 현재 CUDA 소스 라인 갱신
+    m = re.search(r'\.loc\s+(\d+)\s+(\d+)\s+(\d+)', line)
     if (m != None):
       loc = int(m.group(2))
 
@@ -157,6 +195,7 @@ def ptxToCudaMapping(filename):
     
 
 #Unit test / playground
+# [한국어] 단위 테스트: 명령행 인자로 .stats 파일을 받아 100번 라인 통계 출력.
 def main():
     data = textEditorParseMe(sys.argv[1])
     print(data[100])
@@ -166,4 +205,3 @@ if __name__ == "__main__":
   
   
   
-

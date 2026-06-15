@@ -62,3 +62,7 @@ accel-sim-framework/
 gpu-app-collection/
 
 setup
+
+# Python bytecode cache
+__pycache__/
+*.pyc

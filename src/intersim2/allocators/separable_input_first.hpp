@@ -62,9 +62,22 @@ class SeparableInputFirstAllocator : public SeparableAllocator {
 
 public:
   
+  /*
+   * [한국어] 입력 먼저 분리 할당기 생성자
+   * @parent: 부모 모듈
+   * @name: 이름
+   * @inputs, @outputs: 입출력 포트 수
+   * @arb_type: 사용할 Arbiter 타입 문자열 ("round_robin", "matrix", "tree(N,round_robin)" 등)
+   * 호출 체인: Allocator::NewAllocator("separable_input_first") → SeparableInputFirstAllocator() → SeparableAllocator()
+   */
   SeparableInputFirstAllocator( Module* parent, const string& name, int inputs,
 				int outputs, const string& arb_type ) ;
 
+  /*
+   * [한국어] 입력 먼저 분리 매칭 실행
+   * 1단계 입력 중재 → 2단계 출력 중재 순서로 _inmatch/_outmatch를 채운다.
+   * 호출 체인: IQRouter::_SWAllocEvaluate() → SeparableInputFirstAllocator::Allocate()
+   */
   virtual void Allocate() ;
 
 } ;

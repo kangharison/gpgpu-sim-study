@@ -56,6 +56,15 @@
  * - get_area(): w, h 중 하나라도 0이면 직접 지정된 area 반환, 아니면 w×h 반환.
  * - set_w()/set_h()/set_area(): 폭, 높이, 면적을 직접 설정하는 세터.
  * - get_w()/get_h(): 현재 폭, 높이 반환하는 게터.
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * Area 클래스 자체는 설정을 직접 읽지 않지만, 상위 Bank/Mat/Subarray가 계산하는
+ * 면적은 AccelWattch XML의 캐시 구성 옵션(용량, 연관도, 블록 크기, 뱅크 수,
+ * 기술 노드, 셀 타입 등)과 gpgpusim.config의 -gpgpu_l2_rop_latency,
+ * -gpgpu_n_mem 등 간접적으로 영향을 받는다. 특히 기술 노드(F_sz_um)와 캐시
+ * 크기(cache_sz)는 면적 계산의 핵심 입력이며, 이 값들은 XML의
+ * sys.L2[0].L2_config, sys.dcache_config, sys.core[].icache_config 등에서
+ * 파생된다.
  */
 
 #ifndef __AREA_H__

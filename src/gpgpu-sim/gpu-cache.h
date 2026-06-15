@@ -2596,27 +2596,88 @@ class cache_stats {
   unsigned long long m_cache_fill_port_busy_cycles;
 };
 
+/*
+ * [한국어]
+ * cache_t - 모든 캐시 클래스의 추상 기반 클래스
+ *
+ * GPGPU-Sim 내 모든 캐시(L1D, L2, read-only, texture 등)가 구현해야 하는
+ * 최소 공개 인터페이스를 정의한다. access()는 한 번의 메모리 요청을 받아
+ * HIT/MISS/RESERVATION_FAIL 등의 결과를 반환하며, data_port_free() /
+ * fill_port_free()는 해당 사이클에 캐시 포트가 사용 가능한지를 스케줄러에게
+ * 알려준다.
+ *
+ * 파생 클래스:
+ *   - baseline_cache (read_only_cache, data_cache의 공통 베이스)
+ *   - tex_cache (텍스처 파이프라인 전용 FIFO+ROB 구조)
+ */
 class cache_t {
  public:
   virtual ~cache_t() {}
+
+  /*
+   * [한국어]
+   * access - 단일 메모리 요청에 대한 캐시 접근 수행
+   *
+   * @addr: 접근할 메모리 주소 (바이트 단위)
+   * @mf: 접근 정보를 담은 mem_fetch 패킷
+   * @time: 현재 사이클
+   * @events: 이번 접근으로 생성된 후속 이벤트(writeback/read 요청 등) 리스트
+   * @return: HIT, HIT_RESERVED, MISS, RESERVATION_FAIL 등
+   *
+   * 호출 체인:
+   *   shader.cc (ldst_unit) → l1_cache/read_only_cache::access → [이 함수]
+   *   mem_sub_partition → l2_cache::access → [이 함수]
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events) = 0;
 
   // accessors for cache bandwidth availability
+  /* [한국어] 데이터 포트(접근 포트) 사용 가능 여부 — 스케줄러가 매 사이클 확인 */
   virtual bool data_port_free() const = 0;
+  /* [한국어] fill 포트(하위 메모리 응답 수신 포트) 사용 가능 여부 */
   virtual bool fill_port_free() const = 0;
 };
 
+/* [한국어] 이벤트 리스트에 쓰기 요청(write/send)이 포함되어 있는지 확인 */
 bool was_write_sent(const std::list<cache_event> &events);
+/* [한국어] 이벤트 리스트에 읽기 요청(read/send)이 포함되어 있는지 확인 */
 bool was_read_sent(const std::list<cache_event> &events);
+/* [한국어] 이벤트 리스트에 write-allocate 읽기 요청이 포함되어 있는지 확인 */
 bool was_writeallocate_sent(const std::list<cache_event> &events);
 
-/// Baseline cache
-/// Implements common functions for read_only_cache and data_cache
-/// Each subclass implements its own 'access' function
+/*
+ * [한국어]
+ * baseline_cache - read_only_cache와 data_cache의 공통 베이스
+ *
+ * 태그 배열(m_tag_array), MSHR 테이블(m_mshrs), 미스 큐(m_miss_queue),
+ * 대역폭 관리(bandwidth_management), 통계(m_stats) 등을 멤버로 가지며
+ * cycle()/fill()과 같은 타이밍 동작을 공통으로 구현한다. 구체적인 access()
+ * 동작은 파생 클래스(read_only_cache, data_cache)가 재정의한다.
+ *
+ * 주요 설정 영향:
+ *   - m_write_policy / m_write_alloc_policy: data_cache의 히트/미스 핸들러 선택
+ *   - m_mshr_type / m_mshr_entries / m_mshr_max_merge: MSHR 병합 및 용량
+ *   - m_miss_queue_size: 하위 메모리로 전송 대기 큐의 최대 길이
+ */
 class baseline_cache : public cache_t {
  public:
+  /*
+   * [한국어]
+   * baseline_cache 생성자 - 이름, 설정, 코어/타입 ID, 하위 메모리 포트로 초기화
+   *
+   * @name: 통계 및 디버그 출력용 캐시 이름(예: "L1D_cache")
+   * @config: 이 캐시의 구성 정보(라인 크기, 셋 수, 연관도, 정책 등)
+   * @core_id: 소속 SM(또는 메모리 파티션) ID
+   * @type_id: 캐시 유형 ID
+   * @memport: 하위 메모리 계층과의 인터페이스
+   * @status: 미스 큐에 들어갈 mem_fetch의 초기 상태
+   * @level: L1 또는 L2 캐시 수준(통계 집계용)
+   * @gpu: 상위 gpgpu_sim 객체(통계/시간 획득)
+   *
+   * 호출 체인:
+   *   l1_cache/l2_cache/read_only_cache 생성자 → [이 생성자] → init()
+   */
   baseline_cache(const char *name, cache_config &config, int core_id,
                  int type_id, mem_fetch_interface *memport,
                  enum mem_fetch_status status, enum cache_gpu_level level,
@@ -2630,6 +2691,13 @@ class baseline_cache : public cache_t {
     init(name, config, memport, status);
   }
 
+  /*
+   * [한국어]
+   * init - 파생 클래스 생성자 또는 보호 생성자에서 재사용하는 공통 초기화
+   *
+   * 캐시 이름, 하위 메모리 포트, 미스 큐 상태를 설정하고 MSHR 타입이
+   * ASSOC/SECTOR_ASSOC 중 하나임을 검증한다.
+   */
   void init(const char *name, const cache_config &config,
             mem_fetch_interface *memport, enum mem_fetch_status status) {
     m_name = name;
@@ -2640,6 +2708,13 @@ class baseline_cache : public cache_t {
 
   virtual ~baseline_cache() { delete m_tag_array; }
 
+  /*
+   * [한국어]
+   * update_cache_parameters - 런타임에 캐시 설정을 갱신
+   *
+   * 주로 AccelWattch/SST 등에서 전력/성능 재구성 시 사용하며, 설정 변경 시
+   * 태그 배열의 라인 수/셋 수와 MSHR 용량을 다시 검증한다.
+   */
   void update_cache_parameters(cache_config &config) {
     m_config = config;
     m_tag_array->update_cache_parameters(config);
@@ -2647,29 +2722,67 @@ class baseline_cache : public cache_t {
                                   config.m_mshr_max_merge);
   }
 
+  /*
+   * [한국어]
+   * access - 실제 캐시 접근 동작(순수 가상 함수)
+   *
+   * 파생 클래스(read_only_cache, data_cache)가 구체적인 태그 프로브,
+   * 히트/미스 처리, 쓰기 정책 등을 구현한다.
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events) = 0;
-  /// Sends next request to lower level of memory
+
+  /* [한국어] 매 사이클 miss_queue의 선두를 하위 메모리로 발송하고 fill 처리 */
   void cycle();
-  /// Interface for response from lower memory level (model bandwidth
-  /// restictions in caller)
+
+  /*
+   * [한국어]
+   * fill - 하위 메모리에서 데이터 응답이 도착했을 때 캐시 라인을 채우고 MSHR을
+   *        ready 상태로 전환
+   *
+   * 호출자에서 대역폭 제약을 모델링한 뒤 이 함수를 호출한다.
+   */
   void fill(mem_fetch *mf, unsigned time);
-  /// Checks if mf is waiting to be filled by lower memory level
+
+  /* [한국어] 이 mem_fetch가 현재 이 캐시의 fill 응답을 기다리는지 확인 */
   bool waiting_for_fill(mem_fetch *mf);
-  /// Are any (accepted) accesses that had to wait for memory now ready? (does
-  /// not include accesses that "HIT")
+
+  /*
+   * [한국어]
+   * access_ready - 메모리 응답을 기다리던 접근 중 완료된 것이 있는지 확인
+   *
+   * HIT는 포함하지 않으며, MSHR의 ready 큐를 검사한다.
+   */
   bool access_ready() const { return m_mshrs.access_ready(); }
-  /// Pop next ready access (does not include accesses that "HIT")
+
+  /* [한국어] MSHR에서 다음 완료된 접근을 꺼내 반환(HIT는 포함 안 함) */
   mem_fetch *next_access() { return m_mshrs.next_access(); }
-  // flash invalidate all entries in cache
+
+  /* [한국어] 캐시의 모든 엔트리를 즉시 무효화(flush) */
   void flush() { m_tag_array->flush(); }
+  /* [한국어] 캐시의 모든 엔트리를 invalidate 상태로 변경 */
   void invalidate() { m_tag_array->invalidate(); }
+
+  /* [한국어] 파일에 캐시 히트/미스 통계를 출력 */
   void print(FILE *fp, unsigned &accesses, unsigned &misses) const;
+
+  /* [한국어] 파일에 캐시 현재 상태(MSHR, miss_queue 등)를 디버그 출력 */
   void display_state(FILE *fp) const;
 
   // Stat collection
+  /* [한국어] 캐시 통계 객체에 대한 상수 참조 반환 */
   const cache_stats &get_stats() const { return m_stats; }
+
+  /*
+   * [한국어]
+   * get_stats - 지정된 접근 유형/상태 조합의 통계값을 반환
+   *
+   * @access_type: 관심 있는 mem_access_type 배열
+   * @num_access_type: 배열 길이
+   * @access_status: 관심 있는 cache_request_status 배열
+   * @num_access_status: 배열 길이
+   */
   unsigned get_stats(enum mem_access_type *access_type,
                      unsigned num_access_type,
                      enum cache_request_status *access_status,
@@ -2677,37 +2790,67 @@ class baseline_cache : public cache_t {
     return m_stats.get_stats(access_type, num_access_type, access_status,
                              num_access_status);
   }
+
+  /* [한국어] 누적 서브 통계를 css에 복사 */
   void get_sub_stats(struct cache_sub_stats &css) const {
     m_stats.get_sub_stats(css);
   }
-  // Clear per-window stats for AerialVision support
+
+  /* [한국어] AerialVision 윈도우별 통계를 초기화 */
   void clear_pw() { m_stats.clear_pw(); }
-  // Per-window sub stats for AerialVision support
+
+  /* [한국어] AerialVision 윈도우별 서브 통계를 css에 복사 */
   void get_sub_stats_pw(struct cache_sub_stats_pw &css) const {
     m_stats.get_sub_stats_pw(css);
   }
 
   // accessors for cache bandwidth availability
+  /* [한국어] 데이터 포트가 현재 사이클에 사용 가능한지 반환 */
   bool data_port_free() const {
     return m_bandwidth_management.data_port_free();
   }
+
+  /* [한국어] fill 포트가 현재 사이클에 사용 가능한지 반환 */
   bool fill_port_free() const {
     return m_bandwidth_management.fill_port_free();
   }
+
+  /*
+   * [한국어]
+   * inc_aggregated_stats - L1/L2 전역 집계 통계에 접근 결과를 기록
+   *
+   * @status: 최종 반환될 접근 상태(예: MISS)
+   * @cache_status: 태그 프로브 결과(예: MISS)
+   * @mf: 관련 mem_fetch
+   * @level: L1 또는 L2
+   */
   void inc_aggregated_stats(cache_request_status status,
                             cache_request_status cache_status, mem_fetch *mf,
                             enum cache_gpu_level level);
+
+  /*
+   * [한국어]
+   * inc_aggregated_fail_stats - 접근이 RESERVATION_FAIL 등으로 거부된 경우
+   *                             실패 원인별 통계에 기록
+   */
   void inc_aggregated_fail_stats(cache_request_status status,
                                  cache_request_status cache_status,
                                  mem_fetch *mf, enum cache_gpu_level level);
+
+  /*
+   * [한국어]
+   * inc_aggregated_stats_pw - 윈도우별 L1/L2 전역 집계 통계에 접근 결과 기록
+   */
   void inc_aggregated_stats_pw(cache_request_status status,
                                cache_request_status cache_status, mem_fetch *mf,
                                enum cache_gpu_level level);
 
-  // This is a gapping hole we are poking in the system to quickly handle
-  // filling the cache on cudamemcopies. We don't care about anything other than
-  // L2 state after the memcopy - so just force the tag array to act as though
-  // something is read or written without doing anything else.
+  /*
+   * [한국어]
+   * force_tag_access - cudaMemcpy 등에서 L2 상태만 강제로 갱신할 때 사용
+   *
+   * 실제 메모리 트랜잭션 없이 태그 배열에만 라인을 채우도록 강제한다.
+   */
   void force_tag_access(new_addr_type addr, unsigned time,
                         mem_access_sector_mask_t mask) {
     mem_access_byte_mask_t byte_mask;
@@ -2715,7 +2858,12 @@ class baseline_cache : public cache_t {
   }
 
  protected:
-  // Constructor that can be used by derived classes with custom tag arrays
+  /*
+   * [한국어]
+   * 보호 생성자 - 파생 클래스가 커스텀 tag_array를 사용할 때 호출
+   *
+   * 예: sector 기반 캐시에서 별도의 tag_array 구현체를 주입할 때 사용한다.
+   */
   baseline_cache(const char *name, cache_config &config, int core_id,
                  int type_id, mem_fetch_interface *memport,
                  enum mem_fetch_status status, tag_array *new_tag_array)
@@ -2727,16 +2875,24 @@ class baseline_cache : public cache_t {
   }
 
  protected:
-  std::string m_name;
-  cache_config &m_config;
-  tag_array *m_tag_array;
-  mshr_table m_mshrs;
-  std::list<mem_fetch *> m_miss_queue;
-  enum mem_fetch_status m_miss_queue_status;
-  mem_fetch_interface *m_memport;
-  cache_gpu_level m_level;
-  gpgpu_sim *m_gpu;
+  std::string m_name;        /* [한국어] 캐시 이름("L1D_cache", "L2_cache" 등) */
+  cache_config &m_config;    /* [한국어] 이 캐시의 구성 정보에 대한 참조 */
+  tag_array *m_tag_array;    /* [한국어] 태그/데이터(섹터) 상태 배열 */
+  mshr_table m_mshrs;        /* [한국어] 미스 상태 저장/병합 테이블 */
+  std::list<mem_fetch *> m_miss_queue;  /* [한국어] 하위 메모리로 전송 대기 중인 요청 큐 */
+  enum mem_fetch_status m_miss_queue_status;  /* [한국어] miss_queue에 추가될 mf의 상태 */
+  mem_fetch_interface *m_memport;  /* [한국어] 하위 메모리 포트(L1→L2, L2→DRAM) */
+  cache_gpu_level m_level;         /* [한국어] L1 또는 L2 수준(통계 집계용) */
+  gpgpu_sim *m_gpu;                /* [한국어] 상위 시뮬레이터 객체 */
 
+  /*
+   * [한국어]
+   * extra_mf_fields - miss_queue/MSHR로 발송된 mem_fetch에 대한 추가 메타데이터
+   *
+   * fill 응답이 돌아왔을 때 원본 요청의 블록 주소, 캐시 인덱스, 데이터 크기를
+   * 복원하는 데 사용된다. pending_read는 섹터 캐시에서 아직 도착하지 않은
+   * 섹터 수를 추적한다.
+   */
   struct extra_mf_fields {
     extra_mf_fields() { m_valid = false; }
     extra_mf_fields(new_addr_type a, new_addr_type ad, unsigned i, unsigned d,
@@ -2750,76 +2906,130 @@ class baseline_cache : public cache_t {
                          ? m_config.m_line_sz / SECTOR_SIZE
                          : 0;
     }
-    bool m_valid;
-    new_addr_type m_block_addr;
-    new_addr_type m_addr;
-    unsigned m_cache_index;
-    unsigned m_data_size;
-    // this variable is used when a load request generates multiple load
-    // transactions For example, a read request from non-sector L1 request sends
-    // a request to sector L2
+    bool m_valid;              /* [한국어] 이 메타데이터 엔트리의 유효성 */
+    new_addr_type m_block_addr;  /* [한국어] 블록 단위 정렬 주소 */
+    new_addr_type m_addr;        /* [한국어] 원본 바이트 주소 */
+    unsigned m_cache_index;      /* [한국어] 태그 배열에서 할당된 라인 인덱스 */
+    unsigned m_data_size;        /* [한국어] 요청 데이터 크기(바이트) */
+    /* [한국어]
+     * 섹터 캐시에서 하나의 읽기가 여러 섹터 요청으로 분할될 때
+     * 아직 응답받지 못한 섹터 수를 카운트한다.
+     * 예: L1(비섹터) → L2(섹터) 읽기 시 L2에서 사용.
+     */
     unsigned pending_read;
   };
 
   typedef std::map<mem_fetch *, extra_mf_fields> extra_mf_fields_lookup;
 
-  extra_mf_fields_lookup m_extra_mf_fields;
+  extra_mf_fields_lookup m_extra_mf_fields;  /* [한국어] mf → extra_mf_fields 맵 */
 
-  cache_stats m_stats;
+  cache_stats m_stats;  /* [한국어] 이 캐시의 접근/히트/미스 통계 */
 
-  /// Checks whether this request can be handled on this cycle. num_miss equals
-  /// max # of misses to be handled on this cycle
+  /*
+   * [한국어]
+   * miss_queue_full - 이번 사이클에 추가할 num_miss개 요청을 수용할 공간이
+   *                   있는지 확인
+   */
   bool miss_queue_full(unsigned num_miss) {
     return ((m_miss_queue.size() + num_miss) >= m_config.m_miss_queue_size);
   }
-  /// Read miss handler without writeback
+
+  /*
+   * [한국어]
+   * send_read_request (wb 없는 버전) - writeback 정보가 필요 없는 읽기 미스 처리
+   *
+   * read_only_cache 등에서 호출되며, 내은 send_read_request(wb 버전)로
+   * 위임한다.
+   */
   void send_read_request(new_addr_type addr, new_addr_type block_addr,
                          unsigned cache_index, mem_fetch *mf, unsigned time,
                          bool &do_miss, std::list<cache_event> &events,
                          bool read_only, bool wa);
-  /// Read miss handler. Check MSHR hit or MSHR available
+
+  /*
+   * [한국어]
+   * send_read_request (wb 버전) - 읽기 미스 시 MSHR 등록/병합 및 miss_queue 발송
+   *
+   * MSHR hit이면 요청을 병합하고, MSHR miss면 새 MSHR 엔트리를 할당한다.
+   * 필요하면 evicted 블록의 writeback 정볏도 반환한다.
+   */
   void send_read_request(new_addr_type addr, new_addr_type block_addr,
                          unsigned cache_index, mem_fetch *mf, unsigned time,
                          bool &do_miss, bool &wb, evicted_block_info &evicted,
                          std::list<cache_event> &events, bool read_only,
                          bool wa);
 
-  /// Sub-class containing all metadata for port bandwidth management
+  /*
+   * [한국어]
+   * bandwidth_management - 캐시 데이터/_fill 포트의 사이클 단위 대역폭 관리
+   *
+   * m_data_port_occupied_cycles / m_fill_port_occupied_cycles에 남은 점유
+   * 사이클 수를 관리하여, 한 번에 여러 포트를 사용할 수 없도록 제한한다.
+   * 설정(config)의 m_data_port_width/fill_port_width에 따라 점유 사이클이
+   * 결정된다.
+   */
   class bandwidth_management {
    public:
     bandwidth_management(cache_config &config);
 
-    /// use the data port based on the outcome and events generated by the
-    /// mem_fetch request
+    /*
+     * [한국어]
+     * use_data_port - 접근 결과와 이벤트에 따라 데이터 포트 대역폭 소비
+     *
+     * HIT/MISS/RESERVATION_FAIL 여부와 writeback/read 이벤트 발생 여부를
+     * 바탕으로 m_data_port_occupied_cycles를 증가시킨다.
+     */
     void use_data_port(mem_fetch *mf, enum cache_request_status outcome,
                        const std::list<cache_event> &events);
 
-    /// use the fill port
+    /* [한국어] fill 포트를 사용하여 대역폭 카운터를 소비 */
     void use_fill_port(mem_fetch *mf);
 
-    /// called every cache cycle to free up the ports
+    /* [한국어] 매 사이클 호출되어 점유 카운터를 감소(0 이하로 내림) */
     void replenish_port_bandwidth();
 
-    /// query for data port availability
+    /* [한국어] 데이터 포트가 현재 사용 가능한지 반환 */
     bool data_port_free() const;
-    /// query for fill port availability
+    /* [한국어] fill 포트가 현재 사용 가능한지 반환 */
     bool fill_port_free() const;
 
    protected:
-    const cache_config &m_config;
+    const cache_config &m_config;  /* [한국어] 포트 폭 등 대역폭 설정 참조 */
 
-    int m_data_port_occupied_cycles;  //< Number of cycle that the data port
-                                      // remains used
-    int m_fill_port_occupied_cycles;  //< Number of cycle that the fill port
-                                      // remains used
+    /* [한국어] 데이터 포트가 추가 점유될 사이클 수(0이면 사용 가능) */
+    int m_data_port_occupied_cycles;
+    /* [한국어] fill 포트가 추가 점유될 사이클 수(0이면 사용 가능) */
+    int m_fill_port_occupied_cycles;
   };
 
-  bandwidth_management m_bandwidth_management;
+  bandwidth_management m_bandwidth_management;  /* [한국어] 이 캐시의 대역폭 관리자 */
 };
 
-/// Read only cache
+/*
+ * [한국어]
+ * read_only_cache - 읽기 전용 캐시(상수 캐시, 명령어 캐시, read-only 데이터)
+ *
+ * 쓰기 동작을 허용하지 않으며, HIT 시 즉시 응답하고 MISS 시 하위 메모리로
+ * 읽기 요청을 발송한다. baseline_cache의 공통 cycle()/fill()을 재사용한다.
+ *
+ * 사용 예:
+ *   - Fermi/Keler의 상수 캐시(const cache)
+ *   - 일부 read-only 텍스처/표면 접근
+ */
 class read_only_cache : public baseline_cache {
  public:
+  /*
+   * [한국어]
+   * read_only_cache 생성자 - 읽기 전용 캐시 초기화
+   *
+   * @name: 캐시 이름
+   * @config: 캐시 구성(쓰기 정책은 READ_ONLY여야 함)
+   * @core_id/type_id: 소속 코어/유형 ID
+   * @memport: 하위 메모리 인터페이스
+   * @status: miss_queue에 추가될 mf 상태
+   * @level: L1/L2 수준
+   * @gpu: 상위 시뮬레이터
+   */
   read_only_cache(const char *name, cache_config &config, int core_id,
                   int type_id, mem_fetch_interface *memport,
                   enum mem_fetch_status status, enum cache_gpu_level level,
@@ -2827,8 +3037,17 @@ class read_only_cache : public baseline_cache {
       : baseline_cache(name, config, core_id, type_id, memport, status, level,
                        gpu) {}
 
-  /// Access cache for read_only_cache: returns RESERVATION_FAIL if request
-  /// could not be accepted (for any reason)
+  /*
+   * [한국어]
+   * access - 읽기 전용 캐시 접근
+   *
+   * @return: HIT, MISS, RESERVATION_FAIL 등. 요청이 수용 불가능하면
+   *          RESERVATION_FAIL을 반환한다.
+   *
+   * 호출 체인:
+   *   shader.cc → read_only_cache::access() → tag_array::access
+   *             → baseline_cache::send_read_request (MISS 시)
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
@@ -2836,6 +3055,7 @@ class read_only_cache : public baseline_cache {
   virtual ~read_only_cache() {}
 
  protected:
+  /* [한국어] 커스텀 tag_array를 사용하는 보호 생성자 */
   read_only_cache(const char *name, cache_config &config, int core_id,
                   int type_id, mem_fetch_interface *memport,
                   enum mem_fetch_status status, tag_array *new_tag_array)
@@ -2843,9 +3063,31 @@ class read_only_cache : public baseline_cache {
                        new_tag_array) {}
 };
 
-/// Data cache - Implements common functions for L1 and L2 data cache
+/*
+ * [한국어]
+ * data_cache - L1/L2 데이터 캐시의 공통 베이스
+ *
+ * 쓰기 정책(write_policy)과 쓰기 할당 정책(write_alloc_policy)에 따라
+ * m_wr_hit, m_wr_miss 함수 포인터를 선택한다. 태그 프로브 결과는
+ * process_tag_probe()에서 읽기/쓰기 × 히트/미스 조합으로 디스패치된다.
+ *
+ * 주요 설정 영향:
+ *   - m_write_policy: WRITE_BACK / WRITE_THROUGH / WRITE_EVICT /
+ *                     LOCAL_WB_GLOBAL_WT 중 하나로 m_wr_hit 선택
+ *   - m_write_alloc_policy: NO_WRITE_ALLOCATE / WRITE_ALLOCATE /
+ *                           FETCH_ON_WRITE / LAZY_FETCH_ON_READ 중 하나로
+ *                           m_wr_miss 선택
+ */
 class data_cache : public baseline_cache {
  public:
+  /*
+   * [한국어]
+   * data_cache 생성자 - 데이터 캐시 초기화
+   *
+   * @wr_alloc_type: write-allocate 발생 시 생성할 mem_fetch 접근 유형
+   * @wrbk_type: writeback 발생 시 생성할 mem_fetch 접근 유형
+   * @mfcreator: mem_fetch 할당기
+   */
   data_cache(const char *name, cache_config &config, int core_id, int type_id,
              mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
              enum mem_fetch_status status, mem_access_type wr_alloc_type,
@@ -2861,6 +3103,12 @@ class data_cache : public baseline_cache {
 
   virtual ~data_cache() {}
 
+  /*
+   * [한국어]
+   * init - 쓰기 정책/쓰기 할당 정책에 따라 함수 포인터를 설정
+   *
+   * m_rd_hit, m_rd_miss는 고정이며 m_wr_hit/m_wr_miss만 설정에서 선택한다.
+   */
   virtual void init(mem_fetch_allocator *mfcreator) {
     m_memfetch_creator = mfcreator;
 
@@ -2913,11 +3161,19 @@ class data_cache : public baseline_cache {
     }
   }
 
+  /*
+   * [한국어]
+   * access - 데이터 캐시 최상위 접근 함수
+   *
+   * tag_array::probe() 결과를 process_tag_probe()로 넘겨 히트/미스를 처리한다.
+   * L1D와 L2 모두 이 함수를 통해 접근된다.
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
 
  protected:
+  /* [한국어] 커스텀 tag_array를 사용하는 보호 생성자 */
   data_cache(const char *name, cache_config &config, int core_id, int type_id,
              mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
              enum mem_fetch_status status, tag_array *new_tag_array,
@@ -2931,15 +3187,28 @@ class data_cache : public baseline_cache {
     m_gpu = gpu;
   }
 
-  mem_access_type m_wr_alloc_type;  // Specifies type of write allocate request
-                                    // (e.g., L1 or L2)
+  mem_access_type m_wr_alloc_type;  /* [한국어] write-allocate 요청의 mem_access_type */
   mem_access_type
-      m_wrbk_type;  // Specifies type of writeback request (e.g., L1 or L2)
-  class gpgpu_sim *m_gpu;
+      m_wrbk_type;  /* [한국어] writeback 요청의 mem_access_type */
+  class gpgpu_sim *m_gpu;  /* [한국어] 상위 시뮬레이터 객체 */
 
-  //! A general function that takes the result of a tag_array probe
-  //  and performs the correspding functions based on the cache configuration
-  //  The access fucntion calls this function
+  /*
+   * [한국어]
+   * process_tag_probe - tag_array::probe() 결과를 받아 정책별 핸들러로 디스패치
+   *
+   * @wr: 쓰기 요청 여부
+   * @status: probe 결과(HIT/MISS/RESERVATION_FAIL 등)
+   * @addr: 접근 주소
+   * @cache_index: 태그 배열에서 선택된 라인 인덱스
+   * @mf: mem_fetch 패킷
+   * @time: 현재 사이클
+   * @events: 생성된 후속 이벤트 리스트
+   * @return: 최종 cache_request_status
+   *
+   * 호출 체인:
+   *   data_cache::access() → tag_array::probe() → [이 함수] → m_wr_hit/
+   *   m_wr_miss/m_rd_hit/m_rd_miss
+   */
   enum cache_request_status process_tag_probe(bool wr,
                                               enum cache_request_status status,
                                               new_addr_type addr,
@@ -2948,64 +3217,93 @@ class data_cache : public baseline_cache {
                                               std::list<cache_event> &events);
 
  protected:
-  mem_fetch_allocator *m_memfetch_creator;
+  mem_fetch_allocator *m_memfetch_creator;  /* [한국어] mem_fetch 객체 할당기 */
 
   // Functions for data cache access
-  /// Sends write request to lower level memory (write or writeback)
+  /*
+   * [한국어]
+   * send_write_request - 쓰기 요청 또는 writeback 요청을 miss_queue에 추가
+   *
+   * @mf: 하위 메모리로 복사할 mem_fetch
+   * @request: cache_event_type이 WRITE_REQUEST 또는 WRITE_BACK_REQUEST인 이벤트
+   */
   void send_write_request(mem_fetch *mf, cache_event request, unsigned time,
                           std::list<cache_event> &events);
+
+  /*
+   * [한국어]
+   * update_m_readable - 섹터 캐시에서 쓰기 후 readable 섹터 비트 갱신
+   *
+   * 쓰기로 인해 해당 섹터가 최신 데이터를 갖게 되면 readable 마스크를
+   * 업데이트하여 이후 읽기가 올바른 데이터를 얻도록 한다.
+   */
   void update_m_readable(mem_fetch *mf, unsigned cache_index);
   // Member Function pointers - Set by configuration options
   // to the functions below each grouping
   /******* Write-hit configs *******/
+  /* [한국어] 쓰기 히트 정책 함수 포인터 — init()에서 m_write_policy에 따라 설정 */
   enum cache_request_status (data_cache::*m_wr_hit)(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
-  /// Marks block as MODIFIED and updates block LRU
+
+  /* [한국어] write-back: 블록을 MODIFIED로 표시하고 LRU 갱신 */
   enum cache_request_status wr_hit_wb(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status status);  // write-back
+
+  /* [한국어] write-through: 캐시 갱신과 동시에 하위 메모리에 쓰기 요청 */
   enum cache_request_status wr_hit_wt(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status status);  // write-through
 
-  /// Marks block as INVALID and sends write request to lower level memory
+  /* [한국어] write-evict: 블록을 INVALID로 만들고 하위 메모리에만 쓰기 */
   enum cache_request_status wr_hit_we(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status status);  // write-evict
+
+  /* [한국어] global write-evict, local write-back 복합 정책 */
   enum cache_request_status wr_hit_global_we_local_wb(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
   // global write-evict, local write-back
 
   /******* Write-miss configs *******/
+  /* [한국어] 쓰기 미스 정책 함수 포인터 — init()에서 m_write_alloc_policy에 따라 설정 */
   enum cache_request_status (data_cache::*m_wr_miss)(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
-  /// Sends read request, and possible write-back request,
-  //  to lower level memory for a write miss with write-allocate
+
+  /* [한국어] write-allocate naive: write 요청과 read fetch를 동시에 발송 */
   enum cache_request_status wr_miss_wa_naive(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status
           status);  // write-allocate-send-write-and-read-request
+
+  /* [한국어] fetch-on-write: 전체 라인 쓰기 시 fetch 회피, 부분 시 fetch */
   enum cache_request_status wr_miss_wa_fetch_on_write(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status
           status);  // write-allocate with fetch-on-every-write
+
+  /* [한국어] lazy fetch-on-read: 쓰기 시 캐시만 갱신, 읽기 시에만 fetch */
   enum cache_request_status wr_miss_wa_lazy_fetch_on_read(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status status);  // write-allocate with read-fetch-only
+
+  /* [한국어] write-allocate without read fetch: 쓰기만으로 라인 할당 */
   enum cache_request_status wr_miss_wa_write_validate(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status
           status);  // write-allocate that writes with no read fetch
+
+  /* [한국어] no write-allocate: 쓰기를 하위 메모리로만 직접 전달 */
   enum cache_request_status wr_miss_no_wa(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
@@ -3013,9 +3311,12 @@ class data_cache : public baseline_cache {
 
   // Currently no separate functions for reads
   /******* Read-hit configs *******/
+  /* [한국어] 읽기 히트 정책 함수 포인터 — 항상 rd_hit_base로 설정 */
   enum cache_request_status (data_cache::*m_rd_hit)(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
+
+  /* [한국어] 읽기 히트 기본 처리: LRU 갱신 및 원자 연산 특수 처리 */
   enum cache_request_status rd_hit_base(new_addr_type addr,
                                         unsigned cache_index, mem_fetch *mf,
                                         unsigned time,
@@ -3023,9 +3324,12 @@ class data_cache : public baseline_cache {
                                         enum cache_request_status status);
 
   /******* Read-miss configs *******/
+  /* [한국어] 읽기 미스 정책 함수 포인터 — 항상 rd_miss_base로 설정 */
   enum cache_request_status (data_cache::*m_rd_miss)(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
+
+  /* [한국어] 읽기 미스 기본 처리: 하위 메모리 read 요청 및 eviction writeback */
   enum cache_request_status rd_miss_base(new_addr_type addr,
                                          unsigned cache_index, mem_fetch *mf,
                                          unsigned time,
@@ -3033,12 +3337,24 @@ class data_cache : public baseline_cache {
                                          enum cache_request_status status);
 };
 
-/// This is meant to model the first level data cache in Fermi.
-/// It is write-evict (global) or write-back (local) at
-/// the granularity of individual blocks
-/// (the policy used in fermi according to the CUDA manual)
+/*
+ * [한국어]
+ * l1_cache - SM 내의 L1 데이터 캐시 (Fermi 스타일)
+ *
+ * data_cache를 상속하며, write-allocate와 writeback 요청 유형을
+ * L1_WR_ALLOC_R / L1_WRBK_ACC로 고정한다. CUDA 메뉴얼에 따륜
+ * global write-evict / local write-back 블록 단위 정책을 모델링한다.
+ */
 class l1_cache : public data_cache {
  public:
+  /*
+   * [한국어]
+   * l1_cache 생성자 - L1 데이터 캐시 초기화
+   *
+   * @mfcreator: mem_fetch 할당기
+   * @gpu: 상위 gpgpu_sim 객체
+   * @level: 통계 집계용 캐시 수준(보통 L1)
+   */
   l1_cache(const char *name, cache_config &config, int core_id, int type_id,
            mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
            enum mem_fetch_status status, class gpgpu_sim *gpu,
@@ -3048,11 +3364,19 @@ class l1_cache : public data_cache {
 
   virtual ~l1_cache() {}
 
+  /*
+   * [한국어]
+   * access - L1 데이터 캐시 접근
+   *
+   * 현재는 data_cache::access()를 직접 호출하며, L1 특화 동작이 필요하면
+   * 여기에 추가할 수 있다.
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
 
  protected:
+  /* [한국어] 커스텀 tag_array를 사용하는 보호 생성자 */
   l1_cache(const char *name, cache_config &config, int core_id, int type_id,
            mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
            enum mem_fetch_status status, tag_array *new_tag_array,
@@ -3061,10 +3385,24 @@ class l1_cache : public data_cache {
                    new_tag_array, L1_WR_ALLOC_R, L1_WRBK_ACC, gpu) {}
 };
 
-/// Models second level shared cache with global write-back
-/// and write-allocate policies
+/*
+ * [한국어]
+ * l2_cache - 공유 L2 캐시
+ *
+ * data_cache를 상속하며, write-allocate/writeback 유형을
+ * L2_WR_ALLOC_R / L2_WRBK_ACC로 고정한다. GPU 전체 SM이 공유하며
+ * 메모리 파티션(memory_sub_partition)에서 인스턴스화된다.
+ */
 class l2_cache : public data_cache {
  public:
+  /*
+   * [한국어]
+   * l2_cache 생성자 - L2 공유 캐시 초기화
+   *
+   * @mfcreator: mem_fetch 할당기
+   * @gpu: 상위 gpgpu_sim 객체
+   * @level: 통계 집계용 캐시 수준(보통 L2)
+   */
   l2_cache(const char *name, cache_config &config, int core_id, int type_id,
            mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
            enum mem_fetch_status status, class gpgpu_sim *gpu,
@@ -3074,6 +3412,12 @@ class l2_cache : public data_cache {
 
   virtual ~l2_cache() {}
 
+  /*
+   * [한국어]
+   * access - L2 캐시 접근
+   *
+   * 현재는 data_cache::access()를 직접 호출한다.
+   */
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
@@ -3081,13 +3425,39 @@ class l2_cache : public data_cache {
 
 /*****************************************************************************/
 
-// See the following paper to understand this cache model:
-//
-// Igehy, et al., Prefetching in a Texture Cache Architecture,
-// Proceedings of the 1998 Eurographics/SIGGRAPH Workshop on Graphics Hardware
-// http://www-graphics.stanford.edu/papers/texture_prefetch/
+/*
+ * [한국어]
+ * tex_cache - 텍스처 파이프라인 전용 캐시
+ *
+ * Igehy et al., "Prefetching in a Texture Cache Architecture"의 모델을 기반으로
+ * 한다. 일반 CPU 캐시와 달리 텍스처 캐시는 HIT이라도 데이터가 즉시 준비되지
+ * 않을 수 있으므로 fragment_fifo + ROB(Reorder Buffer) 구조를 사용하여
+ * out-of-order 응답을 in-order로 정렬한다.
+ *
+ * 주요 구성 요소:
+ *   - m_fragment_fifo: 접근 요청이 처리 단계를 거치는 FIFO
+ *   - m_request_fifo: 하위 메모리로 발송 대기 중인 요청 FIFO
+ *   - m_rob: 하위 메모리 응답 도착 순서를 원래 요청 순서로 정렬하는 버퍼
+ *   - m_result_fifo: 완료되어 SM으로 반환될 요청 FIFO
+ *
+ * 설정 제약:
+ *   - m_mshr_type은 TEX_FIFO 또는 SECTOR_TEX_FIFO
+ *   - m_write_policy는 READ_ONLY
+ *   - m_alloc_policy는 ON_MISS
+ */
 class tex_cache : public cache_t {
  public:
+  /*
+   * [한국어]
+   * tex_cache 생성자 - 텍스처 캐시 초기화
+   *
+   * @name: 캐시 이름
+   * @config: 캐시 구성(텍스처 FIFO 관련 크기 포함)
+   * @core_id/type_id: 소속 코어/유형 ID
+   * @memport: 하위 메모리 인터페이스
+   * @request_status: request_fifo에 들어갈 mf 상태
+   * @rob_status: fill 완료 후 ROB 엔트리에 설정할 mf 상태
+   */
   tex_cache(const char *name, cache_config &config, int core_id, int type_id,
             mem_fetch_interface *memport, enum mem_fetch_status request_status,
             enum mem_fetch_status rob_status)
@@ -3108,31 +3478,62 @@ class tex_cache : public cache_t {
     m_rob_status = rob_status;
   }
 
-  /// Access function for tex_cache
-  /// return values: RESERVATION_FAIL if request could not be accepted
-  /// otherwise returns HIT_RESERVED or MISS; NOTE: *never* returns HIT
-  /// since unlike a normal CPU cache, a "HIT" in texture cache does not
-  /// mean the data is ready (still need to get through fragment fifo)
+  /*
+   * [한국어]
+   * access - 텍스처 캐시 접근
+   *
+   * @return: RESERVATION_FAIL(수용 불가), HIT_RESERVED(예약된 히트), MISS.
+   *          일반 캐시와 달리 HIT은 절대 반환하지 않는다. 데이터는
+   *          fragment_fifo를 통과한 뒤 result_fifo에 도달해야 완료된다.
+   *
+   * 호출 체인:
+   *   shader.cc (텍스처 파이프라인) → [이 함수]
+   */
   enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                    unsigned time,
                                    std::list<cache_event> &events);
+
+  /* [한국어] 매 사이클 request_fifo 발송 + fragment_fifo/ROB 처리 */
   void cycle();
-  /// Place returning cache block into reorder buffer
+
+  /*
+   * [한국어]
+   * fill - 하위 메모리에서 반환된 데이터를 ROB에 배치
+   *
+   * 응답이 도착하면 해당 ROB 엔트리를 ready로 마킹한다. cycle()에서 ROB 선두가
+   * ready일 때 result_fifo로 이동한다.
+   */
   void fill(mem_fetch *mf, unsigned time);
-  /// Are any (accepted) accesses that had to wait for memory now ready? (does
-  /// not include accesses that "HIT")
+
+  /*
+   * [한국어]
+   * access_ready - 완료되어 result_fifo에 대기 중인 요청이 있는지 확인
+   *
+   * 텍스처 캐시에서는 HIT/MISS 모두 result_fifo를 통해 완료되므로
+   * m_result_fifo.empty()만 검사한다.
+   */
   bool access_ready() const { return !m_result_fifo.empty(); }
-  /// Pop next ready access (includes both accesses that "HIT" and those that
-  /// "MISS")
+
+  /* [한국어] result_fifo에서 다음 완료된 요청을 꺼내 반환 */
   mem_fetch *next_access() { return m_result_fifo.pop(); }
+
+  /* [한국어] 파일에 텍스처 캐시 내은 상태를 디버그 출력 */
   void display_state(FILE *fp) const;
 
   // accessors for cache bandwidth availability - stubs for now
+  /* [한국어] 텍스처 캐시는 현재 데이터 포트 제한을 모델링하지 않음 */
   bool data_port_free() const { return true; }
+  /* [한국어] 텍스처 캐시는 현재 fill 포트 제한을 모델링하지 않음 */
   bool fill_port_free() const { return true; }
 
   // Stat collection
+  /* [한국어] 텍스처 캐시 통계 객체 반환 */
   const cache_stats &get_stats() const { return m_stats; }
+
+  /*
+   * [한국어]
+   * get_stats - 지정된 접근 유형/상태 조합의 통계값 반환
+   */
   unsigned get_stats(enum mem_access_type *access_type,
                      unsigned num_access_type,
                      enum cache_request_status *access_status,
@@ -3141,14 +3542,22 @@ class tex_cache : public cache_t {
                              num_access_status);
   }
 
+  /* [한국어] 누적 서브 통계를 css에 복사 */
   void get_sub_stats(struct cache_sub_stats &css) const {
     m_stats.get_sub_stats(css);
   }
 
  private:
-  std::string m_name;
-  const cache_config &m_config;
+  std::string m_name;          /* [한국어] 텍스처 캐시 이름 */
+  const cache_config &m_config;  /* [한국어] 캐시 구성 정보 참조 */
 
+  /*
+   * [한국어]
+   * fragment_entry - 텍스처 접근이 fragment_fifo를 통과할 때의 상태
+   *
+   * m_miss가 true이면 하위 메모리 요청을 발송한 MISS 상태이며,
+   * cycle()에서 ROB head가 ready될 때까지 대기한다.
+   */
   struct fragment_entry {
     fragment_entry() {}
     fragment_entry(mem_fetch *mf, unsigned idx, bool m, unsigned d) {
@@ -3157,12 +3566,20 @@ class tex_cache : public cache_t {
       m_miss = m;
       m_data_size = d;
     }
-    mem_fetch *m_request;    // request information
-    unsigned m_cache_index;  // where to look for data
-    bool m_miss;             // true if sent memory request
-    unsigned m_data_size;
+    mem_fetch *m_request;    /* [한국어] 원본 mem_fetch 요청 */
+    unsigned m_cache_index;  /* [한국어] 데이터가 위치할 캐시 라인 인덱스 */
+    bool m_miss;             /* [한국어] true면 하위 메모리 요청을 발송한 MISS */
+    unsigned m_data_size;    /* [한국어] 요청 데이터 크기(바이트) */
   };
 
+  /*
+   * [한국어]
+   * rob_entry - 텍스처 캐시 Reorder Buffer 엔트리
+   *
+   * 하위 메모리에서 응답이 도착하면 m_ready가 true로 설정되고,
+   * cycle()에서 ROB 선두가 ready일 때 fragment_fifo와 함께 result_fifo로
+   * 이동한다.
+   */
   struct rob_entry {
     rob_entry() {
       m_ready = false;
@@ -3176,20 +3593,34 @@ class tex_cache : public cache_t {
       m_request = mf;
       m_block_addr = a;
     }
-    bool m_ready;
-    unsigned m_time;   // which cycle did this entry become ready?
-    unsigned m_index;  // where in cache should block be placed?
-    mem_fetch *m_request;
-    new_addr_type m_block_addr;
+    bool m_ready;          /* [한국어] 하위 메모리 응답 도착 여부 */
+    unsigned m_time;       /* [한국어] ready가 된 사이클(지연 추적용) */
+    unsigned m_index;      /* [한국어] 캐시 라인 인덱스 */
+    mem_fetch *m_request;  /* [한국어] 원본 mem_fetch */
+    new_addr_type m_block_addr;  /* [한국어] 블록 단위 정렬 주소 */
   };
 
+  /*
+   * [한국어]
+   * data_block - 텍스처 캐시의 단순 데이터 라인 상태
+   *
+   * 유효성과 블록 주소만을 가지며, 실제 데이터는 이 시뮬레이션에서
+   * 기능적 시뮬레이션으로 대첸된다.
+   */
   struct data_block {
     data_block() { m_valid = false; }
-    bool m_valid;
-    new_addr_type m_block_addr;
+    bool m_valid;              /* [한국어] 이 라인에 유효한 데이터가 있는지 */
+    new_addr_type m_block_addr;  /* [한국어] 저장된 블록 주소 */
   };
 
-  // TODO: replace fifo_pipeline with this?
+  /*
+   * [한국어]
+   * fifo - 텍스처 캐시 내에서 사용하는 순환 버퍼 기반 FIFO 템플릿
+   *
+   * m_head은 다음 push 위치, m_tail은 다음 pop 위치이며,
+   * m_num은 현재 저장된 항목 수이다. 템플릿 인자로 fragment_entry,
+   * mem_fetch*, rob_entry 등을 담는다.
+   */
   template <class T>
   class fifo {
    public:
@@ -3239,24 +3670,31 @@ class tex_cache : public cache_t {
       m_num--;
     }
 
-    unsigned m_head;  // next entry goes here
-    unsigned m_tail;  // oldest entry found here
-    unsigned m_num;   // how many in fifo?
-    unsigned m_size;  // maximum number of entries in fifo
-    T *m_data;
+    unsigned m_head;  /* [한국어] 다음 push가 들어갈 인덱스 */
+    unsigned m_tail;  /* [한국어] 가장 오래된 항목(다음 pop) 인덱스 */
+    unsigned m_num;   /* [한국어] 현재 FIFO에 저장된 항목 수 */
+    unsigned m_size;  /* [한국어] FIFO 최대 용량 */
+    T *m_data;        /* [한국어] 순환 버퍼 메모리 */
   };
 
-  tag_array m_tags;
-  fifo<fragment_entry> m_fragment_fifo;
-  fifo<mem_fetch *> m_request_fifo;
-  fifo<rob_entry> m_rob;
-  data_block *m_cache;
-  fifo<mem_fetch *> m_result_fifo;  // next completed texture fetch
+  tag_array m_tags;                       /* [한국어] 태그 배열(히트/미스 판정) */
+  fifo<fragment_entry> m_fragment_fifo;   /* [한국어] 접근 요청 처리 FIFO */
+  fifo<mem_fetch *> m_request_fifo;       /* [한국어] 하위 메모리 발송 대기 FIFO */
+  fifo<rob_entry> m_rob;                  /* [한국어] 응답 in-order 정렬 ROB */
+  data_block *m_cache;                    /* [한국어] 데이터 라인 상태 배열 */
+  fifo<mem_fetch *> m_result_fifo;        /* [한국어] 완료된 텍스처 fetch FIFO */
 
-  mem_fetch_interface *m_memport;
-  enum mem_fetch_status m_request_queue_status;
-  enum mem_fetch_status m_rob_status;
+  mem_fetch_interface *m_memport;         /* [한국어] 하위 메모리 인터페이스 */
+  enum mem_fetch_status m_request_queue_status;  /* [한국어] request_fifo용 mf 상태 */
+  enum mem_fetch_status m_rob_status;            /* [한국어] fill 완료 후 mf 상태 */
 
+  /*
+   * [한국어]
+   * extra_mf_fields - 텍스처 캐시에서 mem_fetch에 연결된 추가 메타데이터
+   *
+   * fill 응답 시 이 mf가 대응하는 ROB 인덱스(m_rob_index)를 찾는다.
+   * SECTOR_TEX_FIFO 모드에서는 pending_read로 남은 섹터 수를 추적한다.
+   */
   struct extra_mf_fields {
     extra_mf_fields() { m_valid = false; }
     extra_mf_fields(unsigned i, const cache_config &m_config) {
@@ -3266,16 +3704,16 @@ class tex_cache : public cache_t {
                          ? m_config.m_line_sz / SECTOR_SIZE
                          : 0;
     }
-    bool m_valid;
-    unsigned m_rob_index;
-    unsigned pending_read;
+    bool m_valid;          /* [한국어] 엔트리 유효성 */
+    unsigned m_rob_index;  /* [한국어] 이 mf가 대응하는 ROB 인덱스 */
+    unsigned pending_read; /* [한국어] SECTOR_TEX_FIFO 시 남은 섹터 응답 수 */
   };
 
-  cache_stats m_stats;
+  cache_stats m_stats;  /* [한국어] 텍스처 캐시 통계 */
 
   typedef std::map<mem_fetch *, extra_mf_fields> extra_mf_fields_lookup;
 
-  extra_mf_fields_lookup m_extra_mf_fields;
+  extra_mf_fields_lookup m_extra_mf_fields;  /* [한국어] mf → extra_mf_fields 맵 */
 };
 
 #endif

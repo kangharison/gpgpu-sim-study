@@ -736,6 +736,15 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_total_int_inst - 모든 SM에서 커밋된 정수(INT) 명령어 수 반환
+   *
+   * @aggregate_stat: false=이번 샘플링 창 증분(CURRENT-PREV), true=시뮬레이션 시작 이후 누적값
+   * @return: 전체 SM의 정수 명령어 합계
+   *
+   * power_interface.cc의 set_inst_power()에서 INT ALU 동적 전력 스케일링에 사용.
+   */
   double get_total_int_inst(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -749,6 +758,15 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_total_fp_inst - 모든 SM에서 커밋된 부동소수점(FP, SP+DP) 명령어 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 SM의 FP 명령어 합계
+   *
+   * set_inst_power()에서 FP 파이프라인 전력 스케일링에 사용.
+   */
   double get_total_fp_inst(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -762,6 +780,14 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_total_load_inst - 모든 SM의 로드(load) 큐에 진입한 명령어 수 반환
+   *
+   * @return: 이번 샘플링 창 동안의 전체 로드 명령어 수 (CURRENT-PREV)
+   *
+   * 메모리 인터페이스 전력 모델에서 LD 유닛 활성도를 측정할 때 사용.
+   */
   double get_total_load_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -771,6 +797,14 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_total_store_inst - 모든 SM의 스토어(store) 큐에 진입한 명령어 수 반환
+   *
+   * @return: 이번 샘플링 창 동안의 전체 스토어 명령어 수 (CURRENT-PREV)
+   *
+   * 메모리 인터페이스 전력 모델에서 ST 유닛 활성도를 측정할 때 사용.
+   */
   double get_total_store_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -780,6 +814,12 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_sp_committed_inst - SP(단정밀도) 파이프라인에서 커밋된 명령어 수 반환
+   *
+   * @return: 이번 창 동안 모든 SM의 SP 커밋 명령어 합계 (CURRENT-PREV)
+   */
   double get_sp_committed_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -788,6 +828,12 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_sfu_committed_inst - SFU(특수함수) 파이프라인에서 커밋된 명령어 수 반환
+   *
+   * @return: 이번 창 동안 모든 SM의 SFU 커밋 명령어 합계 (CURRENT-PREV)
+   */
   double get_sfu_committed_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -796,6 +842,12 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_mem_committed_inst - 메모리(MEM) 파이프라인에서 커밋된 명령어 수 반환
+   *
+   * @return: 이번 창 동안 모든 SM의 MEM 커밋 명령어 합계 (CURRENT-PREV)
+   */
   double get_mem_committed_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -804,6 +856,15 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_committed_inst - SP+SFU+MEM 파이프라인에서 커밋된 전체 명령어 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 모든 SM의 커밋된 명령어 합계
+   *
+   * McPAT의 set_inst_power()에 커밋된 명령어 수로 전달되어 파이프라인 전력 계산에 사용.
+   */
   double get_committed_inst(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -823,6 +884,15 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_regfile_reads - 모든 SM의 레지스터 파일(RF) 읽기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 RF 읽기 접근 합계
+   *
+   * McPAT의 set_regfile_power()에서 RF 읽기 동적 전력 계산에 사용.
+   */
   double get_regfile_reads(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -836,6 +906,15 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_regfile_writes - 모든 SM의 레지스터 파일(RF) 쓰기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 RF 쓰기 접근 합계
+   *
+   * McPAT의 set_regfile_power()에서 RF 쓰기 동적 전력 계산에 사용.
+   */
   double get_regfile_writes(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -850,6 +929,14 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_pipeline_duty - 모든 SM의 파이프라인 듀티 사이클 누적값 합계 반환
+   *
+   * @return: 이번 창 동안의 듀티 사이클 합계 (CURRENT-PREV)
+   *
+   * mcpat_cycle()에서 stat_sample_freq로 나눠 평균 파이프라인 활용률을 계산.
+   */
   float get_pipeline_duty() {
     float total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -860,6 +947,15 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_non_regfile_operands - 레지스터 파일을 거치지 않은 오퍼랜드(즉시값 등) 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 모든 SM의 비RF 오퍼랜드 합계
+   *
+   * set_regfile_power()에서 RF 활성화 인수(activity factor) 모델링에 사용.
+   */
   double get_non_regfile_operands(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -872,6 +968,12 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_sp_accessess - 모든 SM의 SP(단정밀도) 파이프라인 접근 수 반환
+   *
+   * @return: 이번 창 동안의 SP 접근 합계 (CURRENT-PREV)
+   */
   double get_sp_accessess() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -881,6 +983,12 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_sfu_accessess - 모든 SM의 SFU(특수함수) 파이프라인 접근 수 반환
+   *
+   * @return: 이번 창 동안의 SFU 접근 합계 (CURRENT-PREV)
+   */
   double get_sfu_accessess() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -890,6 +998,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_sqrt_accessess - 모든 SM의 sqrt(제곱근) SFU 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 sqrt 접근 합계
+   */
   double get_sqrt_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -901,6 +1016,13 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_log_accessess - 모든 SM의 log(로그) SFU 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 log 접근 합계
+   */
   double get_log_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -912,6 +1034,13 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_sin_accessess - 모든 SM의 sin(사인) SFU 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 sin 접근 합계
+   */
   double get_sin_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -923,6 +1052,13 @@ class power_stat_t {
     }
     return total_inst;
   }
+  /*
+   * [한국어]
+   * get_exp_accessess - 모든 SM의 exp(지수) SFU 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 exp 접근 합계
+   */
   double get_exp_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -935,6 +1071,12 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_mem_accessess - 모든 SM의 메모리 파이프라인(LD/ST unit) 접근 수 반환
+   *
+   * @return: 이번 창 동안의 메모리 파이프라인 접근 합계 (CURRENT-PREV)
+   */
   double get_mem_accessess() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -944,6 +1086,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_intdiv_accessess - 모든 SM의 정수 나눗셈(IDIV) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 IDIV 접근 합계
+   */
   double get_intdiv_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -956,6 +1105,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_fpdiv_accessess - 모든 SM의 단정밀도 FP 나눗셈(FPDIV) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 FPDIV 접근 합계
+   */
   double get_fpdiv_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -969,6 +1125,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_intmul32_accessess - 모든 SM의 32비트 정수 곱셈(IMUL32) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 IMUL32 접근 합계
+   */
   double get_intmul32_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -983,6 +1146,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_intmul24_accessess - 모든 SM의 24비트 정수 곱셈(IMUL24) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 IMUL24 접근 합계
+   */
   double get_intmul24_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -997,6 +1167,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_intmul_accessess - 모든 SM의 범용 정수 곱셈(IMUL) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 IMUL 접근 합계
+   */
   double get_intmul_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1009,6 +1186,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_fpmul_accessess - 모든 SM의 단정밀도 FP 곱셈(FPMUL) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 FPMUL 접근 합계
+   */
   double get_fpmul_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1022,6 +1206,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_fp_accessess - 모든 SM의 단정밀도 FP(SP) 유닛 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 SP FPU 접근 합계
+   */
   double get_fp_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1034,6 +1225,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_dp_accessess - 모든 SM의 배정밀도 FP(DP) 유닛 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 DP FPU 접근 합계
+   */
   double get_dp_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1046,6 +1244,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_dpmul_accessess - 모든 SM의 배정밀도 FP 곱셈(DPMUL) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 DPMUL 접근 합계
+   */
   double get_dpmul_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1059,6 +1264,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_dpdiv_accessess - 모든 SM의 배정밀도 FP 나눗셈(DPDIV) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 DPDIV 접근 합계
+   */
   double get_dpdiv_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1072,6 +1284,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_tensor_accessess - 모든 SM의 Tensor Core 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 Tensor Core 접근 합계
+   */
   double get_tensor_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1086,6 +1305,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_const_accessess - 모든 SM의 상수 캐시(Constant Cache) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 상수 캐시 접근 합계
+   */
   double get_const_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1099,6 +1325,13 @@ class power_stat_t {
     return (total_inst);
   }
 
+  /*
+   * [한국어]
+   * get_tex_accessess - 모든 SM의 텍스처 캐시 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 텍스처 캐시 접근 합계
+   */
   double get_tex_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1111,6 +1344,15 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_sp_active_lanes - SP 파이프라인의 평균 활성 레인 수 반환
+   *
+   * @return: SM당 평균 활성 레인 수 (warp 크기 32로 상한 클리핑 전)
+   *
+   * 모든 SM의 활성 레인 합계를 SM 수와 SP 유닛 수로 나눠 평균화.
+   * mcpat_cycle()에서 32로 클리핑 후 set_active_lanes_power()에 전달.
+   */
   double get_sp_active_lanes() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1120,6 +1362,14 @@ class power_stat_t {
     return (total_inst / m_config->num_shader()) / m_config->gpgpu_num_sp_units;
   }
 
+  /*
+   * [한국어]
+   * get_sfu_active_lanes - SFU 파이프라인의 평균 활성 레인 수 반환
+   *
+   * @return: SM당 평균 활성 레인 수 (warp 크기 32로 상한 클리핑 전)
+   *
+   * 모든 SM의 SFU 활성 레인 합계를 SM 수와 SFU 유닛 수로 나눠 평균화.
+   */
   float get_sfu_active_lanes() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1131,6 +1381,16 @@ class power_stat_t {
            m_config->gpgpu_num_sfu_units;
   }
 
+  /*
+   * [한국어]
+   * get_active_threads - warp당 평균 활성 스레드 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: warp당 평균 활성 스레드 수 (0~32 범위)
+   *
+   * SIMT 실행 효율성 지표로, McPAT set_avg_active_threads()에 전달.
+   * 분모 total_warps가 0이면 0을 반환하여 0으로 나누기 방지.
+   */
   float get_active_threads(bool aggregate_stat) {
     unsigned total_threads = 0;
     unsigned total_warps = 0;
@@ -1154,6 +1414,13 @@ class power_stat_t {
       return 0;
   }
 
+  /*
+   * [한국어]
+   * get_tot_threads_kernel - 모든 SM에서 실행 유닛이 처리한 활성 스레드 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 활성 스레드 수
+   */
   unsigned long long get_tot_threads_kernel(bool aggregate_stat) {
     unsigned total_threads = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1169,6 +1436,13 @@ class power_stat_t {
 
     return total_threads;
   }
+  /*
+   * [한국어]
+   * get_tot_warps_kernel - 모든 SM에서 실행 유닛이 처리한 warp 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 warp 수
+   */
   unsigned long long get_tot_warps_kernel(bool aggregate_stat) {
     unsigned long long total_warps = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1183,6 +1457,15 @@ class power_stat_t {
     return total_warps;
   }
 
+  /*
+   * [한국어]
+   * get_tot_fpu_accessess - SP+DP FPU 접근 수의 합계 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 FPU(SP+DP) 접근 합계
+   *
+   * set_exec_unit_power()의 첫 번째 인수로 사용.
+   */
   double get_tot_fpu_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1200,6 +1483,15 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_tot_sfu_accessess - SFU 관련 연산의 총 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: IDIV/IMUL/IMUL24/FPdiv/FPmul/DPdiv/DPmul/sqrt/log/sin/exp/tensor/tex 접근 합계
+   *
+   * set_exec_unit_power()의 SFU 입력으로 사용.
+   */
   double get_tot_sfu_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1253,6 +1545,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_ialu_accessess - 모든 SM의 정수 ALU(IALU) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 IALU 접근 합계
+   */
   double get_ialu_accessess(bool aggregate_stat) {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1265,6 +1564,12 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_tex_inst - 모든 SM의 텍스처 명령어 수 반환
+   *
+   * @return: 이번 창 동안의 텍스처 명령어 합계 (CURRENT-PREV)
+   */
   double get_tex_inst() {
     double total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1274,6 +1579,12 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_constant_c_accesses - L1 상수 캐시의 전체 접근 수 반환
+   *
+   * @return: 이번 창 동안 상수 캐시 읽기 접근 수 (HIT+MISS+HIT_RESERVED)
+   */
   double get_constant_c_accesses() {
     enum mem_access_type access_type[] = {CONST_ACC_R};
     enum cache_request_status request_status[] = {HIT, MISS, HIT_RESERVED};
@@ -1289,6 +1600,12 @@ class power_stat_t {
                access_type, num_access_type, request_status,
                num_request_status));
   }
+  /*
+   * [한국어]
+   * get_constant_c_misses - L1 상수 캐시의 미스 수 반환
+   *
+   * @return: 이번 창 동안 상수 캐시 읽기 미스 수 (CURRENT-PREV)
+   */
   double get_constant_c_misses() {
     enum mem_access_type access_type[] = {CONST_ACC_R};
     enum cache_request_status request_status[] = {MISS};
@@ -1304,9 +1621,21 @@ class power_stat_t {
                access_type, num_access_type, request_status,
                num_request_status));
   }
+  /*
+   * [한국어]
+   * get_constant_c_hits - L1 상수 캐시의 히트 수 반환
+   *
+   * @return: 상수 캐시 전체 접근 수에서 미스 수를 차감한 히트 수
+   */
   double get_constant_c_hits() {
     return (get_constant_c_accesses() - get_constant_c_misses());
   }
+  /*
+   * [한국어]
+   * get_texture_c_accesses - L1 텍스처 캐시의 전체 접근 수 반환
+   *
+   * @return: 이번 창 동안 텍스처 캐시 읽기 접근 수 (HIT+MISS+HIT_RESERVED)
+   */
   double get_texture_c_accesses() {
     enum mem_access_type access_type[] = {TEXTURE_ACC_R};
     enum cache_request_status request_status[] = {HIT, MISS, HIT_RESERVED};
@@ -1322,6 +1651,12 @@ class power_stat_t {
                access_type, num_access_type, request_status,
                num_request_status));
   }
+  /*
+   * [한국어]
+   * get_texture_c_misses - L1 텍스처 캐시의 미스 수 반환
+   *
+   * @return: 이번 창 동안 텍스처 캐시 읽기 미스 수
+   */
   double get_texture_c_misses() {
     enum mem_access_type access_type[] = {TEXTURE_ACC_R};
     enum cache_request_status request_status[] = {MISS};
@@ -1337,9 +1672,22 @@ class power_stat_t {
                access_type, num_access_type, request_status,
                num_request_status));
   }
+  /*
+   * [한국어]
+   * get_texture_c_hits - L1 텍스처 캐시의 히트 수 반환
+   *
+   * @return: 텍스처 캐시 전체 접근 수에서 미스 수를 차감한 히트 수
+   */
   double get_texture_c_hits() {
     return (get_texture_c_accesses() - get_texture_c_misses());
   }
+  /*
+   * [한국어]
+   * get_inst_c_accesses - L1 명령어 캐시의 전체 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L1I 읽기 접근 수 (HIT+MISS+HIT_RESERVED)
+   */
   double get_inst_c_accesses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {INST_ACC_R};
     enum cache_request_status request_status[] = {HIT, MISS, HIT_RESERVED};
@@ -1358,6 +1706,13 @@ class power_stat_t {
                  access_type, num_access_type, request_status,
                  num_request_status));
   }
+  /*
+   * [한국어]
+   * get_inst_c_misses - L1 명령어 캐시의 미스 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L1I 읽기 미스 수
+   */
   double get_inst_c_misses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {INST_ACC_R};
     enum cache_request_status request_status[] = {MISS};
@@ -1376,11 +1731,25 @@ class power_stat_t {
                  access_type, num_access_type, request_status,
                  num_request_status));
   }
+  /*
+   * [한국어]
+   * get_inst_c_hits - L1 명령어 캐시의 히트 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L1I 접근 수에서 미스 수를 차감한 히트 수
+   */
   double get_inst_c_hits(bool aggregate_stat) {
     return (get_inst_c_accesses(aggregate_stat) -
             get_inst_c_misses(aggregate_stat));
   }
 
+  /*
+   * [한국어]
+   * get_l1d_read_accesses - L1 데이터 캐시 읽기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 읽기 접근 수 (HIT+MISS+SECTOR_MISS)
+   */
   double get_l1d_read_accesses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_R, LOCAL_ACC_R};
     enum cache_request_status request_status[] = {HIT, MISS, SECTOR_MISS};
@@ -1401,10 +1770,24 @@ class power_stat_t {
                  num_request_status));
     }
   }
+  /*
+   * [한국어]
+   * get_l1d_read_misses - L1 데이터 캐시 읽기 미스 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L1D 읽기 접근 수에서 히트 수를 차감한 미스 수
+   */
   double get_l1d_read_misses(bool aggregate_stat) {
     return (get_l1d_read_accesses(aggregate_stat) -
             get_l1d_read_hits(aggregate_stat));
   }
+  /*
+   * [한국어]
+   * get_l1d_read_hits - L1 데이터 캐시 읽기 히트 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 읽기 히트 수 (HIT+MSHR_HIT)
+   */
   double get_l1d_read_hits(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_R, LOCAL_ACC_R};
     enum cache_request_status request_status[] = {HIT, MSHR_HIT};
@@ -1425,6 +1808,13 @@ class power_stat_t {
                  num_request_status));
     }
   }
+  /*
+   * [한국어]
+   * get_l1d_write_accesses - L1 데이터 캐시 쓰기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 쓰기 접근 수 (HIT+MISS+SECTOR_MISS)
+   */
   double get_l1d_write_accesses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_W, LOCAL_ACC_W};
     enum cache_request_status request_status[] = {HIT, MISS, SECTOR_MISS};
@@ -1445,10 +1835,24 @@ class power_stat_t {
                  num_request_status));
     }
   }
+  /*
+   * [한국어]
+   * get_l1d_write_misses - L1 데이터 캐시 쓰기 미스 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L1D 쓰기 접근 수에서 히트 수를 차감한 미스 수
+   */
   double get_l1d_write_misses(bool aggregate_stat) {
     return (get_l1d_write_accesses(aggregate_stat) -
             get_l1d_write_hits(aggregate_stat));
   }
+  /*
+   * [한국어]
+   * get_l1d_write_hits - L1 데이터 캐시 쓰기 히트 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 쓰기 히트 수 (HIT+MSHR_HIT)
+   */
   double get_l1d_write_hits(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_W, LOCAL_ACC_W};
     enum cache_request_status request_status[] = {HIT, MSHR_HIT};
@@ -1469,18 +1873,43 @@ class power_stat_t {
                  num_request_status));
     }
   }
+  /*
+   * [한국어]
+   * get_cache_misses - L1 캐시 전체 미스 수 반환
+   *
+   * @return: 데이터 읽기/쓰기, 상수, 텍스처 캐시 미스 수의 합계
+   */
   double get_cache_misses() {
     return get_l1d_read_misses(0) + get_constant_c_misses() +
            get_l1d_write_misses(0) + get_texture_c_misses();
   }
 
+  /*
+   * [한국어]
+   * get_cache_read_misses - L1 캐시 읽기 미스 수 반환
+   *
+   * @return: 데이터 읽기, 상수, 텍스처 캐시 읽기 미스 수의 합계
+   */
   double get_cache_read_misses() {
     return get_l1d_read_misses(0) + get_constant_c_misses() +
            get_texture_c_misses();
   }
 
+  /*
+   * [한국어]
+   * get_cache_write_misses - L1 캐시 쓰기 미스 수 반환
+   *
+   * @return: L1D 쓰기 미스 수
+   */
   double get_cache_write_misses() { return get_l1d_write_misses(0); }
 
+  /*
+   * [한국어]
+   * get_shmem_access - 모든 SM의 공유 메모리(Shared Memory) 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 전체 공유 메모리 접근 합계
+   */
   double get_shmem_access(bool aggregate_stat) {
     unsigned total_inst = 0;
     for (unsigned i = 0; i < m_config->num_shader(); i++) {
@@ -1493,6 +1922,13 @@ class power_stat_t {
     return total_inst;
   }
 
+  /*
+   * [한국어]
+   * get_l2_read_accesses - L2 캐시 읽기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL/CONST/TEXTURE/INST 읽기 접근 수 (HIT+HIT_RESERVED+MISS+SECTOR_MISS)
+   */
   unsigned long long get_l2_read_accesses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {
         GLOBAL_ACC_R, LOCAL_ACC_R, CONST_ACC_R, TEXTURE_ACC_R, INST_ACC_R};
@@ -1515,11 +1951,25 @@ class power_stat_t {
     }
   }
 
+  /*
+   * [한국어]
+   * get_l2_read_misses - L2 캐시 읽기 미스 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L2 읽기 접근 수에서 히트 수를 차감한 미스 수
+   */
   unsigned long long get_l2_read_misses(bool aggregate_stat) {
     return (get_l2_read_accesses(aggregate_stat) -
             get_l2_read_hits(aggregate_stat));
   }
 
+  /*
+   * [한국어]
+   * get_l2_read_hits - L2 캐시 읽기 히트 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL/CONST/TEXTURE/INST 읽기 히트 수 (HIT+HIT_RESERVED)
+   */
   unsigned long long get_l2_read_hits(bool aggregate_stat) {
     enum mem_access_type access_type[] = {
         GLOBAL_ACC_R, LOCAL_ACC_R, CONST_ACC_R, TEXTURE_ACC_R, INST_ACC_R};
@@ -1541,6 +1991,13 @@ class power_stat_t {
     }
   }
 
+  /*
+   * [한국어]
+   * get_l2_write_accesses - L2 캐시 쓰기 접근 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 쓰기 및 L1 write-back 접근 수 (HIT+HIT_RESERVED+MISS+SECTOR_MISS)
+   */
   unsigned long long get_l2_write_accesses(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_W, LOCAL_ACC_W,
                                           L1_WRBK_ACC};
@@ -1563,10 +2020,24 @@ class power_stat_t {
     }
   }
 
+  /*
+   * [한국어]
+   * get_l2_write_misses - L2 캐시 쓰기 미스 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: L2 쓰기 접근 수에서 히트 수를 차감한 미스 수
+   */
   unsigned long long get_l2_write_misses(bool aggregate_stat) {
     return (get_l2_write_accesses(aggregate_stat) -
             get_l2_write_hits(aggregate_stat));
   }
+  /*
+   * [한국어]
+   * get_l2_write_hits - L2 캐시 쓰기 히트 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: GLOBAL/LOCAL 쓰기 및 L1 write-back 히트 수 (HIT+HIT_RESERVED)
+   */
   unsigned long long get_l2_write_hits(bool aggregate_stat) {
     enum mem_access_type access_type[] = {GLOBAL_ACC_W, LOCAL_ACC_W,
                                           L1_WRBK_ACC};
@@ -1587,6 +2058,12 @@ class power_stat_t {
                  num_request_status));
     }
   }
+  /*
+   * [한국어]
+   * get_dram_cmd - 모든 DRAM 채널의 전체 명령 수 반환
+   *
+   * @return: 이번 창 동안의 DRAM 전체 명령 수 (CURRENT-PREV)
+   */
   double get_dram_cmd() {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1595,6 +2072,12 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_activity - 모든 DRAM 채널의 활성(비유휴) 사이클 수 반환
+   *
+   * @return: 이번 창 동안의 DRAM 활성 사이클 합계 (CURRENT-PREV)
+   */
   double get_dram_activity() {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1603,6 +2086,12 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_nop - 모든 DRAM 채널의 NOP(No-Operation) 명령 수 반환
+   *
+   * @return: 이번 창 동안의 DRAM NOP 명령 합계 (CURRENT-PREV)
+   */
   double get_dram_nop() {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1611,6 +2100,12 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_act - 모든 DRAM 채널의 ACT(Activate) 명령 수 반환
+   *
+   * @return: 이번 창 동안의 DRAM 행 활성화 명령 합계 (CURRENT-PREV)
+   */
   double get_dram_act() {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1619,6 +2114,13 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_pre - 모든 DRAM 채널의 PRE(Precharge) 명령 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 이번 창 동안의 DRAM 행 프리차지 명령 합계
+   */
   double get_dram_pre(bool aggregate_stat) {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1631,6 +2133,13 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_rd - 모든 DRAM 채널의 READ 명령 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 이번 창 동안의 DRAM 읽기 명령 합계
+   */
   double get_dram_rd(bool aggregate_stat) {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1643,6 +2152,13 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_wr - 모든 DRAM 채널의 WRITE 명령 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 이번 창 동안의 DRAM 일반 WRITE + Write-Back WRITE 명령 합계
+   */
   double get_dram_wr(bool aggregate_stat) {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1658,6 +2174,12 @@ class power_stat_t {
     }
     return total;
   }
+  /*
+   * [한국어]
+   * get_dram_req - 모든 DRAM 채널에 제출된 전체 메모리 요청 수 반환
+   *
+   * @return: 이번 창 동안의 DRAM READ+WRITE 요청 합계 (CURRENT-PREV)
+   */
   double get_dram_req() {
     unsigned total = 0;
     for (unsigned i = 0; i < m_mem_config->m_n_mem; ++i) {
@@ -1667,6 +2189,13 @@ class power_stat_t {
     return total;
   }
 
+  /*
+   * [한국어]
+   * get_icnt_simt_to_mem - SIMT 클러스터 → 메모리 파티션 방향 NoC 플릿 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 모든 SIMT 클러스터의 SIMT→MEM 플릿 수 합계
+   */
   unsigned long long get_icnt_simt_to_mem(bool aggregate_stat) {
     long total = 0;
     for (unsigned i = 0; i < m_config->n_simt_clusters; ++i) {
@@ -1680,14 +2209,19 @@ class power_stat_t {
     return total;
   }
 
+  /*
+   * [한국어]
+   * get_icnt_mem_to_simt - 메모리 파티션 → SIMT 클러스터 방향 NoC 플릿 수 반환
+   *
+   * @aggregate_stat: false=이번 창 증분, true=누적값
+   * @return: 모든 SIMT 클러스터의 MEM→SIMT 플릿 수 합계
+   */
   unsigned long long get_icnt_mem_to_simt(bool aggregate_stat) {
     long total = 0;
     for (unsigned i = 0; i < m_config->n_simt_clusters; ++i) {
       if (aggregate_stat) {
         total += pwr_mem_stat->n_mem_to_simt[CURRENT_STAT_IDX][i];
-      }
-
-      else {
+      } else {
         total += (pwr_mem_stat->n_mem_to_simt[CURRENT_STAT_IDX][i] -
                   pwr_mem_stat->n_mem_to_simt[PREV_STAT_IDX][i]);
       }

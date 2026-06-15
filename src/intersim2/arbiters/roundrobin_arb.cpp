@@ -37,6 +37,10 @@
  *
  * === 타 모듈과의 연결 ===
  * - Arbiter (상속): AddRequest(), Arbitrate(), Clear() super 호출
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type = "round_robin"일 때 NewArbiter()가 이 클래스를 생성(기본값).
+ *     * alloc_iters 횟수만큼 매 사이클 Arbitrate() 이후 UpdateState()가 반복되어
+ *       _pointer가 전진하며 공정성이 유지된다.
  *
  * === 주요 함수/구조체 요약 ===
  * - RoundRobinArbiter(): Arbiter 초기화 + _pointer=0

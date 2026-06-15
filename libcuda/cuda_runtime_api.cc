@@ -247,6 +247,7 @@
 #endif
 
 // SST cycle
+/* [한국어] SST 통합 모드에서 GPU 시뮬레이션을 1사이클 진행 */
 extern bool SST_Cycle();
 // [한국어] SST(Structural Simulation Toolkit) 통합 모드에서 사이클을 진행시키는 외부 함수.
 // GPGPU-Sim을 SST 프레임워크 내 컴포넌트로 연결할 때 이 함수를 통해 동기화한다.
@@ -1197,40 +1198,74 @@ void cuda_runtime_api::cuobjdumpRegisterFatBinary(unsigned int handle,
 /*******************************************************************************
  * Add internal cuda runtime API call to accept gpgpu_context *
  *******************************************************************************/
+/*
+ * [한국어]
+ * cudaSetDeviceInternal - GPGPU-Sim 시뮬레이터에서 활성 GPU 장치 번호를 설정
+ *
+ * @device: 활성화할 장치 인덱스. GPGPU-Sim은 단일 장치만 시뮬레이션하므로
+ *          보통 0을 지정하며, 0 이상 num_devices()-1 이하만 유효.
+ * @gpgpu_ctx: 외부에서 전달한 gpgpu_context 포인터. NULL이면 GPGPU_Context()로
+ *             전역 싱글톤을 획득.
+ * @return: 성공 시 cudaSuccess, 잘못된 장치 번호 시 cudaErrorInvalidDevice.
+ *
+ * CUDA 런타임의 cudaSetDevice()에 대응하는 납부 구현. GPGPUSim_Init()으로
+ * 시뮬레이터를 초기화한 뒤 ctx->api->g_active_device을 갱신한다.
+ */
 cudaError_t cudaSetDeviceInternal(int device, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
   if (gpgpu_ctx) {
-    ctx = gpgpu_ctx;
+    ctx = gpgpu_ctx;  // [한국어] 외부에서 이미 획득한 컨텍스트 사용 (SST 등)
   } else {
-    ctx = GPGPU_Context();
+    ctx = GPGPU_Context();  // [한국어] 전역 싱글톤 컨텍스트 획득
   }
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
   // set the active device to run cuda
+  // [한국어] 요청한 device 번호가 시뮬레이터가 제공하는 장치 수 범위 내인지 검사
   if (device <= ctx->GPGPUSim_Init()->num_devices()) {
-    ctx->api->g_active_device = device;
+    ctx->api->g_active_device = device;  // [한국어] 활성 장치 번호 갱신
     return g_last_cudaError = cudaSuccess;
   } else {
     return g_last_cudaError = cudaErrorInvalidDevice;
   }
 }
 
+/*
+ * [한국어]
+ * cudaGetDeviceInternal - 현재 활성화된 GPU 장치 번호를 조회
+ *
+ * @device: 결과를 저장할 int 포인터.
+ * @gpgpu_ctx: 외부 컨텍스트 포인터. NULL이면 전역 싱글톤 사용.
+ * @return: 항상 cudaSuccess. GPGPU-Sim은 장치 0 하나만 제공.
+ */
 cudaError_t cudaGetDeviceInternal(int *device,
                                   gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
   if (gpgpu_ctx) {
-    ctx = gpgpu_ctx;
+    ctx = gpgpu_ctx;  // [한국어] 외부 컨텍스트 사용
   } else {
-    ctx = GPGPU_Context();
+    ctx = GPGPU_Context();  // [한국어] 전역 싱글톤 컨텍스트 획득
   }
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
-  *device = ctx->api->g_active_device;
+  *device = ctx->api->g_active_device;  // [한국어] cudaSetDeviceInternal에서 설정한 값 반환
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaDeviceGetLimitInternal - CUDA 장치 리소스 한계값을 조회
+ *
+ * @pValue: 한계값 결과를 저장할 size_t 포인터.
+ * @limit:  조회할 한계 종류 (cudaLimitStackSize, cudaLimitMallocHeapSize 등).
+ * @gpgpu_ctx: 외부 컨텍스트 포인터.
+ * @return: 성공 시 cudaSuccess, 미지원 limit 시 abort.
+ *
+ * gpgpusim.config의 -stack_limit, -heap_limit, -sync_depth_limit,
+ * -pending_launch_count_limit 옵션에 의해 값이 결정된다.
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceGetLimitInternal(
     size_t *pValue, cudaLimit limit, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1243,17 +1278,20 @@ __host__ cudaError_t CUDARTAPI cudaDeviceGetLimitInternal(
     announce_call(__my_func__);
   }
   _cuda_device_id *dev = ctx->GPGPUSim_Init();
-  const struct cudaDeviceProp *prop = dev->get_prop();
-  const gpgpu_sim_config &config = dev->get_gpgpu()->get_config();
+  const struct cudaDeviceProp *prop = dev->get_prop();  // [한국어] cudaDeviceProp은 GPGPUSim_Init()에서 채워짐
+  const gpgpu_sim_config &config = dev->get_gpgpu()->get_config();  // [한국어] gpgpusim.config 파싱 결과
   switch (limit) {
     case 0:  // cudaLimitStackSize
+      // [한국어] 스레드당 스택 한계 — gpgpusim.config -stack_limit 옵션
       *pValue = config.stack_limit();
       break;
     case 2:  // cudaLimitMallocHeapSize
+      // [한국어] 디바이스 힙 크기 한계 — gpgpusim.config -heap_limit 옵션
       *pValue = config.heap_limit();
       break;
 #if (CUDART_VERSION > 5050)
     case 3:  // cudaLimitDevRuntimeSyncDepth
+      // [한국어] CDP(CUDA Dynamic Parallelism) 동기화 깊이 한계 — Fermi 이상에서만 지원
       if (prop->major > 2) {
         *pValue = config.sync_depth_limit();
         break;
@@ -1263,6 +1301,7 @@ __host__ cudaError_t CUDARTAPI cudaDeviceGetLimitInternal(
         abort();
       }
     case 4:  // cudaLimitDevRuntimePendingLaunchCount
+      // [한국어] CDP 미완료 커널 최대 개수 — Fermi 이상에서만 지원
       if (prop->major > 2) {
         *pValue = config.pending_launch_count_limit();
         break;
@@ -1279,6 +1318,27 @@ __host__ cudaError_t CUDARTAPI cudaDeviceGetLimitInternal(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaRegisterFatBiaryInternal_impl - NVCC가 생성한 fat binary를 GPGPU-Sim에 등록
+ *
+ * @fatCubin: NVCC가 생성한 fat binary 핸들(실제로는 납부 구조체 포인터).
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @app_binary_path: 현재 실행 중인 애플리케이션 바이너리 경로.
+ * @app_cuda_version: 앱이 링크한 CUDA 런타임 주요 버전 (ldd/strings로 탐지).
+ * @ctx_cuobjdumpInit_func: cuobjdump 초기화 래퍼 람다.
+ * @return: fat_cubin_handle을 void**로 캐스팅하여 반환. 이후 cudaLaunch에서
+ *          커널 함수를 찾을 때 사용.
+ *
+ * 두 가지 경로:
+ *   1) cuobjdump 사용 (CUDA 4.0+ 권장): fat binary에서 PTX/SASS 섹션을
+ *      cuobjdump로 추출하여 파싱. -gpgpu_ptx_use_cuobjdump 옵션으로 활성화.
+ *   2) 레거시 fat binary 직접 파싱 (CUDA < 8.0): __cudaFatCudaBinary 구조체에서
+ *      PTX 문자열을 직접 선택하여 ptx_loader에 전달.
+ *
+ * gpgpusim.config 관련: -gpgpu_ptx_use_cuobjdump, -gpgpu_ptx_force_max_capability,
+ *                       -gpgpu_ptx_convert_to_ptxplus
+ */
 // Internal implementation for cudaRegisterFatBiaryInternal
 void **cudaRegisterFatBiaryInternal_impl(
     void *fatCubin, gpgpu_context *gpgpu_ctx, std::string &app_binary_path,
@@ -1301,6 +1361,7 @@ void **cudaRegisterFatBiaryInternal_impl(
 #endif
   CUctx_st *context = GPGPUSim_Context(ctx);
   static unsigned next_fat_bin_handle = 1;
+  // [한국어] cuobjdump 기반 fat binary 처리 경로 (권장)
   if (context->get_device()->get_gpgpu()->get_config().use_cuobjdump()) {
     // The following workaround has only been verified on 64-bit systems.
     if (sizeof(void *) == 4)
@@ -1314,9 +1375,12 @@ void **cudaRegisterFatBiaryInternal_impl(
     // compiled with a newer version of CUDA to run apps compiled with older
     // versions of CUDA. This is especially useful for PTXPLUS execution.
     // Skip cuda version check for pytorch application
+    // [한국어] PyTorch 바이너리는 python이라는 서브스트링을 포함하며, CUDA 버전
+    //        체크를 생략 (PyTorch는 자체 CUDA 런타임을 내장)
     int pos = app_binary_path.find("python");
     if (pos == std::string::npos) {
       // Not pytorch app : checking cuda version
+      // [한국어] 앱과 시뮬레이터의 CUDA 주요 버전이 일치해야 PTX 문법/ABI 호환
       assert(
           app_cuda_version == CUDART_VERSION / 1000 &&
           "The app must be compiled with same major version as the simulator.");
@@ -1329,6 +1393,7 @@ void **cudaRegisterFatBiaryInternal_impl(
 #if CUDART_VERSION < 6000
     // FatBin handle from the .fatbin.c file (one of the intermediate files
     // generated by NVCC)
+    // [한국어] CUDA 6.0 미만: NVCC 중간 파일의 fatbin 구조체에서 소스 파일명 추출
     typedef struct {
       int m;
       int v;
@@ -1347,7 +1412,7 @@ void **cudaRegisterFatBiaryInternal_impl(
     int offset = *((int *)(pfatbin + 48));
     filename = (pfatbin + 16 + offset);
 #else
-    filename = "default";
+    filename = "default";  // [한국어] CUDA 6.0 이상: cuobjdump가 파일명을 출력하므로 "default"로 통일
 #endif
 
     // The extracted file name is associated with a fat_cubin_handle passed
@@ -1356,6 +1421,8 @@ void **cudaRegisterFatBiaryInternal_impl(
     // PTX/SASS code for the launched kernel function.
     // This allows us to work around the fact that cuobjdump only outputs the
     // file name associated with each section.
+    // [한국어] fat_cubin_handle은 1부터 시작하는 단조 증가 정수. 커널 실행 시
+    //        fatbinmap을 통해 파일명을 역조회하여 해당 PTX 섹션 선택.
     unsigned long long fat_cubin_handle = next_fat_bin_handle;
     next_fat_bin_handle++;
     printf(
@@ -1367,14 +1434,17 @@ void **cudaRegisterFatBiaryInternal_impl(
      * then for next calls, only returns the appropriate number
      */
     assert(fat_cubin_handle >= 1);
+    // [한국어] 첫 번째 fat binary 등록 시에만 cuobjdump 초기화 수행
     if (fat_cubin_handle == 1) ctx_cuobjdumpInit_func(ctx);
     ctx->api->cuobjdumpRegisterFatBinary(fat_cubin_handle, filename, context);
 
-    return (void **)fat_cubin_handle;
+    return (void **)fat_cubin_handle;  // [한국어] 정수 핸들을 void**로 캐스팅하여 NVCC 런타임에 반환
   }
 #if (CUDART_VERSION < 8000)
   else {
-    static unsigned source_num = 1;
+    // [한국어] 레거시 경로: cuobjdump를 사용하지 않고 __cudaFatCudaBinary에서
+    //        직접 PTX 버전을 선택하여 로드 (CUDA 8.0 미만에서만 컴파일됨)
+    static unsigned source_num = 1;  // [한국어] PTX 소스 번호 (ptxinfo 식별용)
     unsigned long long fat_cubin_handle = next_fat_bin_handle++;
     __cudaFatCudaBinary *info = (__cudaFatCudaBinary *)fatCubin;
     assert(info->version >= 3);
@@ -1402,6 +1472,7 @@ void **cudaRegisterFatBiaryInternal_impl(
           "'%s', ",
           info->ident);
       printf("capability = %s\n", info->ptx[num_ptx_versions].gpuProfileName);
+      // [한국어] forced_max_capability가 설정된 경우 그 이하의 최고 capability 선택
       if (forced_max_capability) {
         if (capability > max_capability &&
             capability <= forced_max_capability) {
@@ -1427,6 +1498,7 @@ void **cudaRegisterFatBiaryInternal_impl(
               ->get_gpgpu()
               ->get_config()
               .convert_to_ptxplus()) {
+        // [한국어] 레거시 경로에서는 PTXPlus(SASS→PTXPlus 변환)를 지원하지 않음
         printf(
             "GPGPU-Sim PTX: ERROR ** PTXPlus is only supported through "
             "cuobjdump\n"
@@ -1440,6 +1512,7 @@ void **cudaRegisterFatBiaryInternal_impl(
                                             context->no_of_ptx);
       }
       source_num++;
+      // [한국어] 정적 전역 변수/상수 메모리 초기화 (PTX .global/.const)
       ctx->api->load_static_globals(symtab, STATIC_ALLOC_LIMIT, 0xFFFFFFFF,
                                     context->get_device()->get_gpgpu());
       ctx->api->load_constants(symtab, STATIC_ALLOC_LIMIT,
@@ -1453,12 +1526,22 @@ void **cudaRegisterFatBiaryInternal_impl(
   }
 #else
   else {
+    // [한국어] CUDA 8.0 이상에서는 cuobjdump를 사용하지 않는 경로를 지원하지 않음
     printf("ERROR **  __cudaRegisterFatBinary() needs to be updated\n");
     abort();
   }
 #endif
 }
 
+/*
+ * [한국어]
+ * cudaRegisterFatBinaryInternal(SST용) - SST 통합 모드에서 fat binary 등록
+ *
+ * @fn: 실행 바이너리 경로 (SST가 명시적으로 전달).
+ * @fatCubin: NVCC fat binary 핸들.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: fat_cubin_handle.
+ */
 void **cudaRegisterFatBinaryInternal(const char *fn, void *fatCubin,
                                      gpgpu_context *gpgpu_ctx = NULL) {
   std::string app_binary_path = get_app_binary(fn);
@@ -1470,17 +1553,41 @@ void **cudaRegisterFatBinaryInternal(const char *fn, void *fatCubin,
                                            app_cuda_version, ctx_cuobjdumpInit);
 }
 
+/*
+ * [한국어]
+ * cudaRegisterFatBinaryInternal(일반용) - /proc/self/exe 기반 fat binary 등록
+ *
+ * @fatCubin: NVCC fat binary 핸들.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: fat_cubin_handle.
+ */
 void **cudaRegisterFatBinaryInternal(void *fatCubin,
                                      gpgpu_context *gpgpu_ctx = NULL) {
-  std::string app_binary_path = get_app_binary();
-  int app_cuda_version = get_app_cuda_version();
+  std::string app_binary_path = get_app_binary();     // [한국어] /proc/self/exe로 실행 파일 경로 획득
+  int app_cuda_version = get_app_cuda_version();      // [한국어] ldd/strings로 CUDA 버전 탐지
   auto ctx_cuobjdumpInit = [](gpgpu_context *ctx) {
-    ctx->api->cuobjdumpInit();
+    ctx->api->cuobjdumpInit();  // [한국어] cuobjdump 초기화: 섹션 추출 및 파싱
   };
   return cudaRegisterFatBiaryInternal_impl(fatCubin, gpgpu_ctx, app_binary_path,
                                            app_cuda_version, ctx_cuobjdumpInit);
 }
 
+/*
+ * [한국어]
+ * cudaRegisterFunctionInternal - NVCC가 생성한 커널 함수 심볼을 GPGPU-Sim에 등록
+ *
+ * @fatCubinHandle: __cudaRegisterFatBinary()가 반환한 fat_cubin_handle.
+ * @hostFun: 호스트측 커널 함수 포인터. cudaLaunch(hostFun) 시 이 값으로 검색.
+ * @deviceFun: PTX에서의 커널 함수 이름.
+ * @deviceName: 커널의 장치측 심볼 이름.
+ * @thread_limit, tid, bid, bDim, gDim: NVCC 런타임에서 전달되는 추가 정보
+ *                                       (GPGPU-Sim에서는 사용하지 않음).
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ *
+ * 이 함수는 CUDA 런타임의 __cudaRegisterFunction()에 대응. fatCubinHandle에
+ * 해당하는 fat binary가 아직 파싱되지 않았으면 cuobjdumpParseBinary()를 호출하여
+ * PTX를 로드한 뒤, hostFun ↔ deviceFun 매핑을 CUctx_st에 등록한다.
+ */
 void cudaRegisterFunctionInternal(void **fatCubinHandle, const char *hostFun,
                                   char *deviceFun, const char *deviceName,
                                   int thread_limit, uint3 *tid, uint3 *bid,
@@ -1501,11 +1608,28 @@ void cudaRegisterFunctionInternal(void **fatCubinHandle, const char *hostFun,
       "GPGPU-Sim PTX: __cudaRegisterFunction %s : hostFun 0x%p, "
       "fat_cubin_handle = %u\n",
       deviceFun, hostFun, fat_cubin_handle);
+  // [한국어] cuobjdump 사용 시 필요한 fat binary를 아직 파싱하지 않았다면 파싱
   if (context->get_device()->get_gpgpu()->get_config().use_cuobjdump())
     ctx->cuobjdumpParseBinary(fat_cubin_handle);
+  // [한국어] hostFun 포인터를 키로, deviceFun 이름을 값으로 컨텍스트에 등록
   context->register_function(fat_cubin_handle, hostFun, deviceFun);
 }
 
+/*
+ * [한국어]
+ * cudaRegisterVarInternal - 정적 전역/상수 변수를 GPGPU-Sim에 등록
+ *
+ * @fatCubinHandle: fat_cubin_handle.
+ * @hostVar: 호스트측 변수 포인터.
+ * @deviceAddress: PTX에서의 변수 이름.
+ * @deviceName: 동일한 변수 이름.
+ * @ext, @size, @constant, @global: 변수 속성 플래그.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ *
+ * constant && !global && !ext 이면 상수 메모리(constant memory) 변수로 등록하고,
+ * !constant && !global && !ext 이면 글로벌 메모리(global memory) 변수로 등록한다.
+ * 그 외 조합은 미지원.
+ */
 void cudaRegisterVarInternal(
     void **fatCubinHandle,
     char *hostVar,           // pointer to...something
@@ -1530,6 +1654,7 @@ void cudaRegisterVarInternal(
       "GPGPU-Sim PTX: __cudaRegisterVar: Registering const memory space of %d "
       "bytes\n",
       size);
+  // [한국어] cuobjdump 사용 시 fat binary 파싱 보장
   if (GPGPUSim_Context(ctx)
           ->get_device()
           ->get_gpgpu()
@@ -1537,16 +1662,30 @@ void cudaRegisterVarInternal(
           .use_cuobjdump())
     ctx->cuobjdumpParseBinary((unsigned)(unsigned long long)fatCubinHandle);
   fflush(stdout);
+  // [한국어] 상수 메모리 변수 등록 (__constant__)
   if (constant && !global && !ext) {
     ctx->func_sim->gpgpu_ptx_sim_register_const_variable(hostVar, deviceName,
                                                          size);
-  } else if (!constant && !global && !ext) {
+  } else if (!constant && !global && !ext) {  // [한국어] 글로벌 메모리 변수 등록 (__device__)
     ctx->func_sim->gpgpu_ptx_sim_register_global_variable(hostVar, deviceName,
                                                           size);
   } else
     cuda_not_implemented(__my_func__, __LINE__);
 }
 
+/*
+ * [한국어]
+ * cudaConfigureCallInternal - 커널 실행 구성(gridDim, blockDim, sharedMem, stream)을 스택에 저장
+ *
+ * @gridDim, @blockDim: 커널 그리드/블록 차원.
+ * @sharedMem: 블록당 동적 공유 메모리 크기(bytes).
+ * @stream: 실행할 CUDA 스트림.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: cudaSuccess.
+ *
+ * cudaConfigureCall()의 납부 구현. 이후 cudaSetupArgumentInternal()로 인수를
+ * 채우고 cudaLaunchInternal()로 실제 발행한다.
+ */
 cudaError_t cudaConfigureCallInternal(dim3 gridDim, dim3 blockDim,
                                       size_t sharedMem, cudaStream_t stream,
                                       gpgpu_context *gpgpu_ctx = NULL) {
@@ -1560,11 +1699,18 @@ cudaError_t cudaConfigureCallInternal(dim3 gridDim, dim3 blockDim,
     announce_call(__my_func__);
   }
   struct CUstream_st *s = (struct CUstream_st *)stream;
+  // [한국어] launch 설정을 스택에 푸시 (중첩 launch 미지원, 보통 1개)
   ctx->api->g_cuda_launch_stack.push_back(
       kernel_config(gridDim, blockDim, sharedMem, s));
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaGetDeviceCountInternal - 시뮬레이션 가능한 GPU 장치 수를 반환
+ *
+ * GPGPU-Sim은 현재 단일 장치만 시뮬레이션하므로 *count = 1.
+ */
 __host__ cudaError_t CUDARTAPI
 cudaGetDeviceCountInternal(int *count, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1577,10 +1723,22 @@ cudaGetDeviceCountInternal(int *count, gpgpu_context *gpgpu_ctx = NULL) {
     announce_call(__my_func__);
   }
   _cuda_device_id *dev = ctx->GPGPUSim_Init();
-  *count = dev->num_devices();
+  *count = dev->num_devices();  // [한국어] GPGPU-Sim은 1개 장치만 시뮬레이션
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaGetDevicePropertiesInternal - 지정 장치의 속성을 cudaDeviceProp에 복사
+ *
+ * @prop: 결과를 저장할 cudaDeviceProp 구조체 포인터.
+ * @device: 장치 인덱스. 0만 유효.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: 유효한 장치면 cudaSuccess, 아니면 cudaErrorInvalidDevice.
+ *
+ * GPGPUSim_Init()에서 채운 cudaDeviceProp을 복사하여 반환. SM 수, 메모리 크기,
+ * warp 크기 등 모두 gpgpusim.config에서 초기화된 값.
+ */
 __host__ cudaError_t CUDARTAPI cudaGetDevicePropertiesInternal(
     struct cudaDeviceProp *prop, int device, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1594,14 +1752,24 @@ __host__ cudaError_t CUDARTAPI cudaGetDevicePropertiesInternal(
   }
   _cuda_device_id *dev = ctx->GPGPUSim_Init();
   if (device <= dev->num_devices()) {
-    *prop = *dev->get_prop();
+    *prop = *dev->get_prop();  // [한국어] GPGPUSim_Init()에서 생성된 속성 구조체 복사
     return g_last_cudaError = cudaSuccess;
   } else {
     return g_last_cudaError = cudaErrorInvalidDevice;
   }
 }
 
+/*
+ * [한국어]
+ * cudaChooseDeviceInternal - 요구 속성에 맞는 장치를 선택
+ *
+ * GPGPU-Sim은 장치가 하나뿐이므로 항상 0을 반환.
+ */
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaChooseDevice()의 GPGPU-Sim 납부 구현
+ */
 cudaChooseDeviceInternal(int *device, const struct cudaDeviceProp *prop,
                          gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1618,6 +1786,18 @@ cudaChooseDeviceInternal(int *device, const struct cudaDeviceProp *prop,
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaSetupArgumentInternal - cudaConfigureCall로 설정된 launch에 커널 인수 추가
+ *
+ * @arg: 호스트 메모리의 인수 데이터 포인터.
+ * @size: 인수 크기(bytes).
+ * @offset: 인수 스택 내 오프셋.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ *
+ * launch 스택의 최상위 kernel_config에 인수를 복사/기록. 실제 전송은
+ * cudaLaunchInternal에서 이뤄진다.
+ */
 cudaError_t cudaSetupArgumentInternal(const void *arg, size_t size,
                                       size_t offset,
                                       gpgpu_context *gpgpu_ctx = NULL) {
@@ -1633,6 +1813,7 @@ cudaError_t cudaSetupArgumentInternal(const void *arg, size_t size,
   gpgpusim_ptx_assert(!ctx->api->g_cuda_launch_stack.empty(),
                       "empty launch stack");
   kernel_config &config = ctx->api->g_cuda_launch_stack.back();
+  // [한국어] 인수 데이터를 kernel_config에 기록 (실제 GPU 메모리 복사는 launch 시)
   config.set_arg(arg, size, offset);
   printf(
       "GPGPU-Sim PTX: Setting up arguments for %zu bytes starting at "
@@ -1642,6 +1823,19 @@ cudaError_t cudaSetupArgumentInternal(const void *arg, size_t size,
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaLaunchInternal - 구성/인수가 완료된 커널을 GPGPU-Sim에 발행
+ *
+ * @hostFun: 호스트 측 커널 함수 심볼(포인터). GPGPU-Sim 낸에서
+ *           register_function()으로 deviceFun과 매핑됨.
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: cudaSuccess 또는 cudaErrorInvalidConfiguration.
+ *
+ * 이 함수는 cudaLaunch()의 실제 구현. launch 스택에서 설정을 pop하고,
+ * kernel_info_t를 생성한 뒤 stream_manager로 전달하여 GPU 시뮬레이션 코어의
+ * 스케줄러가 실행하도록 한다. 또한 체크포인트 재개(resume) 옵션을 처리한다.
+ */
 cudaError_t cudaLaunchInternal(const char *hostFun,
                                gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1654,12 +1848,14 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
     announce_call(__my_func__);
   }
   CUctx_st *context = GPGPUSim_Context(ctx);
+  // [한국어] 환경 변수 PTX_SIM_MODE_FUNC로 functional(1)/performance(0) 모드 강제 설정
   char *mode = getenv("PTX_SIM_MODE_FUNC");
   if (mode) sscanf(mode, "%u", &(ctx->func_sim->g_ptx_sim_mode));
   gpgpusim_ptx_assert(!ctx->api->g_cuda_launch_stack.empty(),
                       "empty launch stack");
   kernel_config config = ctx->api->g_cuda_launch_stack.back();
   {
+    // [한국어] 빈 gridDim/blockDim은 launch 불가
     dim3 gridDim = config.grid_dim();
     dim3 blockDim = config.block_dim();
     if (gridDim.x * gridDim.y * gridDim.z == 0 ||
@@ -1677,10 +1873,12 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
          (ctx->func_sim->g_ptx_sim_mode) ? "functional simulation"
                                          : "performance simulation",
          stream ? stream->get_uid() : 0);
+  // [한국어] kernel_info_t 생성: 커널 함수 엔트리, 인수, grid/block 차원 설정
   kernel_info_t *grid = ctx->api->gpgpu_cuda_ptx_sim_init_grid(
       hostFun, config.get_args(), config.grid_dim(), config.block_dim(),
       context);
   // do dynamic PDOM analysis for performance simulation scenario
+  // [한국어] 동적 PDOM(post-dominator) 복수점 분석: warp 발산/수렴 처리용
   std::string kname = grid->name();
   function_info *kernel_func_info = grid->entry();
   if (kernel_func_info->is_pdom_set()) {
@@ -1701,6 +1899,7 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
   class memory_space *global_mem;
   global_mem = gpu->get_global_memory();
 
+  // [한국어] 체크포인트 재개: 지정한 커널/CTA부터 이어서 실행
   if (gpu->resume_option == 1 && (grid->get_uid() == gpu->resume_kernel)) {
     char f1name[2048];
     snprintf(f1name, 2048, "checkpoint_files/global_mem_%d.txt",
@@ -1709,6 +1908,7 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
     g_checkpoint->load_global_mem(global_mem, f1name);
     for (int i = 0; i < gpu->resume_CTA; i++) grid->increment_cta_id();
   }
+  // [한국어] 이전 커널은 메모리 상태를 복원만 하고 스킵
   if (gpu->resume_option == 1 && (grid->get_uid() < gpu->resume_kernel)) {
     char f1name[2048];
     snprintf(f1name, 2048, "checkpoint_files/global_mem_%d.txt",
@@ -1720,6 +1920,7 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
     ctx->api->g_cuda_launch_stack.pop_back();
     return g_last_cudaError = cudaSuccess;
   }
+  // [한국어] 체크포인트 생성 대상 이후의 커널은 스킵
   if (gpu->checkpoint_option == 1 &&
       (grid->get_uid() > gpu->checkpoint_kernel)) {
     printf("Skipping kernel %d as checkpoint from kernel %d\n", grid->get_uid(),
@@ -1732,12 +1933,22 @@ cudaError_t cudaLaunchInternal(const char *hostFun,
       "blockDim = (%u,%u,%u) \n",
       kname.c_str(), stream ? stream->get_uid() : 0, gridDim.x, gridDim.y,
       gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+  // [한국어] stream_manager에 커널 launch operation을 push (비동기 실행)
   stream_operation op(grid, ctx->func_sim->g_ptx_sim_mode, stream);
   ctx->the_gpgpusim->g_stream_manager->push(op);
   ctx->api->g_cuda_launch_stack.pop_back();
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMallocInternal - GPU 글로벌 메모리 할당
+ *
+ * @devPtr: 할당된 디바이스 포인터를 저장할 포인터.
+ * @size: 요청 크기(bytes).
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: 성공 시 cudaSuccess, 실패 시 cudaErrorMemoryAllocation.
+ */
 cudaError_t cudaMallocInternal(void **devPtr, size_t size,
                                gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1763,6 +1974,18 @@ cudaError_t cudaMallocInternal(void **devPtr, size_t size,
   }
 }
 
+/*
+ * [한국어]
+ * cudaMallocHostInternal - 페이지 고정(pinning)된 호스트 메모리 할당
+ *
+ * @ptr: 할당된 호스트 포인터를 저장할 포인터.
+ * @size: 요청 크기(bytes).
+ * @gpgpu_ctx: gpgpu_context 포인터.
+ * @return: 성공 시 cudaSuccess, 실패 시 cudaErrorMemoryAllocation.
+ *
+ * 실제 메모리는 malloc()으로 할당되며, pinned_memory_size 맵에 기록하여
+ * cudaHostGetDevicePointerInternal() 시 GPU 메모리도 동일 크기로 할당한다.
+ */
 cudaError_t cudaMallocHostInternal(void **ptr, size_t size,
                                    gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1778,6 +2001,7 @@ cudaError_t cudaMallocHostInternal(void **ptr, size_t size,
   if (*ptr) {
     // track pinned memory size allocated in the host so that same amount of
     // memory is also allocated in GPU.
+    // [한국어] 호스트 핀드 메모리 크기 추적 -> 이후 GPU 측 동일 크기 할당에 사용
     ctx->api->pinned_memory_size[*ptr] = size;
     return g_last_cudaError = cudaSuccess;
   } else {
@@ -1785,6 +2009,13 @@ cudaError_t cudaMallocHostInternal(void **ptr, size_t size,
   }
 }
 
+/*
+ * [한국어]
+ * cudaMallocHostSSTInternal - SST/Vanadis 환경에서 이미 할당된 호스트 주소를 기록
+ *
+ * SST 시뮬레이터가 호스트 메모리 할당을 대행하므로 libcuda는 주소만
+ * pinned_memory_size 맵에 등록한다.
+ */
 // SST malloc done by vanadis, we just need to record the memory addr
 cudaError_t CUDARTAPI cudaMallocHostSSTInternal(
     void *addr, size_t size, gpgpu_context *gpgpu_ctx = NULL) {
@@ -1803,7 +2034,18 @@ cudaError_t CUDARTAPI cudaMallocHostSSTInternal(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMallocPitchInternal - 2D 텍스처/배열용 align된 글로벌 메모리 할당
+ *
+ * GPGPU-Sim은 현재 pitch 정렬을 수행하지 않고 width * height 크기만큼
+ * gpu_malloc()으로 할당한 뒤 pitch = width를 반환한다.
+ */
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMallocPitch()의 GPGPU-Sim 납부 구현
+ */
 cudaMallocPitchInternal(void **devPtr, size_t *pitch, size_t width,
                         size_t height, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1828,6 +2070,13 @@ cudaMallocPitchInternal(void **devPtr, size_t *pitch, size_t width,
   }
 }
 
+/*
+ * [한국어]
+ * cudaHostGetDevicePointerInternal - 핀드 호스트 메모리에 대응하는 GPU 디바이스 포인터 획득
+ *
+ * cudaHostAlloc/cudaMallocHost로 기록된 크기만큼 GPU 메모리를 새로 할당하고,
+ * 현재 CPU 메모리 내용을 GPU로 복사한다.
+ */
 cudaError_t cudaHostGetDevicePointerInternal(void **pDevice, void *pHost,
                                              unsigned int flags,
                                              gpgpu_context *gpgpu_ctx = NULL) {
@@ -1850,6 +2099,7 @@ cudaError_t cudaHostGetDevicePointerInternal(void **pDevice, void *pHost,
   flags = 0;
   CUctx_st *context = GPGPUSim_Context(ctx);
   gpgpu_t *gpu = context->get_device()->get_gpgpu();
+  // [한국어] pinned_memory_size 맵에서 호스트 주소에 대응하는 크기 검색
   std::map<void *, size_t>::const_iterator i =
       ctx->api->pinned_memory_size.find(pHost);
   assert(i != ctx->api->pinned_memory_size.end());
@@ -1863,6 +2113,7 @@ cudaError_t cudaHostGetDevicePointerInternal(void **pDevice, void *pHost,
   if (*pDevice) {
     ctx->api->pinned_memory[pHost] = pDevice;
     // Copy contents in cpu to gpu
+    // [한국어] 핀드 메모리 초기 내용을 GPU 메모리로 복사
     gpu->memcpy_to_gpu((size_t)*pDevice, pHost, size);
     return g_last_cudaError = cudaSuccess;
   } else {
@@ -1870,6 +2121,13 @@ cudaError_t cudaHostGetDevicePointerInternal(void **pDevice, void *pHost,
   }
 }
 
+/*
+ * [한국어]
+ * cudaMallocArrayInternal - CUDA 배열(cudaArray)용 메모리 할당
+ *
+ * cudaChannelFormatDesc에 명시된 채널 비트 수를 바탕으로 요소 크기를 계산하고,
+ * gpu_mallocarray()로 GPU 메모리를 할당한다.
+ */
 __host__ cudaError_t CUDARTAPI cudaMallocArrayInternal(
     struct cudaArray **array, const struct cudaChannelFormatDesc *desc,
     size_t width, size_t height __dv(1), gpgpu_context *gpgpu_ctx = NULL) {
@@ -1882,6 +2140,7 @@ __host__ cudaError_t CUDARTAPI cudaMallocArrayInternal(
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
+  // [한국어] 채널 비트 수를 바이트로 환산하여 전체 배열 크기 산출
   unsigned size =
       width * height * ((desc->x + desc->y + desc->z + desc->w) / 8);
   CUctx_st *context = GPGPUSim_Context(ctx);
@@ -1903,7 +2162,20 @@ __host__ cudaError_t CUDARTAPI cudaMallocArrayInternal(
   }
 }
 
+/*
+ * [한국어]
+ * cudaMemcpyInternal - GPU/호스트 간 메모리 복사
+ *
+ * @kind: cudaMemcpyHostToDevice, DeviceToHost, DeviceToDevice, Default.
+ *        Default는 주소값(GLOBAL_HEAP_START 이상)으로 방향을 추론.
+ *
+ * 모든 복사는 stream_manager에 stream_operation으로 push되어 비동기 처리됨.
+ */
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy()의 GPGPU-Sim 납부 구현
+ */
 cudaMemcpyInternal(void *dst, const void *src, size_t count,
                    enum cudaMemcpyKind kind, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -1919,6 +2191,7 @@ cudaMemcpyInternal(void *dst, const void *src, size_t count,
   // gpgpu_t *gpu = context->get_device()->get_gpgpu();
   if (g_debug_execution >= 3)
     printf("GPGPU-Sim PTX: cudaMemcpy(): devPtr = %p\n", dst);
+  // [한국어] 복사 방향에 따라 stream_manager에 적절한 stream_operation 추가
   if (kind == cudaMemcpyHostToDevice)
     ctx->the_gpgpusim->g_stream_manager->push(
         stream_operation(src, (size_t)dst, count, 0));
@@ -1929,6 +2202,7 @@ cudaMemcpyInternal(void *dst, const void *src, size_t count,
     ctx->the_gpgpusim->g_stream_manager->push(
         stream_operation((size_t)src, (size_t)dst, count, 0));
   else if (kind == cudaMemcpyDefault) {
+    // [한국어] 주소가 GLOBAL_HEAP_START 이상이면 GPU 메모리로 간주
     if ((size_t)src >= GLOBAL_HEAP_START) {
       if ((size_t)dst >= GLOBAL_HEAP_START)
         ctx->the_gpgpusim->g_stream_manager->push(stream_operation(
@@ -1954,6 +2228,10 @@ cudaMemcpyInternal(void *dst, const void *src, size_t count,
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMemcpyToArrayInternal - cudaArray로 메모리 복사
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyToArrayInternal(
     struct cudaArray *dst, size_t wOffset, size_t hOffset, const void *src,
     size_t count, enum cudaMemcpyKind kind, gpgpu_context *gpgpu_ctx = NULL) {
@@ -1986,6 +2264,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyToArrayInternal(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMemcpy2DInternal - 2D 메모리 복사 (동일 pitch 가정)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DInternal(
     void *dst, size_t dpitch, const void *src, size_t spitch, size_t width,
     size_t height, enum cudaMemcpyKind kind, gpgpu_context *gpgpu_ctx = NULL) {
@@ -2017,6 +2299,12 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DInternal(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMemcpy2DToArrayInternal - 2D 배열로 메모리 복사
+ *
+ * 현재는 전체 배열 복사, wOffset/hOffset=0, spitch==width만 지원.
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArrayInternal(
     struct cudaArray *dst, size_t wOffset, size_t hOffset, const void *src,
     size_t spitch, size_t width, size_t height, enum cudaMemcpyKind kind,
@@ -2039,6 +2327,7 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArrayInternal(
       "none byte multiple destination channel size not supported (sz=%u)",
       channel_size);
   unsigned elem_size = channel_size / 8;
+  // [한국어] 아직 부분 복사나 1D/3D 배열, pitch 불일치는 지원하지 않음
   gpgpusim_ptx_assert((dst->dimensions == 2),
                       "copy to none 2D array not supported");
   gpgpusim_ptx_assert((wOffset == 0), "non-zero wOffset not yet supported");
@@ -2063,6 +2352,12 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArrayInternal(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * cudaMemcpyToSymbolInternal - PTX 심볼(전역/상수 변수)에 데이터 복사
+ *
+ * 복사는 stream_manager의 symbol stream_operation으로 push되어 비동기 수행.
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyToSymbolInternal(
     const char *symbol, const void *src, size_t count, size_t offset __dv(0),
     enum cudaMemcpyKind kind __dv(cudaMemcpyHostToDevice),
@@ -2081,12 +2376,16 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyToSymbolInternal(
   printf("GPGPU-Sim PTX: cudaMemcpyToSymbol: symbol = %p\n", symbol);
   // stream_operation( const char *symbol, const void *src, size_t count, size_t
   // offset )
+  // [한국어] 심볼 이름 기반 비동기 복사 operation push
   ctx->the_gpgpusim->g_stream_manager->push(
       stream_operation(src, symbol, count, offset, 0));
   // gpgpu_ptx_sim_memcpy_symbol(symbol,src,count,offset,1,context->get_device()->get_gpgpu());
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyFromSymbol()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyFromSymbolInternal(
     void *dst, const char *symbol, size_t count, size_t offset __dv(0),
     enum cudaMemcpyKind kind __dv(cudaMemcpyDeviceToHost),
@@ -2108,7 +2407,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyFromSymbolInternal(
   // gpgpu_ptx_sim_memcpy_symbol(symbol,dst,count,offset,0,context->get_device()->get_gpgpu());
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyAsync()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyAsyncInternal(
     void *dst, const void *src, size_t count, enum cudaMemcpyKind kind,
     cudaStream_t stream, gpgpu_context *gpgpu_ctx = NULL) {
@@ -2143,6 +2445,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyAsyncInternal(
 
 #if (CUDART_VERSION >= 8000)
 cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags()의 GPGPU-Sim 납부 구현 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlagsInternal(
     int *numBlocks, const char *hostFunc, int blockSize, size_t dynamicSMemSize,
     unsigned int flags, gpgpu_context *gpgpu_ctx = NULL) {
@@ -2185,7 +2491,10 @@ cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlagsInternal(
 }
 
 #endif
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemset()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaMemsetInternal(
     void *mem, int c, size_t count, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2205,6 +2514,10 @@ __host__ cudaError_t CUDARTAPI cudaMemsetInternal(
 
 // memset operation is done but i think its not async?
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemsetAsync()의 GPGPU-Sim 납부 구현
+ */
 cudaMemsetAsyncInternal(void *mem, int c, size_t count, cudaStream_t stream = 0,
                         gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2223,7 +2536,10 @@ cudaMemsetAsyncInternal(void *mem, int c, size_t count, cudaStream_t stream = 0,
   gpu->gpu_memset((size_t)mem, c, count);
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGLMapBufferObject()의 GPGPU-Sim 납부 구현
+ */
 cudaError_t cudaGLMapBufferObjectInternal(void **devPtr, GLuint bufferObj,
                                           gpgpu_context *gpgpu_ctx = NULL) {
   if (g_debug_execution >= 3) {
@@ -2289,6 +2605,10 @@ cudaError_t cudaGLMapBufferObjectInternal(void **devPtr, GLuint bufferObj,
 }
 
 #if CUDART_VERSION >= 6050
+/*
+ * [한국어]
+ * CUDA 런타임 API cuLinkAddFile()의 GPGPU-Sim 납부 구현
+ */
 CUresult cuLinkAddFileInternal(CUlinkState state, CUjitInputType type,
                                const char *path, unsigned int numOptions,
                                CUjit_option *options, void **optionValues,
@@ -2334,7 +2654,10 @@ CUresult cuLinkAddFileInternal(CUlinkState state, CUjitInputType type,
 #endif
 
 #if (CUDART_VERSION >= 2010)
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaHostAlloc()의 GPGPU-Sim 납부 구현
+ */
 cudaError_t cudaHostAllocInternal(void **pHost, size_t bytes,
                                   unsigned int flags,
                                   gpgpu_context *gpgpu_ctx = NULL) {
@@ -2360,7 +2683,10 @@ cudaError_t cudaHostAllocInternal(void **pHost, size_t bytes,
 }
 
 #endif
-
+/*
+ * [한국어]
+ * 커널 속성과 장치 속성으로 블록당 최대 스레드 계산
+ */
 size_t getMaxThreadsPerBlock(struct cudaFuncAttributes *attr,
                              gpgpu_context *ctx) {
   _cuda_device_id *dev = ctx->GPGPUSim_Init();
@@ -2379,7 +2705,10 @@ size_t getMaxThreadsPerBlock(struct cudaFuncAttributes *attr,
 
   return max;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFuncGetAttributes()의 GPGPU-Sim 납부 구현
+ */
 cudaError_t CUDARTAPI cudaFuncGetAttributesInternal(
     struct cudaFuncAttributes *attr, const char *hostFun,
     gpgpu_context *gpgpu_ctx = NULL) {
@@ -2414,6 +2743,10 @@ cudaError_t CUDARTAPI cudaFuncGetAttributesInternal(
 
 #if (CUDART_VERSION > 5000)
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceGetAttribute()의 GPGPU-Sim 납부 구현
+ */
 cudaDeviceGetAttributeInternal(int *value, enum cudaDeviceAttr attr, int device,
                                gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2613,7 +2946,10 @@ cudaDeviceGetAttributeInternal(int *value, enum cudaDeviceAttr attr, int device,
   }
 }
 #endif
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaBindTexture()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaBindTextureInternal(
     size_t *offset, const struct textureReference *texref, const void *devPtr,
     const struct cudaChannelFormatDesc *desc, size_t size __dv(UINT_MAX),
@@ -2658,7 +2994,10 @@ __host__ cudaError_t CUDARTAPI cudaBindTextureInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaBindTextureToArray()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaBindTextureToArrayInternal(
     const struct textureReference *texref, const struct cudaArray *array,
     const struct cudaChannelFormatDesc *desc, gpgpu_context *gpgpu_ctx = NULL) {
@@ -2683,7 +3022,10 @@ __host__ cudaError_t CUDARTAPI cudaBindTextureToArrayInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaUnbindTexture()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaUnbindTextureInternal(
     const struct textureReference *texref, gpgpu_context *gpgpu_ctx = NULL) {
 #if (CUDART_VERSION <= 1200)
@@ -2709,7 +3051,10 @@ __host__ cudaError_t CUDARTAPI cudaUnbindTextureInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaLaunchKernel()의 GPGPU-Sim 납부 구현 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaLaunchKernelInternal(
     const char *hostFun, dim3 gridDim, dim3 blockDim, const void **args,
     size_t sharedMem, cudaStream_t stream, gpgpu_context *gpgpu_ctx = NULL) {
@@ -2736,7 +3081,10 @@ __host__ cudaError_t CUDARTAPI cudaLaunchKernelInternal(
   cudaLaunchInternal(hostFun);
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamCreate()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamCreateInternal(
     cudaStream_t *stream, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2761,7 +3109,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamCreateInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamDestroy()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamDestroyInternal(
     cudaStream_t stream, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2783,7 +3134,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamDestroyInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamSynchronize()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamSynchronizeInternal(
     cudaStream_t stream, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2807,7 +3161,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamSynchronizeInternal(
 #endif
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API __cudaRegisterTexture()의 GPGPU-Sim 납부 구현
+ */
 void __cudaRegisterTextureInternal(
     void **fatCubinHandle, const struct textureReference *hostVar,
     const void **deviceAddress, const char *deviceName, int dim, int norm,
@@ -2840,7 +3197,10 @@ void __cudaRegisterTextureInternal(
       "GPGPU-Sim PTX:   Execution warning: Not finished implementing \"%s\"\n",
       __my_func__);
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGLUnmapBufferObject()의 GPGPU-Sim 납부 구현
+ */
 cudaError_t cudaGLUnmapBufferObjectInternal(GLuint bufferObj,
                                             gpgpu_context *gpgpu_ctx = NULL) {
   if (g_debug_execution >= 3) {
@@ -2876,6 +3236,10 @@ cudaError_t cudaGLUnmapBufferObjectInternal(GLuint bufferObj,
 #if CUDART_VERSION >= 3000
 
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFuncSetCacheConfig()의 GPGPU-Sim 납부 구현
+ */
 cudaFuncSetCacheConfigInternal(const char *func, enum cudaFuncCache cacheConfig,
                                gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2896,6 +3260,10 @@ cudaFuncSetCacheConfigInternal(const char *func, enum cudaFuncCache cacheConfig,
 #endif
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 런타임 API cuLaunchKernel()의 GPGPU-Sim 납부 구현 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 CUresult CUDAAPI cuLaunchKernelInternal(
     CUfunction f, unsigned int gridDimX, unsigned int gridDimY,
     unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
@@ -2942,7 +3310,10 @@ CUevent_st *get_event(cudaEvent_t event) {
   if (e == g_timer_events.end()) return NULL;
   return e->second;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventRecord()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaEventRecordInternal(
     cudaEvent_t event, cudaStream_t stream, gpgpu_context *gpgpu_ctx = NULL) {
   gpgpu_context *ctx;
@@ -2962,7 +3333,10 @@ __host__ cudaError_t CUDARTAPI cudaEventRecordInternal(
   ctx->the_gpgpusim->g_stream_manager->push(op);
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamWaitEvent()의 GPGPU-Sim 납부 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamWaitEventInternal(
     cudaStream_t stream, cudaEvent_t event, unsigned int flags,
     gpgpu_context *gpgpu_ctx = NULL) {
@@ -3095,6 +3469,7 @@ void SST_receive_mem_reply(unsigned core_id, void *mem_req) {
   // printf("GPGPU-sim: Recived Request\n");
 }
 
+/* [한국어] SST GPU 코어 1사이클 진행 래퍼 */
 bool SST_gpu_core_cycle() { return SST_Cycle(); }
 
 void SST_gpgpusim_numcores_equal_check(unsigned sst_numcores) {
@@ -3102,7 +3477,10 @@ void SST_gpgpusim_numcores_equal_check(unsigned sst_numcores) {
   static_cast<sst_gpgpu_sim *>(context->get_device()->get_gpgpu())
       ->SST_gpgpusim_numcores_equal_check(sst_numcores);
 }
-
+/*
+ * [한국어]
+ * SST 모드에서 GPU 메모리 할당 주소 기록
+ */
 uint64_t cudaMallocSST(void **devPtr, size_t size) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3124,6 +3502,10 @@ __host__ cudaError_t CUDARTAPI cudaMallocHostSST(void *addr, size_t size) {
   return cudaMallocHostSSTInternal(addr, size);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaPeekAtLastError()의 GPGPU-Sim 구현. 납부 구현(cudaPeekAtLastErrorInternal)에 위임
+ */
 cudaError_t cudaPeekAtLastError(void) { return g_last_cudaError; }
 
 __host__ cudaError_t CUDARTAPI cudaMalloc(void **devPtr, size_t size) {
@@ -3133,17 +3515,28 @@ __host__ cudaError_t CUDARTAPI cudaMalloc(void **devPtr, size_t size) {
 __host__ cudaError_t CUDARTAPI cudaMallocHost(void **ptr, size_t size) {
   return cudaMallocHostInternal(ptr, size);
 }
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMallocPitch()의 GPGPU-Sim 구현. 납부 구현(cudaMallocPitchInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMallocPitch(void **devPtr, size_t *pitch,
                                                size_t width, size_t height) {
   return cudaMallocPitchInternal(devPtr, pitch, width, height);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMallocArray()의 GPGPU-Sim 구현. 납부 구현(cudaMallocArrayInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMallocArray(
     struct cudaArray **array, const struct cudaChannelFormatDesc *desc,
     size_t width, size_t height __dv(1)) {
   return cudaMallocArrayInternal(array, desc, width, height);
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFree()의 GPGPU-Sim 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaFree(void *devPtr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3151,6 +3544,10 @@ __host__ cudaError_t CUDARTAPI cudaFree(void *devPtr) {
   // TODO...  manage g_global_mem space?
   return g_last_cudaError = cudaSuccess;
 }
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFreeHost()의 GPGPU-Sim 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaFreeHost(void *ptr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3158,7 +3555,10 @@ __host__ cudaError_t CUDARTAPI cudaFreeHost(void *ptr) {
   free(ptr);  // this will crash the system if called twice
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFreeArray()의 GPGPU-Sim 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaFreeArray(struct cudaArray *array) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3173,12 +3573,20 @@ __host__ cudaError_t CUDARTAPI cudaFreeArray(struct cudaArray *array) {
  *                                                                              *
  *******************************************************************************/
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy(void *dst, const void *src,
                                           size_t count,
                                           enum cudaMemcpyKind kind) {
   return cudaMemcpyInternal(dst, src, count, kind);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyToArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyToArrayInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyToArray(struct cudaArray *dst,
                                                  size_t wOffset, size_t hOffset,
                                                  const void *src, size_t count,
@@ -3186,6 +3594,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyToArray(struct cudaArray *dst,
   return cudaMemcpyToArrayInternal(dst, wOffset, hOffset, src, count, kind);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyFromArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyFromArrayInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyFromArray(void *dst,
                                                    const struct cudaArray *src,
                                                    size_t wOffset,
@@ -3198,6 +3610,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyFromArray(void *dst,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyArrayToArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyArrayToArrayInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyArrayToArray(
     struct cudaArray *dst, size_t wOffsetDst, size_t hOffsetDst,
     const struct cudaArray *src, size_t wOffsetSrc, size_t hOffsetSrc,
@@ -3209,6 +3625,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyArrayToArray(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2D()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2D(void *dst, size_t dpitch,
                                             const void *src, size_t spitch,
                                             size_t width, size_t height,
@@ -3216,6 +3636,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2D(void *dst, size_t dpitch,
   return cudaMemcpy2DInternal(dst, dpitch, src, spitch, width, height, kind);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DToArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DToArrayInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArray(
     struct cudaArray *dst, size_t wOffset, size_t hOffset, const void *src,
     size_t spitch, size_t width, size_t height, enum cudaMemcpyKind kind) {
@@ -3223,6 +3647,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArray(
                                      height, kind);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DFromArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DFromArrayInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DFromArray(
     void *dst, size_t dpitch, const struct cudaArray *src, size_t wOffset,
     size_t hOffset, size_t width, size_t height, enum cudaMemcpyKind kind) {
@@ -3233,6 +3661,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DFromArray(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DArrayToArray()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DArrayToArrayInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DArrayToArray(
     struct cudaArray *dst, size_t wOffsetDst, size_t hOffsetDst,
     const struct cudaArray *src, size_t wOffsetSrc, size_t hOffsetSrc,
@@ -3245,18 +3677,29 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DArrayToArray(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyToSymbol()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyToSymbolInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyToSymbol(
     const char *symbol, const void *src, size_t count, size_t offset __dv(0),
     enum cudaMemcpyKind kind __dv(cudaMemcpyHostToDevice)) {
   return cudaMemcpyToSymbolInternal(symbol, src, count, offset, kind);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyFromSymbol()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyFromSymbolInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyFromSymbol(
     void *dst, const char *symbol, size_t count, size_t offset __dv(0),
     enum cudaMemcpyKind kind __dv(cudaMemcpyDeviceToHost)) {
   return cudaMemcpyFromSymbolInternal(dst, symbol, count, offset, kind);
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemGetInfo()의 GPGPU-Sim 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaMemGetInfo(size_t *free, size_t *total) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3274,6 +3717,10 @@ __host__ cudaError_t CUDARTAPI cudaMemGetInfo(size_t *free, size_t *total) {
  *                                                                              *
  *******************************************************************************/
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyAsyncInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyAsync(void *dst, const void *src,
                                                size_t count,
                                                enum cudaMemcpyKind kind,
@@ -3281,6 +3728,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyAsync(void *dst, const void *src,
   return cudaMemcpyAsyncInternal(dst, src, count, kind, stream);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyToArrayAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyToArrayAsyncInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyToArrayAsync(
     struct cudaArray *dst, size_t wOffset, size_t hOffset, const void *src,
     size_t count, enum cudaMemcpyKind kind, cudaStream_t stream) {
@@ -3291,6 +3742,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyToArrayAsync(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpyFromArrayAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpyFromArrayAsyncInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpyFromArrayAsync(
     void *dst, const struct cudaArray *src, size_t wOffset, size_t hOffset,
     size_t count, enum cudaMemcpyKind kind, cudaStream_t stream) {
@@ -3301,6 +3756,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpyFromArrayAsync(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DAsyncInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DAsync(void *dst, size_t dpitch,
                                                  const void *src, size_t spitch,
                                                  size_t width, size_t height,
@@ -3313,6 +3772,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DAsync(void *dst, size_t dpitch,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DToArrayAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DToArrayAsyncInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArrayAsync(
     struct cudaArray *dst, size_t wOffset, size_t hOffset, const void *src,
     size_t spitch, size_t width, size_t height, enum cudaMemcpyKind kind,
@@ -3324,6 +3787,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DToArrayAsync(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemcpy2DFromArrayAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemcpy2DFromArrayAsyncInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemcpy2DFromArrayAsync(
     void *dst, size_t dpitch, const struct cudaArray *src, size_t wOffset,
     size_t hOffset, size_t width, size_t height, enum cudaMemcpyKind kind,
@@ -3336,6 +3803,10 @@ __host__ cudaError_t CUDARTAPI cudaMemcpy2DFromArrayAsync(
 }
 
 #if (CUDART_VERSION >= 8000)
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags()의 GPGPU-Sim 구현. 납부 구현(cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlagsInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 cudaError_t CUDARTAPI cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     int *numBlocks, const char *hostFunc, int blockSize, size_t dynamicSMemSize,
     unsigned int flags) {
@@ -3356,11 +3827,19 @@ __host__ cudaError_t CUDARTAPI cudaMemset(void *mem, int c, size_t count) {
 }
 
 // memset operation is done but i think its not async?
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemsetAsync()의 GPGPU-Sim 구현. 납부 구현(cudaMemsetAsyncInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaMemsetAsync(void *mem, int c, size_t count,
                                                cudaStream_t stream = 0) {
   return cudaMemsetAsyncInternal(mem, c, count, stream = 0);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaMemset2D()의 GPGPU-Sim 구현. 납부 구현(cudaMemset2DInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaMemset2D(void *mem, size_t pitch, int c,
                                             size_t width, size_t height) {
   if (g_debug_execution >= 3) {
@@ -3376,6 +3855,10 @@ __host__ cudaError_t CUDARTAPI cudaMemset2D(void *mem, size_t pitch, int c,
  *                                                                              *
  *******************************************************************************/
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetSymbolAddress()의 GPGPU-Sim 구현. 납부 구현(cudaGetSymbolAddressInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaGetSymbolAddress(void **devPtr,
                                                     const char *symbol) {
   if (g_debug_execution >= 3) {
@@ -3385,6 +3868,10 @@ __host__ cudaError_t CUDARTAPI cudaGetSymbolAddress(void **devPtr,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetSymbolSize()의 GPGPU-Sim 구현. 납부 구현(cudaGetSymbolSizeInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaGetSymbolSize(size_t *size,
                                                  const char *symbol) {
   if (g_debug_execution >= 3) {
@@ -3409,6 +3896,10 @@ cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device) {
 }
 
 #if (CUDART_VERSION > 5000)
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceGetAttribute()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceGetAttributeInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceGetAttribute(int *value,
                                                       enum cudaDeviceAttr attr,
                                                       int device) {
@@ -3429,11 +3920,19 @@ __host__ cudaError_t CUDARTAPI cudaGetDevice(int *device) {
   return cudaGetDeviceInternal(device);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceGetLimit()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceGetLimitInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceGetLimit(size_t *pValue,
                                                   cudaLimit limit) {
   return cudaDeviceGetLimitInternal(pValue, limit);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamGetPriority()의 GPGPU-Sim 구현. 납부 구현(cudaStreamGetPriorityInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamGetPriority(cudaStream_t hStream,
                                                      int *priority) {
   if (g_debug_execution >= 3) {
@@ -3443,6 +3942,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamGetPriority(cudaStream_t hStream,
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceGetPCIBusId()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceGetPCIBusIdInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceGetPCIBusId(char *pciBusId, int len,
                                                      int device) {
   if (g_debug_execution >= 3) {
@@ -3452,6 +3955,10 @@ __host__ cudaError_t CUDARTAPI cudaDeviceGetPCIBusId(char *pciBusId, int len,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaIpcGetMemHandle()의 GPGPU-Sim 구현. 납부 구현(cudaIpcGetMemHandleInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaIpcGetMemHandle(cudaIpcMemHandle_t *handle,
                                                    void *devPtr) {
   if (g_debug_execution >= 3) {
@@ -3461,6 +3968,10 @@ __host__ cudaError_t CUDARTAPI cudaIpcGetMemHandle(cudaIpcMemHandle_t *handle,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaIpcOpenMemHandle()의 GPGPU-Sim 구현. 납부 구현(cudaIpcOpenMemHandleInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t cudaIpcOpenMemHandle(void **devPtr,
                                           cudaIpcMemHandle_t handle,
                                           unsigned int flags) {
@@ -3472,6 +3983,10 @@ __host__ cudaError_t cudaIpcOpenMemHandle(void **devPtr,
 }
 
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDestroyTextureObject()의 GPGPU-Sim 구현. 납부 구현(cudaDestroyTextureObjectInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaDestroyTextureObject(cudaTextureObject_t texObject) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3486,6 +4001,10 @@ cudaDestroyTextureObject(cudaTextureObject_t texObject) {
  *                                                                              *
  *******************************************************************************/
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaBindTexture()의 GPGPU-Sim 구현. 납부 구현(cudaBindTextureInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaBindTexture(
     size_t *offset, const struct textureReference *texref, const void *devPtr,
     const struct cudaChannelFormatDesc *desc, size_t size __dv(UINT_MAX)) {
@@ -3493,6 +4012,10 @@ __host__ cudaError_t CUDARTAPI cudaBindTexture(
                                  size __dv(UINT_MAX));
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaBindTextureToArray()의 GPGPU-Sim 구현. 납부 구현(cudaBindTextureToArrayInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaBindTextureToArray(
     const struct textureReference *texref, const struct cudaArray *array,
     const struct cudaChannelFormatDesc *desc) {
@@ -3504,6 +4027,10 @@ cudaUnbindTexture(const struct textureReference *texref) {
   return cudaUnbindTextureInternal(texref);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetTextureAlignmentOffset()의 GPGPU-Sim 구현. 납부 구현(cudaGetTextureAlignmentOffsetInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaGetTextureAlignmentOffset(
     size_t *offset, const struct textureReference *texref) {
   if (g_debug_execution >= 3) {
@@ -3513,6 +4040,10 @@ __host__ cudaError_t CUDARTAPI cudaGetTextureAlignmentOffset(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetTextureReference()의 GPGPU-Sim 구현. 납부 구현(cudaGetTextureReferenceInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaGetTextureReference(
     const struct textureReference **texref, const char *symbol) {
   if (g_debug_execution >= 3) {
@@ -3522,6 +4053,10 @@ __host__ cudaError_t CUDARTAPI cudaGetTextureReference(
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetChannelDesc()의 GPGPU-Sim 구현. 납부 구현(cudaGetChannelDescInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaGetChannelDesc(
     struct cudaChannelFormatDesc *desc, const struct cudaArray *array) {
   if (g_debug_execution >= 3) {
@@ -3531,6 +4066,10 @@ __host__ cudaError_t CUDARTAPI cudaGetChannelDesc(
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaCreateChannelDesc()의 GPGPU-Sim 구현. 납부 구현(cudaCreateChannelDescInternal)에 위임
+ */
 __host__ struct cudaChannelFormatDesc CUDARTAPI cudaCreateChannelDesc(
     int x, int y, int z, int w, enum cudaChannelFormatKind f) {
   if (g_debug_execution >= 3) {
@@ -3545,6 +4084,10 @@ __host__ struct cudaChannelFormatDesc CUDARTAPI cudaCreateChannelDesc(
   return dummy;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetLastError()의 GPGPU-Sim 구현. 납부 구현(cudaGetLastErrorInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaGetLastError(void) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3572,6 +4115,10 @@ __host__ const char *CUDARTAPI cudaGetErrorString(cudaError_t error) {
 }
 
 // SST specific cuda apis
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaSetupArgumentSST()의 GPGPU-Sim 구현. 납부 구현(cudaSetupArgumentSSTInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaSetupArgumentSST(uint64_t arg,
                                                     uint8_t value[200],
                                                     size_t size,
@@ -3587,6 +4134,10 @@ __host__ cudaError_t CUDARTAPI cudaSetupArgumentSST(uint64_t arg,
   return cudaSetupArgumentInternal(local_value, size, offset);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaSetupArgument()의 GPGPU-Sim 구현. 납부 구현(cudaSetupArgumentInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaSetupArgument(const void *arg, size_t size,
                                                  size_t offset) {
   return cudaSetupArgumentInternal(arg, size, offset);
@@ -3601,6 +4152,10 @@ __host__ cudaError_t CUDARTAPI cudaLaunch(const char *hostFun) {
   return cudaLaunchInternal(hostFun);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaLaunchKernel()의 GPGPU-Sim 구현. 납부 구현(cudaLaunchKernelInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaLaunchKernel(const char *hostFun,
                                                 dim3 gridDim, dim3 blockDim,
                                                 const void **args,
@@ -3621,6 +4176,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamCreate(cudaStream_t *stream) {
 }
 
 // TODO: introduce priorities
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamCreateWithPriority()의 GPGPU-Sim 구현. 납부 구현(cudaStreamCreateWithPriorityInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamCreateWithPriority(
     cudaStream_t *stream, unsigned int flags, int priority) {
   if (g_debug_execution >= 3) {
@@ -3630,6 +4189,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamCreateWithPriority(
 }
 
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceGetStreamPriorityRange()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceGetStreamPriorityRangeInternal)에 위임
+ */
 cudaDeviceGetStreamPriorityRange(int *leastPriority, int *greatestPriority) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3638,6 +4201,10 @@ cudaDeviceGetStreamPriorityRange(int *leastPriority, int *greatestPriority) {
 }
 
 __host__ __device__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamCreateWithFlags()의 GPGPU-Sim 구현. 납부 구현(cudaStreamCreateWithFlagsInternal)에 위임
+ */
 cudaStreamCreateWithFlags(cudaStream_t *stream, unsigned int flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3653,6 +4220,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamSynchronize(cudaStream_t stream) {
   return cudaStreamSynchronizeInternal(stream);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamQuery()의 GPGPU-Sim 구현. 납부 구현(cudaStreamQueryInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamQuery(cudaStream_t stream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3676,6 +4247,10 @@ __host__ cudaError_t CUDARTAPI cudaStreamQuery(cudaStream_t stream) {
  *                                                                              *
  *******************************************************************************/
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventCreate()의 GPGPU-Sim 구현. 납부 구현(cudaEventCreateInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaEventCreate(cudaEvent_t *event) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3690,17 +4265,28 @@ __host__ cudaError_t CUDARTAPI cudaEventCreate(cudaEvent_t *event) {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventRecord()의 GPGPU-Sim 구현. 납부 구현(cudaEventRecordInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaEventRecord(cudaEvent_t event,
                                                cudaStream_t stream) {
   return cudaEventRecordInternal(event, stream);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaStreamWaitEvent()의 GPGPU-Sim 구현. 납부 구현(cudaStreamWaitEventInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaStreamWaitEvent(cudaStream_t stream,
                                                    cudaEvent_t event,
                                                    unsigned int flags) {
   return cudaStreamWaitEventInternal(stream, event, flags);
 }
-
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventQuery()의 GPGPU-Sim 구현
+ */
 __host__ cudaError_t CUDARTAPI cudaEventQuery(cudaEvent_t event) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3715,6 +4301,10 @@ __host__ cudaError_t CUDARTAPI cudaEventQuery(cudaEvent_t event) {
   }
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventSynchronize()의 GPGPU-Sim 구현. 납부 구현(cudaEventSynchronizeInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaEventSynchronize(cudaEvent_t event) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3729,6 +4319,10 @@ __host__ cudaError_t CUDARTAPI cudaEventSynchronize(cudaEvent_t event) {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventDestroy()의 GPGPU-Sim 구현. 납부 구현(cudaEventDestroyInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaEventDestroy(cudaEvent_t event) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3742,6 +4336,10 @@ __host__ cudaError_t CUDARTAPI cudaEventDestroy(cudaEvent_t event) {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaEventElapsedTime()의 GPGPU-Sim 구현. 납부 구현(cudaEventElapsedTimeInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaEventElapsedTime(float *ms,
                                                     cudaEvent_t start,
                                                     cudaEvent_t end) {
@@ -3792,6 +4390,7 @@ __host__ cudaError_t CUDARTAPI cudaThreadSynchronizeSST(void) {
   }
 }
 
+/* [한국어] NVCC CUDA 런타임 콜백 __cudaSynchronizeThreads() */
 int CUDARTAPI __cudaSynchronizeThreads(void **, void *) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3806,13 +4405,17 @@ int CUDARTAPI __cudaSynchronizeThreads(void **, void *) {
  *******************************************************************************/
 
 #if (CUDART_VERSION >= 3010)
+/* [한국어] CUDA 런타임 더미 심볼 0 */
 int dummy0() {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
   return 0;
 }
-
+/*
+ * [한국어]
+ * dummy1()
+ */
 int dummy1() {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -3824,6 +4427,10 @@ typedef int (*ExportedFunction)();
 
 static ExportedFunction exportTable[3] = {&dummy0, &dummy0, &dummy0};
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGetExportTable()의 GPGPU-Sim 구현. 납부 구현(cudaGetExportTableInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaGetExportTable(
     const void **ppExportTable, const cudaUUID_t *pExportTableId) {
   if (g_debug_execution >= 3) {
@@ -3851,6 +4458,7 @@ __host__ cudaError_t CUDARTAPI cudaGetExportTable(
 
 // extracts all ptx files from binary and dumps into
 // prog_name.unique_no.sm_<>.ptx files
+/* [한국어] cuobjdump로부터 PTX 파일 추출(납부 구현) */
 void cuda_runtime_api::extract_ptx_files_using_cuobjdump_internal(
     CUctx_st *context, std::string &app_binary) {
   char command[1000];
@@ -3920,7 +4528,10 @@ void cuda_runtime_api::extract_ptx_files_using_cuobjdump_internal(
     version_filename[version].insert(line);
   }
 }
-
+/*
+ * [한국어]
+ * cuobjdump로부터 PTX 파일 추출
+ */
 void cuda_runtime_api::extract_ptx_files_using_cuobjdump(CUctx_st *context,
                                                          const char *fn) {
   std::string app_binary = get_app_binary(fn);
@@ -3939,6 +4550,7 @@ void cuda_runtime_api::extract_ptx_files_using_cuobjdump(CUctx_st *context) {
  *with each binary in its own file It is also responsible for extracting the
  *libraries linked to the binary if the option is enabled
  * */
+/* [한국어] cuobjdump로부터 ELF/SASS/PTX 코드 추출(납부 구현) */
 void cuda_runtime_api::extract_code_using_cuobjdump_internal(
     CUctx_st *context, std::string &app_binary,
     std::function<void(CUctx_st *)> ctx_extract_ptx_func) {
@@ -4497,13 +5109,19 @@ void **CUDARTAPI __cudaRegisterFatBinary(void *fatCubin) {
   }
   return cudaRegisterFatBinaryInternal(fatCubin);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterFatBinaryEnd()
+ */
 void CUDARTAPI __cudaRegisterFatBinaryEnd(void **fatCubinHandle) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
 }
-
+/*
+ * [한국어]
+ * NVCC CDP 콜백 __cudaPushCallConfiguration() — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 unsigned CUDARTAPI __cudaPushCallConfiguration(dim3 gridDim, dim3 blockDim,
                                                size_t sharedMem = 0,
                                                struct CUstream_st *stream = 0) {
@@ -4513,7 +5131,10 @@ unsigned CUDARTAPI __cudaPushCallConfiguration(dim3 gridDim, dim3 blockDim,
   cudaConfigureCallInternal(gridDim, blockDim, sharedMem, stream);
   return 0;
 }
-
+/*
+ * [한국어]
+ * NVCC CDP 콜백 __cudaPopCallConfiguration()
+ */
 cudaError_t CUDARTAPI __cudaPopCallConfiguration(dim3 *gridDim, dim3 *blockDim,
                                                  size_t *sharedMem,
                                                  void *stream) {
@@ -4522,7 +5143,10 @@ cudaError_t CUDARTAPI __cudaPopCallConfiguration(dim3 *gridDim, dim3 *blockDim,
   }
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * SST 통합용 NVCC 런타임 콜백 __cudaRegisterFunctionSST() — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 void CUDARTAPI __cudaRegisterFunctionSST(unsigned fatCubinHandle,
                                          uint64_t hostFun,
                                          char deviceFun[512]) {
@@ -4530,7 +5154,10 @@ void CUDARTAPI __cudaRegisterFunctionSST(unsigned fatCubinHandle,
                                (char *)deviceFun, NULL, NULL, NULL, NULL, NULL,
                                NULL);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterFunction() — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 void CUDARTAPI __cudaRegisterFunction(void **fatCubinHandle,
                                       const char *hostFun, char *deviceFun,
                                       const char *deviceName, int thread_limit,
@@ -4539,7 +5166,10 @@ void CUDARTAPI __cudaRegisterFunction(void **fatCubinHandle,
   cudaRegisterFunctionInternal(fatCubinHandle, hostFun, deviceFun, deviceName,
                                thread_limit, tid, bid, bDim, gDim);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterVar() — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 extern void __cudaRegisterVar(
     void **fatCubinHandle,
     char *hostVar,           // pointer to...something
@@ -4550,18 +5180,29 @@ extern void __cudaRegisterVar(
                           ext, size, constant, global);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaConfigureCall()의 GPGPU-Sim 구현. 납부 구현(cudaConfigureCallInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 __host__ cudaError_t CUDARTAPI cudaConfigureCall(dim3 gridDim, dim3 blockDim,
                                                  size_t sharedMem,
                                                  cudaStream_t stream) {
   return cudaConfigureCallInternal(gridDim, blockDim, sharedMem, stream);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaUnregisterFatBinary()
+ */
 void __cudaUnregisterFatBinary(void **fatCubinHandle) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceReset()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceResetInternal)에 위임
+ */
 cudaError_t cudaDeviceReset(void) {
   // Should reset the simulated GPU
   if (g_debug_execution >= 3) {
@@ -4573,7 +5214,10 @@ cudaError_t cudaDeviceReset(void) {
 cudaError_t CUDARTAPI cudaDeviceSynchronize(void) {
   return cudaDeviceSynchronizeInternal();
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterShared()
+ */
 void __cudaRegisterShared(void **fatCubinHandle, void **devicePtr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4581,7 +5225,10 @@ void __cudaRegisterShared(void **fatCubinHandle, void **devicePtr) {
   // we don't do anything here
   printf("GPGPU-Sim PTX: __cudaRegisterShared\n");
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterSharedVar()
+ */
 void CUDARTAPI __cudaRegisterSharedVar(void **fatCubinHandle, void **devicePtr,
                                        size_t size, size_t alignment,
                                        int storage) {
@@ -4591,7 +5238,10 @@ void CUDARTAPI __cudaRegisterSharedVar(void **fatCubinHandle, void **devicePtr,
   // we don't do anything here
   printf("GPGPU-Sim PTX: __cudaRegisterSharedVar\n");
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaRegisterTexture() — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 void __cudaRegisterTexture(
     void **fatCubinHandle, const struct textureReference *hostVar,
     const void **deviceAddress, const char *deviceName, int dim, int norm,
@@ -4600,7 +5250,10 @@ void __cudaRegisterTexture(
   __cudaRegisterTextureInternal(fatCubinHandle, hostVar, deviceAddress,
                                 deviceName, dim, norm, ext);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 콜백 __cudaInitModule() (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 char __cudaInitModule(void **fatCubinHandle) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4609,6 +5262,10 @@ char __cudaInitModule(void **fatCubinHandle) {
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGLRegisterBufferObject()의 GPGPU-Sim 구현. 납부 구현(cudaGLRegisterBufferObjectInternal)에 위임
+ */
 cudaError_t cudaGLRegisterBufferObject(GLuint bufferObj) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4626,6 +5283,10 @@ cudaError_t cudaGLUnmapBufferObject(GLuint bufferObj) {
   return cudaGLUnmapBufferObjectInternal(bufferObj);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGLUnregisterBufferObject()의 GPGPU-Sim 구현. 납부 구현(cudaGLUnregisterBufferObjectInternal)에 위임
+ */
 cudaError_t cudaGLUnregisterBufferObject(GLuint bufferObj) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4637,17 +5298,29 @@ cudaError_t cudaGLUnregisterBufferObject(GLuint bufferObj) {
 
 #if (CUDART_VERSION >= 2010)
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaHostAlloc()의 GPGPU-Sim 구현. 납부 구현(cudaHostAllocInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 cudaError_t CUDARTAPI cudaHostAlloc(void **pHost, size_t bytes,
                                     unsigned int flags) {
   return cudaHostAllocInternal(pHost, bytes, flags);
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaHostGetDevicePointer()의 GPGPU-Sim 구현. 납부 구현(cudaHostGetDevicePointerInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 cudaError_t CUDARTAPI cudaHostGetDevicePointer(void **pDevice, void *pHost,
                                                unsigned int flags) {
   return cudaHostGetDevicePointerInternal(pDevice, pHost, flags);
 }
 
 __host__ cudaError_t CUDARTAPI
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaPointerGetAttributes()의 GPGPU-Sim 구현. 납부 구현(cudaPointerGetAttributesInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaPointerGetAttributes(cudaPointerAttributes *attributes, const void *ptr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4656,6 +5329,10 @@ cudaPointerGetAttributes(cudaPointerAttributes *attributes, const void *ptr) {
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceCanAccessPeer()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceCanAccessPeerInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceCanAccessPeer(int *canAccessPeer,
                                                        int device,
                                                        int peerDevice) {
@@ -4666,6 +5343,10 @@ __host__ cudaError_t CUDARTAPI cudaDeviceCanAccessPeer(int *canAccessPeer,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceEnablePeerAccess()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceEnablePeerAccessInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceEnablePeerAccess(int peerDevice,
                                                           unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -4675,6 +5356,10 @@ __host__ cudaError_t CUDARTAPI cudaDeviceEnablePeerAccess(int peerDevice,
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaSetValidDevices()의 GPGPU-Sim 구현. 납부 구현(cudaSetValidDevicesInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaError_t CUDARTAPI cudaSetValidDevices(int *device_arr, int len) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4683,6 +5368,10 @@ cudaError_t CUDARTAPI cudaSetValidDevices(int *device_arr, int len) {
   return g_last_cudaError = cudaErrorUnknown;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaSetDeviceFlags()의 GPGPU-Sim 구현. 납부 구현(cudaSetDeviceFlagsInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaError_t CUDARTAPI cudaSetDeviceFlags(int flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4697,6 +5386,10 @@ cudaError_t CUDARTAPI cudaSetDeviceFlags(int flags) {
   }
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFuncGetAttributes()의 GPGPU-Sim 구현. 납부 구현(cudaFuncGetAttributesInternal)에 위임 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 cudaError_t CUDARTAPI cudaFuncGetAttributes(struct cudaFuncAttributes *attr,
                                             const char *hostFun) {
   return cudaFuncGetAttributesInternal(attr, hostFun);
@@ -4713,6 +5406,10 @@ cudaError_t CUDARTAPI cudaEventCreateWithFlags(cudaEvent_t *event, int flags) {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDriverGetVersion()의 GPGPU-Sim 구현. 납부 구현(cudaDriverGetVersionInternal)에 위임
+ */
 cudaError_t CUDARTAPI cudaDriverGetVersion(int *driverVersion) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4721,6 +5418,10 @@ cudaError_t CUDARTAPI cudaDriverGetVersion(int *driverVersion) {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaRuntimeGetVersion()의 GPGPU-Sim 구현. 납부 구현(cudaRuntimeGetVersionInternal)에 위임
+ */
 cudaError_t CUDARTAPI cudaRuntimeGetVersion(int *runtimeVersion) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4736,6 +5437,10 @@ cudaFuncSetCacheConfig(const char *func, enum cudaFuncCache cacheConfig) {
 }
 
 // Jin: hack for cdp
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaDeviceSetLimit()의 GPGPU-Sim 구현. 납부 구현(cudaDeviceSetLimitInternal)에 위임
+ */
 __host__ cudaError_t CUDARTAPI cudaDeviceSetLimit(enum cudaLimit limit,
                                                   size_t value) {
   if (g_debug_execution >= 3) {
@@ -4796,6 +5501,10 @@ __host__ cudaError_t CUDARTAPI cudaDeviceSetLimit(enum cudaLimit limit,
  * ::cudaSetDoubleForHost,
  * \ref ::cudaSetupArgument(T, size_t) "cudaSetupArgument (C++ API)"
  */
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaFuncSetAttribute()의 GPGPU-Sim 구현. 납부 구현(cudaFuncSetAttributeInternal)에 위임
+ */
 cudaError_t CUDARTAPI cudaFuncSetAttribute(const void *func,
                                            enum cudaFuncAttribute attr,
                                            int value) {
@@ -4810,6 +5519,10 @@ cudaError_t CUDARTAPI cudaFuncSetAttribute(const void *func,
 }
 #endif
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaGLSetGLDevice()의 GPGPU-Sim 구현. 납부 구현(cudaGLSetGLDeviceInternal)에 위임
+ */
 cudaError_t CUDARTAPI cudaGLSetGLDevice(int device) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4821,6 +5534,10 @@ cudaError_t CUDARTAPI cudaGLSetGLDevice(int device) {
 
 typedef void *HGPUNV;
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaWGLGetDevice()의 GPGPU-Sim 구현. 납부 구현(cudaWGLGetDeviceInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 cudaError_t CUDARTAPI cudaWGLGetDevice(int *device, HGPUNV hGpu) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4828,14 +5545,20 @@ cudaError_t CUDARTAPI cudaWGLGetDevice(int *device, HGPUNV hGpu) {
   cuda_not_implemented(__my_func__, __LINE__);
   return g_last_cudaError = cudaErrorUnknown;
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 뮤텍스 콜백 (미구현)
+ */
 void CUDARTAPI __cudaMutexOperation(int lock) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
   cuda_not_implemented(__my_func__, __LINE__);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 텍스처 페치 콜백 (미구현)
+ */
 void CUDARTAPI __cudaTextureFetch(const void *tex, void *index, int integer,
                                   void *val) {
   if (g_debug_execution >= 3) {
@@ -4846,14 +5569,20 @@ void CUDARTAPI __cudaTextureFetch(const void *tex, void *index, int integer,
 }
 
 namespace cuda_math {
-
+/*
+ * [한국어]
+ * NVCC 런타임 뮤텍스 콜백 (미구현)
+ */
 void CUDARTAPI __cudaMutexOperation(int lock) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
   }
   cuda_not_implemented(__my_func__, __LINE__);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 텍스처 페치 콜백 (미구현)
+ */
 void CUDARTAPI __cudaTextureFetch(const void *tex, void *index, int integer,
                                   void *val) {
   if (g_debug_execution >= 3) {
@@ -4861,7 +5590,10 @@ void CUDARTAPI __cudaTextureFetch(const void *tex, void *index, int integer,
   }
   cuda_not_implemented(__my_func__, __LINE__);
 }
-
+/*
+ * [한국어]
+ * NVCC 런타임 스레드 동기화 콜백
+ */
 int CUDARTAPI __cudaSynchronizeThreads(void **, void *) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -4875,7 +5607,6 @@ int CUDARTAPI __cudaSynchronizeThreads(void **, void *) {
 ////////
 
 /// static functions
-
 int cuda_runtime_api::load_static_globals(symbol_table *symtab,
                                           unsigned min_gaddr,
                                           unsigned max_gaddr, gpgpu_t *gpu) {
@@ -4920,7 +5651,10 @@ int cuda_runtime_api::load_static_globals(symbol_table *symtab,
   fflush(stdout);
   return ng_bytes;
 }
-
+/*
+ * [한국어]
+ * PTX 심볼 테이블의 상수 변수를 GPU 상수 메모리에 로드
+ */
 int cuda_runtime_api::load_constants(symbol_table *symtab, addr_t min_gaddr,
                                      gpgpu_t *gpu) {
   if (g_debug_execution >= 3) {
@@ -5025,6 +5759,7 @@ kernel_info_t *cuda_runtime_api::gpgpu_cuda_ptx_sim_init_grid(
  *******************************************************************************/
 //***extra api for pytorch***
 
+/* [한국어] CUDA 드라이버 API cuGetErrorString()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuGetErrorString(CUresult error, const char **pStr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5032,7 +5767,10 @@ CUresult CUDAAPI cuGetErrorString(CUresult error, const char **pStr) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGetErrorName()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGetErrorName(CUresult error, const char **pStr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5040,7 +5778,10 @@ CUresult CUDAAPI cuGetErrorName(CUresult error, const char **pStr) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuInit()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuInit(unsigned int Flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5048,7 +5789,10 @@ CUresult CUDAAPI cuInit(unsigned int Flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDriverGetVersion()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDriverGetVersion(int *driverVersion) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5057,7 +5801,10 @@ CUresult CUDAAPI cuDriverGetVersion(int *driverVersion) {
   assert(e == cudaSuccess);
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGet()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGet(CUdevice *device, int ordinal) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5069,7 +5816,10 @@ CUresult CUDAAPI cuDeviceGet(CUdevice *device, int ordinal) {
   *device = deviceI;
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetCount()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetCount(int *count) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5078,7 +5828,10 @@ CUresult CUDAAPI cuDeviceGetCount(int *count) {
   assert(e == cudaSuccess);
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetName()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5089,6 +5842,10 @@ CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev) {
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceTotalMem()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5098,6 +5855,10 @@ CUresult CUDAAPI cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 }
 #endif /* CUDART_VERSION >= 3020 */
 #if (CUDART_VERSION > 5000)
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetAttribute()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
                                       CUdevice dev) {
   if (g_debug_execution >= 3) {
@@ -5109,6 +5870,10 @@ CUresult CUDAAPI cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
   return CUDA_SUCCESS;
 }
 #endif
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetProperties()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetProperties(CUdevprop *prop, CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5116,7 +5881,10 @@ CUresult CUDAAPI cuDeviceGetProperties(CUdevprop *prop, CUdevice dev) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceComputeCapability()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceComputeCapability(int *major, int *minor,
                                            CUdevice dev) {
   if (g_debug_execution >= 3) {
@@ -5127,7 +5895,10 @@ CUresult CUDAAPI cuDeviceComputeCapability(int *major, int *minor,
 }
 
 #if CUDART_VERSION >= 7000
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDevicePrimaryCtxRetain()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5135,7 +5906,10 @@ CUresult CUDAAPI cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDevicePrimaryCtxRelease()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5143,7 +5917,10 @@ CUresult CUDAAPI cuDevicePrimaryCtxRelease(CUdevice dev) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDevicePrimaryCtxSetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5151,7 +5928,10 @@ CUresult CUDAAPI cuDevicePrimaryCtxSetFlags(CUdevice dev, unsigned int flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDevicePrimaryCtxGetState()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
                                             int *active) {
   if (g_debug_execution >= 3) {
@@ -5160,7 +5940,10 @@ CUresult CUDAAPI cuDevicePrimaryCtxGetState(CUdevice dev, unsigned int *flags,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDevicePrimaryCtxReset()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5172,6 +5955,10 @@ CUresult CUDAAPI cuDevicePrimaryCtxReset(CUdevice dev) {
 #endif /* CUDART_VERSION >= 7000 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxCreate(CUcontext *pctx, unsigned int flags,
                              CUdevice dev) {
   if (g_debug_execution >= 3) {
@@ -5183,6 +5970,10 @@ CUresult CUDAAPI cuCtxCreate(CUcontext *pctx, unsigned int flags,
 #endif /* CUDART_VERSION >= 3020 */
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxDestroy(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5193,6 +5984,10 @@ CUresult CUDAAPI cuCtxDestroy(CUcontext ctx) {
 #endif /* CUDART_VERSION >= 4000 */
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxPushCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5200,7 +5995,10 @@ CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxPopCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5208,7 +6006,10 @@ CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxSetCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxSetCurrent(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5216,7 +6017,10 @@ CUresult CUDAAPI cuCtxSetCurrent(CUcontext ctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetCurrent(CUcontext *pctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5225,7 +6029,10 @@ CUresult CUDAAPI cuCtxGetCurrent(CUcontext *pctx) {
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 4000 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetDevice()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetDevice(CUdevice *device) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5235,6 +6042,10 @@ CUresult CUDAAPI cuCtxGetDevice(CUdevice *device) {
 }
 
 #if CUDART_VERSION >= 7000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetFlags(unsigned int *flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5243,7 +6054,10 @@ CUresult CUDAAPI cuCtxGetFlags(unsigned int *flags) {
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 7000 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxSynchronize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxSynchronize(void) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5251,7 +6065,10 @@ CUresult CUDAAPI cuCtxSynchronize(void) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxSetLimit()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxSetLimit(CUlimit limit, size_t value) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5259,7 +6076,10 @@ CUresult CUDAAPI cuCtxSetLimit(CUlimit limit, size_t value) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetLimit()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5267,7 +6087,10 @@ CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetCacheConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetCacheConfig(CUfunc_cache *pconfig) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5275,7 +6098,10 @@ CUresult CUDAAPI cuCtxGetCacheConfig(CUfunc_cache *pconfig) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxSetCacheConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxSetCacheConfig(CUfunc_cache config) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5285,6 +6111,10 @@ CUresult CUDAAPI cuCtxSetCacheConfig(CUfunc_cache config) {
 }
 
 #if CUDART_VERSION >= 4020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetSharedMemConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetSharedMemConfig(CUsharedconfig *pConfig) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5292,7 +6122,10 @@ CUresult CUDAAPI cuCtxGetSharedMemConfig(CUsharedconfig *pConfig) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxSetSharedMemConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxSetSharedMemConfig(CUsharedconfig config) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5301,7 +6134,10 @@ CUresult CUDAAPI cuCtxSetSharedMemConfig(CUsharedconfig config) {
   return CUDA_SUCCESS;
 }
 #endif
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetApiVersion()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetApiVersion(CUcontext ctx, unsigned int *version) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5309,7 +6145,10 @@ CUresult CUDAAPI cuCtxGetApiVersion(CUcontext ctx, unsigned int *version) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxGetStreamPriorityRange()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxGetStreamPriorityRange(int *leastPriority,
                                              int *greatestPriority) {
   if (g_debug_execution >= 3) {
@@ -5318,7 +6157,10 @@ CUresult CUDAAPI cuCtxGetStreamPriorityRange(int *leastPriority,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxAttach()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxAttach(CUcontext *pctx, unsigned int flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5326,7 +6168,10 @@ CUresult CUDAAPI cuCtxAttach(CUcontext *pctx, unsigned int flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxDetach()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxDetach(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5334,7 +6179,10 @@ CUresult CUDAAPI cuCtxDetach(CUcontext ctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleLoad()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleLoad(CUmodule *module, const char *fname) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5342,7 +6190,10 @@ CUresult CUDAAPI cuModuleLoad(CUmodule *module, const char *fname) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleLoadData()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleLoadData(CUmodule *module, const void *image) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5350,7 +6201,10 @@ CUresult CUDAAPI cuModuleLoadData(CUmodule *module, const void *image) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleLoadDataEx()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleLoadDataEx(CUmodule *module, const void *image,
                                     unsigned int numOptions,
                                     CUjit_option *options,
@@ -5361,7 +6215,10 @@ CUresult CUDAAPI cuModuleLoadDataEx(CUmodule *module, const void *image,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleLoadFatBinary()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleLoadFatBinary(CUmodule *module, const void *fatCubin) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5369,7 +6226,10 @@ CUresult CUDAAPI cuModuleLoadFatBinary(CUmodule *module, const void *fatCubin) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleUnload()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleUnload(CUmodule hmod) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5377,7 +6237,10 @@ CUresult CUDAAPI cuModuleUnload(CUmodule hmod) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleGetFunction()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
                                      const char *name) {
   if (g_debug_execution >= 3) {
@@ -5388,6 +6251,10 @@ CUresult CUDAAPI cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleGetGlobal()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes,
                                    CUmodule hmod, const char *name) {
   if (g_debug_execution >= 3) {
@@ -5397,7 +6264,10 @@ CUresult CUDAAPI cuModuleGetGlobal(CUdeviceptr *dptr, size_t *bytes,
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleGetTexRef()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod,
                                    const char *name) {
   if (g_debug_execution >= 3) {
@@ -5406,7 +6276,10 @@ CUresult CUDAAPI cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuModuleGetSurfRef()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule hmod,
                                     const char *name) {
   if (g_debug_execution >= 3) {
@@ -5417,7 +6290,10 @@ CUresult CUDAAPI cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule hmod,
 }
 
 #if CUDART_VERSION >= 6050
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
                               void **optionValues, CUlinkState *stateOut) {
   if (g_debug_execution >= 3) {
@@ -5426,7 +6302,10 @@ CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
   // currently do not support options or multiple CUlinkStates
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkAddData()의 GPGPU-Sim 구현 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
                                void *data, size_t size, const char *name,
                                unsigned int numOptions, CUjit_option *options,
@@ -5438,7 +6317,10 @@ CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
   cuda_not_implemented(__my_func__, __LINE__);
   return CUDA_ERROR_UNKNOWN;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkAddFile()의 GPGPU-Sim 구현 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
                                const char *path, unsigned int numOptions,
                                CUjit_option *options, void **optionValues) {
@@ -5448,7 +6330,10 @@ CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
 #endif
 
 #if CUDART_VERSION >= 5050
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkComplete()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkComplete(CUlinkState state, void **cubinOut,
                                 size_t *sizeOut) {
   if (g_debug_execution >= 3) {
@@ -5458,7 +6343,10 @@ CUresult CUDAAPI cuLinkComplete(CUlinkState state, void **cubinOut,
   // to do here
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkDestroy(CUlinkState state) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5470,6 +6358,10 @@ CUresult CUDAAPI cuLinkDestroy(CUlinkState state) {
 #endif /* CUDART_VERSION >= 5050 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemGetInfo()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemGetInfo(size_t *free, size_t *total) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5477,7 +6369,10 @@ CUresult CUDAAPI cuMemGetInfo(size_t *free, size_t *total) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemAlloc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5485,7 +6380,10 @@ CUresult CUDAAPI cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemAllocPitch()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch,
                                  size_t WidthInBytes, size_t Height,
                                  unsigned int ElementSizeBytes) {
@@ -5495,7 +6393,10 @@ CUresult CUDAAPI cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemFree()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemFree(CUdeviceptr dptr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5503,7 +6404,10 @@ CUresult CUDAAPI cuMemFree(CUdeviceptr dptr) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemGetAddressRange()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize,
                                       CUdeviceptr dptr) {
   if (g_debug_execution >= 3) {
@@ -5512,7 +6416,10 @@ CUresult CUDAAPI cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemAllocHost()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemAllocHost(void **pp, size_t bytesize) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5521,7 +6428,10 @@ CUresult CUDAAPI cuMemAllocHost(void **pp, size_t bytesize) {
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemFreeHost()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemFreeHost(void *p) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5529,7 +6439,10 @@ CUresult CUDAAPI cuMemFreeHost(void *p) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostAlloc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostAlloc(void **pp, size_t bytesize,
                                 unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -5540,6 +6453,10 @@ CUresult CUDAAPI cuMemHostAlloc(void **pp, size_t bytesize,
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostGetDevicePointer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p,
                                            unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -5549,7 +6466,10 @@ CUresult CUDAAPI cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p,
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostGetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostGetFlags(unsigned int *pFlags, void *p) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5559,7 +6479,10 @@ CUresult CUDAAPI cuMemHostGetFlags(unsigned int *pFlags, void *p) {
 }
 
 #if CUDART_VERSION >= 6000
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemAllocManaged()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
                                    unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -5572,7 +6495,10 @@ CUresult CUDAAPI cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
 #endif /* CUDART_VERSION >= 6000 */
 
 #if CUDART_VERSION >= 4010
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetByPCIBusId()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5580,7 +6506,10 @@ CUresult CUDAAPI cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetPCIBusId()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5588,7 +6517,10 @@ CUresult CUDAAPI cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuIpcGetEventHandle()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuIpcGetEventHandle(CUipcEventHandle *pHandle, CUevent event) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5596,7 +6528,10 @@ CUresult CUDAAPI cuIpcGetEventHandle(CUipcEventHandle *pHandle, CUevent event) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuIpcOpenEventHandle()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuIpcOpenEventHandle(CUevent *phEvent,
                                       CUipcEventHandle handle) {
   if (g_debug_execution >= 3) {
@@ -5605,7 +6540,10 @@ CUresult CUDAAPI cuIpcOpenEventHandle(CUevent *phEvent,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuIpcGetMemHandle()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle *pHandle, CUdeviceptr dptr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5613,7 +6551,10 @@ CUresult CUDAAPI cuIpcGetMemHandle(CUipcMemHandle *pHandle, CUdeviceptr dptr) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuIpcOpenMemHandle()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr *pdptr, CUipcMemHandle handle,
                                     unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -5622,7 +6563,10 @@ CUresult CUDAAPI cuIpcOpenMemHandle(CUdeviceptr *pdptr, CUipcMemHandle handle,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuIpcCloseMemHandle()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr dptr) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5634,6 +6578,10 @@ CUresult CUDAAPI cuIpcCloseMemHandle(CUdeviceptr dptr) {
 #endif /* CUDART_VERSION >= 4010 */
 
 #if CUDART_VERSION >= 6050
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostRegister()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
                                    unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -5642,6 +6590,10 @@ CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaHostRegister()의 GPGPU-Sim 구현. 납부 구현(cudaHostRegisterInternal)에 위임
+ */
 __host__ cudaError_t cudaHostRegister(void *ptr, size_t size,
                                       unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -5651,6 +6603,10 @@ __host__ cudaError_t cudaHostRegister(void *ptr, size_t size,
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaProfilerStart()의 GPGPU-Sim 구현. 납부 구현(cudaProfilerStartInternal)에 위임
+ */
 __host__ cudaError_t cudaProfilerStart() {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5659,6 +6615,10 @@ __host__ cudaError_t cudaProfilerStart() {
   return g_last_cudaError = cudaSuccess;
 }
 
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaProfilerStop()의 GPGPU-Sim 구현. 납부 구현(cudaProfilerStopInternal)에 위임
+ */
 __host__ cudaError_t cudaProfilerStop() {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5669,7 +6629,10 @@ __host__ cudaError_t cudaProfilerStop() {
 
 #endif
 #if CUDART_VERSION >= 4000
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostUnregister()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostUnregister(void *p) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5677,7 +6640,10 @@ CUresult CUDAAPI cuMemHostUnregister(void *p) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5685,7 +6651,10 @@ CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyPeer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
                               CUdeviceptr srcDevice, CUcontext srcContext,
                               size_t ByteCount) {
@@ -5699,6 +6668,10 @@ CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
 #endif /* CUDART_VERSION >= 4000 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoD()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
                               size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5707,7 +6680,10 @@ CUresult CUDAAPI cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoH()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice,
                               size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5716,7 +6692,10 @@ CUresult CUDAAPI cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoD()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                               size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5725,7 +6704,10 @@ CUresult CUDAAPI cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoA()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoA(CUarray dstArray, size_t dstOffset,
                               CUdeviceptr srcDevice, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5734,7 +6716,10 @@ CUresult CUDAAPI cuMemcpyDtoA(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoD()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
                               size_t srcOffset, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5743,7 +6728,10 @@ CUresult CUDAAPI cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoA()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoA(CUarray dstArray, size_t dstOffset,
                               const void *srcHost, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5752,7 +6740,10 @@ CUresult CUDAAPI cuMemcpyHtoA(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoH()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
                               size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -5761,7 +6752,10 @@ CUresult CUDAAPI cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoA()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoA(CUarray dstArray, size_t dstOffset,
                               CUarray srcArray, size_t srcOffset,
                               size_t ByteCount) {
@@ -5771,7 +6765,10 @@ CUresult CUDAAPI cuMemcpyAtoA(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2D()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5779,7 +6776,10 @@ CUresult CUDAAPI cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2DUnaligned()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5787,7 +6787,10 @@ CUresult CUDAAPI cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3D()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5798,6 +6801,10 @@ CUresult CUDAAPI cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
 #endif /* CUDART_VERSION >= 3020 */
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5805,7 +6812,10 @@ CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
                                size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5814,7 +6824,10 @@ CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyPeerAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
                                    CUdeviceptr srcDevice, CUcontext srcContext,
                                    size_t ByteCount, CUstream hStream) {
@@ -5827,6 +6840,10 @@ CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
 #endif /* CUDART_VERSION >= 4000 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoDAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
                                    size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5835,7 +6852,10 @@ CUresult CUDAAPI cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoHAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
                                    size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5844,7 +6864,10 @@ CUresult CUDAAPI cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoDAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                                    size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5853,7 +6876,10 @@ CUresult CUDAAPI cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoAAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
                                    const void *srcHost, size_t ByteCount,
                                    CUstream hStream) {
@@ -5863,7 +6889,10 @@ CUresult CUDAAPI cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoHAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray,
                                    size_t srcOffset, size_t ByteCount,
                                    CUstream hStream) {
@@ -5873,7 +6902,10 @@ CUresult CUDAAPI cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2DAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5881,7 +6913,10 @@ CUresult CUDAAPI cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5892,6 +6927,10 @@ CUresult CUDAAPI cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
 #endif /* CUDART_VERSION >= 3020 */
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeerAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
                                      CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5903,6 +6942,10 @@ CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
 #endif /* CUDART_VERSION >= 4000 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD8()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5910,7 +6953,10 @@ CUresult CUDAAPI cuMemsetD8(CUdeviceptr dstDevice, unsigned char uc, size_t N) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD16()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD16(CUdeviceptr dstDevice, unsigned short us,
                              size_t N) {
   if (g_debug_execution >= 3) {
@@ -5919,7 +6965,10 @@ CUresult CUDAAPI cuMemsetD16(CUdeviceptr dstDevice, unsigned short us,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -5927,7 +6976,10 @@ CUresult CUDAAPI cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D8()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                               unsigned char uc, size_t Width, size_t Height) {
   if (g_debug_execution >= 3) {
@@ -5936,7 +6988,10 @@ CUresult CUDAAPI cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D16()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                                unsigned short us, size_t Width, size_t Height) {
   if (g_debug_execution >= 3) {
@@ -5945,7 +7000,10 @@ CUresult CUDAAPI cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                                unsigned int ui, size_t Width, size_t Height) {
   if (g_debug_execution >= 3) {
@@ -5954,7 +7012,10 @@ CUresult CUDAAPI cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD8Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
                                  size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5963,7 +7024,10 @@ CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD16Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
                                   size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5972,7 +7036,10 @@ CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD32Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
                                   size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -5981,7 +7048,10 @@ CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D8Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
                                    unsigned char uc, size_t Width,
                                    size_t Height, CUstream hStream) {
@@ -5991,7 +7061,10 @@ CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D16Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned short us, size_t Width,
                                     size_t Height, CUstream hStream) {
@@ -6001,7 +7074,10 @@ CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D32Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned int ui, size_t Width,
                                     size_t Height, CUstream hStream) {
@@ -6011,7 +7087,10 @@ CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuArrayCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuArrayCreate(CUarray *pHandle,
                                const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   if (g_debug_execution >= 3) {
@@ -6020,7 +7099,10 @@ CUresult CUDAAPI cuArrayCreate(CUarray *pHandle,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuArrayGetDescriptor()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
                                       CUarray hArray) {
   if (g_debug_execution >= 3) {
@@ -6030,7 +7112,10 @@ CUresult CUDAAPI cuArrayGetDescriptor(CUDA_ARRAY_DESCRIPTOR *pArrayDescriptor,
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuArrayDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuArrayDestroy(CUarray hArray) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6040,6 +7125,10 @@ CUresult CUDAAPI cuArrayDestroy(CUarray hArray) {
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuArray3DCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuArray3DCreate(
     CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   if (g_debug_execution >= 3) {
@@ -6048,7 +7137,10 @@ CUresult CUDAAPI cuArray3DCreate(
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuArray3DGetDescriptor()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuArray3DGetDescriptor(
     CUDA_ARRAY3D_DESCRIPTOR *pArrayDescriptor, CUarray hArray) {
   if (g_debug_execution >= 3) {
@@ -6062,6 +7154,10 @@ CUresult CUDAAPI cuArray3DGetDescriptor(
 #if CUDART_VERSION >= 5000
 
 CUresult CUDAAPI
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMipmappedArrayCreate()의 GPGPU-Sim 구현
+ */
 cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
                        const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc,
                        unsigned int numMipmapLevels) {
@@ -6071,7 +7167,10 @@ cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMipmappedArrayGetLevel()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMipmappedArrayGetLevel(CUarray *pLevelArray,
                                           CUmipmappedArray hMipmappedArray,
                                           unsigned int level) {
@@ -6081,7 +7180,10 @@ CUresult CUDAAPI cuMipmappedArrayGetLevel(CUarray *pLevelArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMipmappedArrayDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6095,6 +7197,7 @@ CUresult CUDAAPI cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray) {
 /** @} */ /* END CUDA_MEM */
 
 #if CUDART_VERSION >= 4000
+/* [한국어] CUDA 드라이버 API cuPointerGetAttribute()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuPointerGetAttribute(void *data,
                                        CUpointer_attribute attribute,
                                        CUdeviceptr ptr) {
@@ -6107,6 +7210,10 @@ CUresult CUDAAPI cuPointerGetAttribute(void *data,
 #endif /* CUDART_VERSION >= 4000 */
 
 #if CUDART_VERSION >= 8000
+/*
+ * [한국어]
+ * CUDA 런타임 API cudaCreateTextureObject()의 GPGPU-Sim 구현. 납부 구현(cudaCreateTextureObjectInternal)에 위임 (GPGPU-Sim에서 현재 미구현/미지원)
+ */
 __host__ cudaError_t CUDARTAPI cudaCreateTextureObject(
     cudaTextureObject_t *pTexObject, const cudaResourceDesc *pResDesc,
     const cudaTextureDesc *pTexDesc, const cudaResourceViewDesc *pResViewDesc) {
@@ -6116,7 +7223,10 @@ __host__ cudaError_t CUDARTAPI cudaCreateTextureObject(
   cuda_not_implemented(__my_func__, __LINE__);
   return g_last_cudaError = cudaSuccess;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemPrefetchAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
                                     CUdevice dstDevice, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -6125,7 +7235,10 @@ CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemAdvise()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemAdvise(CUdeviceptr devPtr, size_t count,
                              CUmem_advise advice, CUdevice device) {
   if (g_debug_execution >= 3) {
@@ -6134,7 +7247,10 @@ CUresult CUDAAPI cuMemAdvise(CUdeviceptr devPtr, size_t count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemRangeGetAttribute()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemRangeGetAttribute(void *data, size_t dataSize,
                                         CUmem_range_attribute attribute,
                                         CUdeviceptr devPtr, size_t count) {
@@ -6144,7 +7260,10 @@ CUresult CUDAAPI cuMemRangeGetAttribute(void *data, size_t dataSize,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemRangeGetAttributes()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemRangeGetAttributes(void **data, size_t *dataSizes,
                                          CUmem_range_attribute *attributes,
                                          size_t numAttributes,
@@ -6158,6 +7277,10 @@ CUresult CUDAAPI cuMemRangeGetAttributes(void **data, size_t *dataSizes,
 #endif /* CUDART_VERSION >= 8000 */
 
 #if CUDART_VERSION >= 6000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuPointerSetAttribute()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuPointerSetAttribute(const void *value,
                                        CUpointer_attribute attribute,
                                        CUdeviceptr ptr) {
@@ -6170,6 +7293,10 @@ CUresult CUDAAPI cuPointerSetAttribute(const void *value,
 #endif /* CUDART_VERSION >= 6000 */
 
 #if CUDART_VERSION >= 7000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuPointerGetAttributes()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuPointerGetAttributes(unsigned int numAttributes,
                                         CUpointer_attribute *attributes,
                                         void **data, CUdeviceptr ptr) {
@@ -6183,6 +7310,7 @@ CUresult CUDAAPI cuPointerGetAttributes(unsigned int numAttributes,
 
 /** @} */ /* END CUDA_UNIFIED */
 
+/* [한국어] CUDA 드라이버 API cuStreamCreate()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuStreamCreate(CUstream *phStream, unsigned int Flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6190,7 +7318,10 @@ CUresult CUDAAPI cuStreamCreate(CUstream *phStream, unsigned int Flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamCreateWithPriority()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamCreateWithPriority(CUstream *phStream,
                                             unsigned int flags, int priority) {
   if (g_debug_execution >= 3) {
@@ -6199,7 +7330,10 @@ CUresult CUDAAPI cuStreamCreateWithPriority(CUstream *phStream,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamGetPriority()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6207,7 +7341,10 @@ CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamGetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6215,7 +7352,10 @@ CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWaitEvent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
                                    unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -6224,7 +7364,10 @@ CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamAddCallback()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
                                      CUstreamCallback callback, void *userData,
                                      unsigned int flags) {
@@ -6236,7 +7379,10 @@ CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
 }
 
 #if CUDART_VERSION >= 6000
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamAttachMemAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
                                         size_t length, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -6247,7 +7393,6 @@ CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
 }
 
 #endif /* CUDART_VERSION >= 6000 */
-
 CUresult CUDAAPI cuStreamQuery(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6255,7 +7400,10 @@ CUresult CUDAAPI cuStreamQuery(CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamSynchronize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamSynchronize(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6265,6 +7413,10 @@ CUresult CUDAAPI cuStreamSynchronize(CUstream hStream) {
 }
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamDestroy(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6276,6 +7428,7 @@ CUresult CUDAAPI cuStreamDestroy(CUstream hStream) {
 
 /** @} */ /* END CUDA_STREAM */
 
+/* [한국어] CUDA 드라이버 API cuEventCreate()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuEventCreate(CUevent *phEvent, unsigned int Flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6283,7 +7436,10 @@ CUresult CUDAAPI cuEventCreate(CUevent *phEvent, unsigned int Flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventRecord()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6291,7 +7447,10 @@ CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventQuery()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventQuery(CUevent hEvent) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6299,7 +7458,10 @@ CUresult CUDAAPI cuEventQuery(CUevent hEvent) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventSynchronize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventSynchronize(CUevent hEvent) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6309,6 +7471,10 @@ CUresult CUDAAPI cuEventSynchronize(CUevent hEvent) {
 }
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventDestroy(CUevent hEvent) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6317,7 +7483,6 @@ CUresult CUDAAPI cuEventDestroy(CUevent hEvent) {
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 4000 */
-
 CUresult CUDAAPI cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
                                     CUevent hEnd) {
   if (g_debug_execution >= 3) {
@@ -6328,6 +7493,10 @@ CUresult CUDAAPI cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
 }
 
 #if CUDART_VERSION >= 8000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWaitValue32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
                                      cuuint32_t value, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -6336,7 +7505,10 @@ CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWriteValue32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
                                       cuuint32_t value, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -6345,7 +7517,10 @@ CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamBatchMemOp()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
                                     CUstreamBatchMemOpParams *paramArray,
                                     unsigned int flags) {
@@ -6359,6 +7534,7 @@ CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
 
 /** @} */ /* END CUDA_EVENT */
 
+/* [한국어] CUDA 드라이버 API cuFuncGetAttribute()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuFuncGetAttribute(int *pi, CUfunction_attribute attrib,
                                     CUfunction hfunc) {
   if (g_debug_execution >= 3) {
@@ -6367,7 +7543,10 @@ CUresult CUDAAPI cuFuncGetAttribute(int *pi, CUfunction_attribute attrib,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuFuncSetCacheConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6377,6 +7556,10 @@ CUresult CUDAAPI cuFuncSetCacheConfig(CUfunction hfunc, CUfunc_cache config) {
 }
 
 #if CUDART_VERSION >= 4020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuFuncSetSharedMemConfig()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuFuncSetSharedMemConfig(CUfunction hfunc,
                                           CUsharedconfig config) {
   if (g_debug_execution >= 3) {
@@ -6388,6 +7571,10 @@ CUresult CUDAAPI cuFuncSetSharedMemConfig(CUfunction hfunc,
 #endif
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLaunchKernel()의 GPGPU-Sim 구현 — 실제 동작은 *Internal() 납부 함수로 전달
+ */
 CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                                 unsigned int gridDimY, unsigned int gridDimZ,
                                 unsigned int blockDimX, unsigned int blockDimY,
@@ -6402,6 +7589,7 @@ CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
 
 /** @} */ /* END CUDA_EXEC */
 
+/* [한국어] CUDA 드라이버 API cuFuncSetBlockShape()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6409,7 +7597,10 @@ CUresult CUDAAPI cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuFuncSetSharedSize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuFuncSetSharedSize(CUfunction hfunc, unsigned int bytes) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6417,7 +7608,10 @@ CUresult CUDAAPI cuFuncSetSharedSize(CUfunction hfunc, unsigned int bytes) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuParamSetSize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuParamSetSize(CUfunction hfunc, unsigned int numbytes) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6425,7 +7619,10 @@ CUresult CUDAAPI cuParamSetSize(CUfunction hfunc, unsigned int numbytes) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuParamSeti()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuParamSeti(CUfunction hfunc, int offset, unsigned int value) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6433,7 +7630,10 @@ CUresult CUDAAPI cuParamSeti(CUfunction hfunc, int offset, unsigned int value) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuParamSetf()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuParamSetf(CUfunction hfunc, int offset, float value) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6441,7 +7641,10 @@ CUresult CUDAAPI cuParamSetf(CUfunction hfunc, int offset, float value) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuParamSetv()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuParamSetv(CUfunction hfunc, int offset, void *ptr,
                              unsigned int numbytes) {
   if (g_debug_execution >= 3) {
@@ -6450,7 +7653,10 @@ CUresult CUDAAPI cuParamSetv(CUfunction hfunc, int offset, void *ptr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLaunch()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLaunch(CUfunction f) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6458,7 +7664,10 @@ CUresult CUDAAPI cuLaunch(CUfunction f) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLaunchGrid()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6466,7 +7675,10 @@ CUresult CUDAAPI cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLaunchGridAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLaunchGridAsync(CUfunction f, int grid_width,
                                    int grid_height, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -6475,7 +7687,10 @@ CUresult CUDAAPI cuLaunchGridAsync(CUfunction f, int grid_width,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuParamSetTexRef()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuParamSetTexRef(CUfunction hfunc, int texunit,
                                   CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
@@ -6488,6 +7703,7 @@ CUresult CUDAAPI cuParamSetTexRef(CUfunction hfunc, int texunit,
 
 #if CUDART_VERSION >= 6050
 
+/* [한국어] CUDA 드라이버 API cuOccupancyMaxActiveBlocksPerMultiprocessor()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessor(
     int *numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize) {
   if (g_debug_execution >= 3) {
@@ -6497,6 +7713,10 @@ CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessor(
   return CUDA_SUCCESS;
 }
 
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     int *numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize,
     unsigned int flags) {
@@ -6506,7 +7726,10 @@ CUresult CUDAAPI cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuOccupancyMaxPotentialBlockSize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuOccupancyMaxPotentialBlockSize(
     int *minGridSize, int *blockSize, CUfunction func,
     CUoccupancyB2DSize blockSizeToDynamicSMemSize, size_t dynamicSMemSize,
@@ -6517,7 +7740,10 @@ CUresult CUDAAPI cuOccupancyMaxPotentialBlockSize(
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuOccupancyMaxPotentialBlockSizeWithFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuOccupancyMaxPotentialBlockSizeWithFlags(
     int *minGridSize, int *blockSize, CUfunction func,
     CUoccupancyB2DSize blockSizeToDynamicSMemSize, size_t dynamicSMemSize,
@@ -6532,6 +7758,7 @@ CUresult CUDAAPI cuOccupancyMaxPotentialBlockSizeWithFlags(
 /** @} */ /* END CUDA_OCCUPANCY */
 #endif    /* CUDART_VERSION >= 6050 */
 
+/* [한국어] CUDA 드라이버 API cuTexRefSetArray()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuTexRefSetArray(CUtexref hTexRef, CUarray hArray,
                                   unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -6540,7 +7767,10 @@ CUresult CUDAAPI cuTexRefSetArray(CUtexref hTexRef, CUarray hArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetMipmappedArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetMipmappedArray(CUtexref hTexRef,
                                            CUmipmappedArray hMipmappedArray,
                                            unsigned int Flags) {
@@ -6552,6 +7782,10 @@ CUresult CUDAAPI cuTexRefSetMipmappedArray(CUtexref hTexRef,
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetAddress()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
                                     CUdeviceptr dptr, size_t bytes) {
   if (g_debug_execution >= 3) {
@@ -6560,7 +7794,10 @@ CUresult CUDAAPI cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetAddress2D()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetAddress2D(CUtexref hTexRef,
                                       const CUDA_ARRAY_DESCRIPTOR *desc,
                                       CUdeviceptr dptr, size_t Pitch) {
@@ -6571,7 +7808,6 @@ CUresult CUDAAPI cuTexRefSetAddress2D(CUtexref hTexRef,
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
 CUresult CUDAAPI cuTexRefSetFormat(CUtexref hTexRef, CUarray_format fmt,
                                    int NumPackedComponents) {
   if (g_debug_execution >= 3) {
@@ -6580,7 +7816,10 @@ CUresult CUDAAPI cuTexRefSetFormat(CUtexref hTexRef, CUarray_format fmt,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetAddressMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetAddressMode(CUtexref hTexRef, int dim,
                                         CUaddress_mode am) {
   if (g_debug_execution >= 3) {
@@ -6589,7 +7828,10 @@ CUresult CUDAAPI cuTexRefSetAddressMode(CUtexref hTexRef, int dim,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetFilterMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetFilterMode(CUtexref hTexRef, CUfilter_mode fm) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6597,7 +7839,10 @@ CUresult CUDAAPI cuTexRefSetFilterMode(CUtexref hTexRef, CUfilter_mode fm) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetMipmapFilterMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetMipmapFilterMode(CUtexref hTexRef,
                                              CUfilter_mode fm) {
   if (g_debug_execution >= 3) {
@@ -6606,7 +7851,10 @@ CUresult CUDAAPI cuTexRefSetMipmapFilterMode(CUtexref hTexRef,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetMipmapLevelBias()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetMipmapLevelBias(CUtexref hTexRef, float bias) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6614,7 +7862,10 @@ CUresult CUDAAPI cuTexRefSetMipmapLevelBias(CUtexref hTexRef, float bias) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetMipmapLevelClamp()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetMipmapLevelClamp(CUtexref hTexRef,
                                              float minMipmapLevelClamp,
                                              float maxMipmapLevelClamp) {
@@ -6624,7 +7875,10 @@ CUresult CUDAAPI cuTexRefSetMipmapLevelClamp(CUtexref hTexRef,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetMaxAnisotropy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetMaxAnisotropy(CUtexref hTexRef,
                                           unsigned int maxAniso) {
   if (g_debug_execution >= 3) {
@@ -6633,7 +7887,10 @@ CUresult CUDAAPI cuTexRefSetMaxAnisotropy(CUtexref hTexRef,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetBorderColor()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetBorderColor(CUtexref hTexRef, float *pBorderColor) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6641,7 +7898,10 @@ CUresult CUDAAPI cuTexRefSetBorderColor(CUtexref hTexRef, float *pBorderColor) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6651,6 +7911,10 @@ CUresult CUDAAPI cuTexRefSetFlags(CUtexref hTexRef, unsigned int Flags) {
 }
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetAddress()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6659,7 +7923,10 @@ CUresult CUDAAPI cuTexRefGetAddress(CUdeviceptr *pdptr, CUtexref hTexRef) {
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetArray(CUarray *phArray, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6667,7 +7934,10 @@ CUresult CUDAAPI cuTexRefGetArray(CUarray *phArray, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetMipmappedArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetMipmappedArray(CUmipmappedArray *phMipmappedArray,
                                            CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
@@ -6676,7 +7946,10 @@ CUresult CUDAAPI cuTexRefGetMipmappedArray(CUmipmappedArray *phMipmappedArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetAddressMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetAddressMode(CUaddress_mode *pam, CUtexref hTexRef,
                                         int dim) {
   if (g_debug_execution >= 3) {
@@ -6685,7 +7958,10 @@ CUresult CUDAAPI cuTexRefGetAddressMode(CUaddress_mode *pam, CUtexref hTexRef,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetFilterMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetFilterMode(CUfilter_mode *pfm, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6693,7 +7969,10 @@ CUresult CUDAAPI cuTexRefGetFilterMode(CUfilter_mode *pfm, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetFormat()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetFormat(CUarray_format *pFormat, int *pNumChannels,
                                    CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
@@ -6702,7 +7981,10 @@ CUresult CUDAAPI cuTexRefGetFormat(CUarray_format *pFormat, int *pNumChannels,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetMipmapFilterMode()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetMipmapFilterMode(CUfilter_mode *pfm,
                                              CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
@@ -6711,7 +7993,10 @@ CUresult CUDAAPI cuTexRefGetMipmapFilterMode(CUfilter_mode *pfm,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetMipmapLevelBias()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetMipmapLevelBias(float *pbias, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6719,7 +8004,10 @@ CUresult CUDAAPI cuTexRefGetMipmapLevelBias(float *pbias, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetMipmapLevelClamp()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetMipmapLevelClamp(float *pminMipmapLevelClamp,
                                              float *pmaxMipmapLevelClamp,
                                              CUtexref hTexRef) {
@@ -6729,7 +8017,10 @@ CUresult CUDAAPI cuTexRefGetMipmapLevelClamp(float *pminMipmapLevelClamp,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetMaxAnisotropy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetMaxAnisotropy(int *pmaxAniso, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6737,7 +8028,10 @@ CUresult CUDAAPI cuTexRefGetMaxAnisotropy(int *pmaxAniso, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetBorderColor()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetBorderColor(float *pBorderColor, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6745,7 +8039,10 @@ CUresult CUDAAPI cuTexRefGetBorderColor(float *pBorderColor, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefGetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefGetFlags(unsigned int *pFlags, CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6753,7 +8050,10 @@ CUresult CUDAAPI cuTexRefGetFlags(unsigned int *pFlags, CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefCreate(CUtexref *pTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6761,7 +8061,10 @@ CUresult CUDAAPI cuTexRefCreate(CUtexref *pTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefDestroy(CUtexref hTexRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6769,7 +8072,10 @@ CUresult CUDAAPI cuTexRefDestroy(CUtexref hTexRef) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuSurfRefSetArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuSurfRefSetArray(CUsurfref hSurfRef, CUarray hArray,
                                    unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -6778,7 +8084,10 @@ CUresult CUDAAPI cuSurfRefSetArray(CUsurfref hSurfRef, CUarray hArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuSurfRefGetArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuSurfRefGetArray(CUarray *phArray, CUsurfref hSurfRef) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6791,6 +8100,7 @@ CUresult CUDAAPI cuSurfRefGetArray(CUarray *phArray, CUsurfref hSurfRef) {
 
 #if CUDART_VERSION >= 5000
 CUresult CUDAAPI
+/* [한국어] CUDA 드라이버 API cuTexObjectCreate()의 GPGPU-Sim 구현 */
 cuTexObjectCreate(CUtexObject *pTexObject, const CUDA_RESOURCE_DESC *pResDesc,
                   const CUDA_TEXTURE_DESC *pTexDesc,
                   const CUDA_RESOURCE_VIEW_DESC *pResViewDesc) {
@@ -6800,7 +8110,10 @@ cuTexObjectCreate(CUtexObject *pTexObject, const CUDA_RESOURCE_DESC *pResDesc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexObjectDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexObjectDestroy(CUtexObject texObject) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6808,7 +8121,10 @@ CUresult CUDAAPI cuTexObjectDestroy(CUtexObject texObject) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexObjectGetResourceDesc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
                                             CUtexObject texObject) {
   if (g_debug_execution >= 3) {
@@ -6817,7 +8133,10 @@ CUresult CUDAAPI cuTexObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexObjectGetTextureDesc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexObjectGetTextureDesc(CUDA_TEXTURE_DESC *pTexDesc,
                                            CUtexObject texObject) {
   if (g_debug_execution >= 3) {
@@ -6826,7 +8145,10 @@ CUresult CUDAAPI cuTexObjectGetTextureDesc(CUDA_TEXTURE_DESC *pTexDesc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexObjectGetResourceViewDesc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexObjectGetResourceViewDesc(
     CUDA_RESOURCE_VIEW_DESC *pResViewDesc, CUtexObject texObject) {
   if (g_debug_execution >= 3) {
@@ -6838,6 +8160,7 @@ CUresult CUDAAPI cuTexObjectGetResourceViewDesc(
 
 /** @} */ /* END CUDA_TEXOBJECT */
 
+/* [한국어] CUDA 드라이버 API cuSurfObjectCreate()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuSurfObjectCreate(CUsurfObject *pSurfObject,
                                     const CUDA_RESOURCE_DESC *pResDesc) {
   if (g_debug_execution >= 3) {
@@ -6846,7 +8169,10 @@ CUresult CUDAAPI cuSurfObjectCreate(CUsurfObject *pSurfObject,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuSurfObjectDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuSurfObjectDestroy(CUsurfObject surfObject) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6854,7 +8180,10 @@ CUresult CUDAAPI cuSurfObjectDestroy(CUsurfObject surfObject) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuSurfObjectGetResourceDesc()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuSurfObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
                                              CUsurfObject surfObject) {
   if (g_debug_execution >= 3) {
@@ -6867,6 +8196,10 @@ CUresult CUDAAPI cuSurfObjectGetResourceDesc(CUDA_RESOURCE_DESC *pResDesc,
 #endif /* CUDART_VERSION >= 5000 */
 
 #if CUDART_VERSION >= 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceCanAccessPeer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
                                        CUdevice peerDev) {
   if (g_debug_execution >= 3) {
@@ -6875,7 +8208,10 @@ CUresult CUDAAPI cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuDeviceGetP2PAttribute()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuDeviceGetP2PAttribute(int *value,
                                          CUdevice_P2PAttribute attrib,
                                          CUdevice srcDevice,
@@ -6886,7 +8222,10 @@ CUresult CUDAAPI cuDeviceGetP2PAttribute(int *value,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxEnablePeerAccess()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxEnablePeerAccess(CUcontext peerContext,
                                        unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -6895,7 +8234,10 @@ CUresult CUDAAPI cuCtxEnablePeerAccess(CUcontext peerContext,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxDisablePeerAccess()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxDisablePeerAccess(CUcontext peerContext) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6907,6 +8249,7 @@ CUresult CUDAAPI cuCtxDisablePeerAccess(CUcontext peerContext) {
 /** @} */ /* END CUDA_PEER_ACCESS */
 #endif    /* CUDART_VERSION >= 4000 */
 
+/* [한국어] CUDA 드라이버 API cuGraphicsUnregisterResource()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -6914,7 +8257,10 @@ CUresult CUDAAPI cuGraphicsUnregisterResource(CUgraphicsResource resource) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsSubResourceGetMappedArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(
     CUarray *pArray, CUgraphicsResource resource, unsigned int arrayIndex,
     unsigned int mipLevel) {
@@ -6926,7 +8272,10 @@ CUresult CUDAAPI cuGraphicsSubResourceGetMappedArray(
 }
 
 #if CUDART_VERSION >= 5000
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsResourceGetMappedMipmappedArray()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(
     CUmipmappedArray *pMipmappedArray, CUgraphicsResource resource) {
   if (g_debug_execution >= 3) {
@@ -6939,6 +8288,10 @@ CUresult CUDAAPI cuGraphicsResourceGetMappedMipmappedArray(
 #endif /* CUDART_VERSION >= 5000 */
 
 #if CUDART_VERSION >= 3020
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsResourceGetMappedPointer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(
     CUdeviceptr *pDevPtr, size_t *pSize, CUgraphicsResource resource) {
   if (g_debug_execution >= 3) {
@@ -6948,7 +8301,6 @@ CUresult CUDAAPI cuGraphicsResourceGetMappedPointer(
   return CUDA_SUCCESS;
 }
 #endif /* CUDART_VERSION >= 3020 */
-
 CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
                                                unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -6957,7 +8309,10 @@ CUresult CUDAAPI cuGraphicsResourceSetMapFlags(CUgraphicsResource resource,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsMapResources()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
                                         CUgraphicsResource *resources,
                                         CUstream hStream) {
@@ -6967,7 +8322,10 @@ CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsUnmapResources()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
                                           CUgraphicsResource *resources,
                                           CUstream hStream) {
@@ -6980,6 +8338,7 @@ CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
 
 /** @} */ /* END CUDA_GRAPHICS */
 
+/* [한국어] CUDA 드라이버 API cuGetExportTable()의 GPGPU-Sim 구현 */
 CUresult CUDAAPI cuGetExportTable(const void **ppExportTable,
                                   const CUuuid *pExportTableId) {
   if (g_debug_execution >= 3) {
@@ -6992,6 +8351,10 @@ CUresult CUDAAPI cuGetExportTable(const void **ppExportTable,
 
 #if defined(CUDART_VERSION_INTERNAL) || \
     (CUDART_VERSION >= 4000 && CUDART_VERSION < 6050)
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemHostRegister()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
                                    unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -7005,6 +8368,10 @@ CUresult CUDAAPI cuMemHostRegister(void *p, size_t bytesize,
 
 #if defined(CUDART_VERSION_INTERNAL) || \
     (CUDART_VERSION >= 5050 && CUDART_VERSION < 6050)
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkCreate()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
                               void **optionValues, CUlinkState *stateOut) {
   if (g_debug_execution >= 3) {
@@ -7013,6 +8380,10 @@ CUresult CUDAAPI cuLinkCreate(unsigned int numOptions, CUjit_option *options,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkAddData()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
                                void *data, size_t size, const char *name,
                                unsigned int numOptions, CUjit_option *options,
@@ -7023,6 +8394,10 @@ CUresult CUDAAPI cuLinkAddData(CUlinkState state, CUjitInputType type,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLinkAddFile()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
                                const char *path, unsigned int numOptions,
                                CUjit_option *options, void **optionValues) {
@@ -7037,6 +8412,10 @@ CUresult CUDAAPI cuLinkAddFile(CUlinkState state, CUjitInputType type,
 
 #if defined(CUDART_VERSION_INTERNAL) || \
     (CUDART_VERSION >= 3020 && CUDART_VERSION < 4010)
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuTexRefSetAddress2D_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuTexRefSetAddress2D_v2(CUtexref hTexRef,
                                          const CUDA_ARRAY_DESCRIPTOR *desc,
                                          CUdeviceptr dptr, size_t Pitch) {
@@ -7050,6 +8429,10 @@ CUresult CUDAAPI cuTexRefSetAddress2D_v2(CUtexref hTexRef,
           < 4010) */
 
 #if defined(CUDART_VERSION_INTERNAL) || CUDART_VERSION < 4000
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxDestroy(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7057,6 +8440,10 @@ CUresult CUDAAPI cuCtxDestroy(CUcontext ctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxPopCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7064,6 +8451,10 @@ CUresult CUDAAPI cuCtxPopCurrent(CUcontext *pctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuCtxPushCurrent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7071,6 +8462,10 @@ CUresult CUDAAPI cuCtxPushCurrent(CUcontext ctx) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamDestroy(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7078,6 +8473,10 @@ CUresult CUDAAPI cuStreamDestroy(CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventDestroy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventDestroy(CUevent hEvent) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7088,6 +8487,10 @@ CUresult CUDAAPI cuEventDestroy(CUevent hEvent) {
 #endif /* CUDART_VERSION_INTERNAL || CUDART_VERSION < 4000 */
 
 #if defined(CUDART_VERSION_INTERNAL)
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoD_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost,
                                  size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7096,6 +8499,10 @@ CUresult CUDAAPI cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoH_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice,
                                  size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7104,6 +8511,10 @@ CUresult CUDAAPI cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoD_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
                                  size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7112,6 +8523,10 @@ CUresult CUDAAPI cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoA_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoA_v2(CUarray dstArray, size_t dstOffset,
                                  CUdeviceptr srcDevice, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7120,6 +8535,10 @@ CUresult CUDAAPI cuMemcpyDtoA_v2(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoD_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoD_v2(CUdeviceptr dstDevice, CUarray srcArray,
                                  size_t srcOffset, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7128,6 +8547,10 @@ CUresult CUDAAPI cuMemcpyAtoD_v2(CUdeviceptr dstDevice, CUarray srcArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoA_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoA_v2(CUarray dstArray, size_t dstOffset,
                                  const void *srcHost, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7136,6 +8559,10 @@ CUresult CUDAAPI cuMemcpyHtoA_v2(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoH_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoH_v2(void *dstHost, CUarray srcArray,
                                  size_t srcOffset, size_t ByteCount) {
   if (g_debug_execution >= 3) {
@@ -7144,6 +8571,10 @@ CUresult CUDAAPI cuMemcpyAtoH_v2(void *dstHost, CUarray srcArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoA_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoA_v2(CUarray dstArray, size_t dstOffset,
                                  CUarray srcArray, size_t srcOffset,
                                  size_t ByteCount) {
@@ -7153,6 +8584,10 @@ CUresult CUDAAPI cuMemcpyAtoA_v2(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoAAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoAAsync_v2(CUarray dstArray, size_t dstOffset,
                                       const void *srcHost, size_t ByteCount,
                                       CUstream hStream) {
@@ -7162,6 +8597,10 @@ CUresult CUDAAPI cuMemcpyHtoAAsync_v2(CUarray dstArray, size_t dstOffset,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAtoHAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAtoHAsync_v2(void *dstHost, CUarray srcArray,
                                       size_t srcOffset, size_t ByteCount,
                                       CUstream hStream) {
@@ -7171,6 +8610,10 @@ CUresult CUDAAPI cuMemcpyAtoHAsync_v2(void *dstHost, CUarray srcArray,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2D_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7178,6 +8621,10 @@ CUresult CUDAAPI cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2DUnaligned_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7185,6 +8632,10 @@ CUresult CUDAAPI cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3D_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7192,6 +8643,10 @@ CUresult CUDAAPI cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyHtoDAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice,
                                       const void *srcHost, size_t ByteCount,
                                       CUstream hStream) {
@@ -7201,6 +8656,10 @@ CUresult CUDAAPI cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoHAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice,
                                       size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7209,6 +8668,10 @@ CUresult CUDAAPI cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyDtoDAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice,
                                       CUdeviceptr srcDevice, size_t ByteCount,
                                       CUstream hStream) {
@@ -7218,6 +8681,10 @@ CUresult CUDAAPI cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2DAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy,
                                     CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7226,6 +8693,10 @@ CUresult CUDAAPI cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DAsync_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy,
                                     CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7234,6 +8705,10 @@ CUresult CUDAAPI cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD8_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc,
                                size_t N) {
   if (g_debug_execution >= 3) {
@@ -7242,6 +8717,10 @@ CUresult CUDAAPI cuMemsetD8_v2(CUdeviceptr dstDevice, unsigned char uc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD16_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD16_v2(CUdeviceptr dstDevice, unsigned short us,
                                 size_t N) {
   if (g_debug_execution >= 3) {
@@ -7250,6 +8729,10 @@ CUresult CUDAAPI cuMemsetD16_v2(CUdeviceptr dstDevice, unsigned short us,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD32_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui,
                                 size_t N) {
   if (g_debug_execution >= 3) {
@@ -7258,6 +8741,10 @@ CUresult CUDAAPI cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D8_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D8_v2(CUdeviceptr dstDevice, size_t dstPitch,
                                  unsigned char uc, size_t Width,
                                  size_t Height) {
@@ -7267,6 +8754,10 @@ CUresult CUDAAPI cuMemsetD2D8_v2(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D16_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D16_v2(CUdeviceptr dstDevice, size_t dstPitch,
                                   unsigned short us, size_t Width,
                                   size_t Height) {
@@ -7276,6 +8767,10 @@ CUresult CUDAAPI cuMemsetD2D16_v2(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D32_v2()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D32_v2(CUdeviceptr dstDevice, size_t dstPitch,
                                   unsigned int ui, size_t Width,
                                   size_t Height) {
@@ -7285,6 +8780,10 @@ CUresult CUDAAPI cuMemsetD2D32_v2(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7292,6 +8791,10 @@ CUresult CUDAAPI cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
                                size_t ByteCount, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7300,6 +8803,10 @@ CUresult CUDAAPI cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyPeer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
                               CUdeviceptr srcDevice, CUcontext srcContext,
                               size_t ByteCount) {
@@ -7309,6 +8816,10 @@ CUresult CUDAAPI cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpyPeerAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
                                    CUdeviceptr srcDevice, CUcontext srcContext,
                                    size_t ByteCount, CUstream hStream) {
@@ -7318,6 +8829,10 @@ CUresult CUDAAPI cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeer()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7325,6 +8840,10 @@ CUresult CUDAAPI cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeerAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
                                      CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7333,7 +8852,10 @@ CUresult CUDAAPI cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD8Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
                                  size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7342,6 +8864,10 @@ CUresult CUDAAPI cuMemsetD8Async(CUdeviceptr dstDevice, unsigned char uc,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD16Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
                                   size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7350,6 +8876,10 @@ CUresult CUDAAPI cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD32Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
                                   size_t N, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7358,6 +8888,10 @@ CUresult CUDAAPI cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D8Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
                                    unsigned char uc, size_t Width,
                                    size_t Height, CUstream hStream) {
@@ -7367,6 +8901,10 @@ CUresult CUDAAPI cuMemsetD2D8Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D16Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned short us, size_t Width,
                                     size_t Height, CUstream hStream) {
@@ -7376,6 +8914,10 @@ CUresult CUDAAPI cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemsetD2D32Async()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
                                     unsigned int ui, size_t Width,
                                     size_t Height, CUstream hStream) {
@@ -7385,7 +8927,10 @@ CUresult CUDAAPI cuMemsetD2D32Async(CUdeviceptr dstDevice, size_t dstPitch,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamGetPriority()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7393,6 +8938,10 @@ CUresult CUDAAPI cuStreamGetPriority(CUstream hStream, int *priority) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamGetFlags()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7400,6 +8949,10 @@ CUresult CUDAAPI cuStreamGetFlags(CUstream hStream, unsigned int *flags) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWaitEvent()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
                                    unsigned int Flags) {
   if (g_debug_execution >= 3) {
@@ -7408,6 +8961,10 @@ CUresult CUDAAPI cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamAddCallback()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
                                      CUstreamCallback callback, void *userData,
                                      unsigned int flags) {
@@ -7417,6 +8974,10 @@ CUresult CUDAAPI cuStreamAddCallback(CUstream hStream,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamAttachMemAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
                                         size_t length, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -7425,6 +8986,10 @@ CUresult CUDAAPI cuStreamAttachMemAsync(CUstream hStream, CUdeviceptr dptr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamQuery()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamQuery(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7432,6 +8997,10 @@ CUresult CUDAAPI cuStreamQuery(CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamSynchronize()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamSynchronize(CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7439,6 +9008,10 @@ CUresult CUDAAPI cuStreamSynchronize(CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuEventRecord()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7446,6 +9019,10 @@ CUresult CUDAAPI cuEventRecord(CUevent hEvent, CUstream hStream) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuLaunchKernel()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                                 unsigned int gridDimY, unsigned int gridDimZ,
                                 unsigned int blockDimX, unsigned int blockDimY,
@@ -7458,6 +9035,10 @@ CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsMapResources()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
                                         CUgraphicsResource *resources,
                                         CUstream hStream) {
@@ -7467,6 +9048,10 @@ CUresult CUDAAPI cuGraphicsMapResources(unsigned int count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuGraphicsUnmapResources()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
                                           CUgraphicsResource *resources,
                                           CUstream hStream) {
@@ -7476,6 +9061,10 @@ CUresult CUDAAPI cuGraphicsUnmapResources(unsigned int count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemPrefetchAsync()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
                                     CUdevice dstDevice, CUstream hStream) {
   if (g_debug_execution >= 3) {
@@ -7484,6 +9073,10 @@ CUresult CUDAAPI cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWriteValue32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
                                       cuuint32_t value, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -7492,6 +9085,10 @@ CUresult CUDAAPI cuStreamWriteValue32(CUstream stream, CUdeviceptr addr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamWaitValue32()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
                                      cuuint32_t value, unsigned int flags) {
   if (g_debug_execution >= 3) {
@@ -7500,6 +9097,10 @@ CUresult CUDAAPI cuStreamWaitValue32(CUstream stream, CUdeviceptr addr,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuStreamBatchMemOp()의 GPGPU-Sim 구현
+ */
 CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
                                     CUstreamBatchMemOpParams *paramArray,
                                     unsigned int flags) {
@@ -7510,7 +9111,10 @@ CUresult CUDAAPI cuStreamBatchMemOp(CUstream stream, unsigned int count,
   return CUDA_SUCCESS;
 }
 #endif
-
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuProfilerInitialize()의 GPGPU-Sim 구현
+ */
 CUresult cuProfilerInitialize(const char *configFile, const char *outputFile,
                               CUoutput_mode outputMode) {
   if (g_debug_execution >= 3) {
@@ -7519,6 +9123,10 @@ CUresult cuProfilerInitialize(const char *configFile, const char *outputFile,
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuProfilerStart()의 GPGPU-Sim 구현
+ */
 CUresult cuProfilerStart(void) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7526,6 +9134,10 @@ CUresult cuProfilerStart(void) {
   printf("WARNING: this function has not been implemented yet.");
   return CUDA_SUCCESS;
 }
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuProfilerStop()의 GPGPU-Sim 구현
+ */
 CUresult cuProfilerStop(void) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7585,6 +9197,10 @@ extern "C" CUresult CUDAAPI cuMemcpyDtoD_v2_ptds(CUdeviceptr dstDevice,
   return CUDA_SUCCESS;
 }
 extern "C" CUresult CUDAAPI
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy2DUnaligned_v2_ptds()의 GPGPU-Sim 구현
+ */
 cuMemcpy2DUnaligned_v2_ptds(const CUDA_MEMCPY2D *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7600,6 +9216,10 @@ extern "C" CUresult CUDAAPI cuMemcpy3D_v2_ptds(const CUDA_MEMCPY3D *pCopy) {
   return CUDA_SUCCESS;
 }
 extern "C" CUresult CUDAAPI
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeer_ptds()의 GPGPU-Sim 구현
+ */
 cuMemcpy3DPeer_ptds(const CUDA_MEMCPY3D_PEER *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7670,6 +9290,10 @@ extern "C" CUresult CUDAAPI cuMemsetD2D32_v2_ptds(CUdeviceptr dstDevice,
 
 //_ptsz
 extern "C" CUresult CUDAAPI
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeer_ptsz()의 GPGPU-Sim 구현
+ */
 cuMemcpy3DPeer_ptsz(const CUDA_MEMCPY3D_PEER *pCopy) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);
@@ -7766,6 +9390,10 @@ extern "C" CUresult CUDAAPI cuMemcpy3DAsync_v2_ptsz(const CUDA_MEMCPY3D *pCopy,
   return CUDA_SUCCESS;
 }
 extern "C" CUresult CUDAAPI
+/*
+ * [한국어]
+ * CUDA 드라이버 API cuMemcpy3DPeerAsync_ptsz()의 GPGPU-Sim 구현
+ */
 cuMemcpy3DPeerAsync_ptsz(const CUDA_MEMCPY3D_PEER *pCopy, CUstream hStream) {
   if (g_debug_execution >= 3) {
     announce_call(__my_func__);

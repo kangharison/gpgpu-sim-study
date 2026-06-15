@@ -1,4 +1,42 @@
 /*
+ * [한국어 설명] SASS 디스어셈블리 Lex/Flex 어휘 분석기 (sass.l)
+ *
+ * === 파일의 역할 ===
+ * cuobjdump가 출력한 SASS(Shader Assembly) 디스어셈블리 텍스트를
+ * 읽어 Bison(sass.y)이 사용할 토큰으로 변환하는 Flex lexer 정의 파일이다.
+ * SASS 명령어 니모닉, 수정자, 레지스터, 메모리 위치, 상수값, 라벨,
+ * 프레디케이트 등을 토큰화한다. GPGPU-Sim 메인 PTX lexer(ptx.l)와는
+ * 달리 SASS 문법에 특화되어 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ *   cuobjdump_to_ptxplus.cc
+ *     → sass_parse() (sass.y가 생성)
+ *         → sass.l (이 파일)이 SASS 텍스트를 토큰화
+ *             → sass.y가 cuobjdumpInstList(IR) 구축
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존하는 모듈:
+ *   - sass_parser.hh : Bison이 생성한 토큰 정의
+ * 이 파일에 의존하는 모듈:
+ *   - sass.y         : lexer 토큰을 문법 규칙에서 사용
+ *   - 빌드 시스템    : flex sass.l → sass.yy.cc 생성
+ *
+ * === 주요 함수/구조체 요약 ===
+ * Flex 옵션:
+ *   noyywrap : 입력 종료 시 yywrap 호출 안 함
+ *   yylineno : 줄 번호 추적
+ *   nounput  : unput 함수 비생성
+ * 주요 토큰 범주:
+ *   - SASS 명령어: ADA, BRA, IADD, GLD, GST, MOV 등
+ *   - 비교/수정자: EQ, GE, DOTTRUNC, DOTANY 등
+ *   - 타입 수정자: DOTF32, DOTS32, DOTU64 등
+ *   - 레지스터: REGISTER, REGISTERLO, REGISTERHI, OFFSETREGISTER 등
+ *   - 메모리 위치: SMEMLOCATION, GMEMLOCATION, CMEMLOCATION, LMEMLOCATION
+ *   - 프레디케이트: PREDREGISTER, PREDREGISTER2, PREDREGISTER3
+ *   - 라벨/헤더: LABEL, VERSIONHEADER, FUNCTIONHEADER 등
+ */
+
+/*
 // Copyright (c) 2009-2012, Jimmy Kwa, Andrew Boktor
 // The University of British Columbia
 // All rights reserved.
@@ -37,6 +75,7 @@
 
 #define yylval sass_lval
 
+/* [한국어] SASS lexer 오류 처리 함수 선언. */
 void sass_error(const char*);
 %}
 %option noyywrap
@@ -77,6 +116,7 @@ fltliteral	[0-9]+\.[0-9]+
 "]" yylval.string_value = strdup(yytext); return CSQBRACKET; 
 
 	/*base instructions*/
+/* [한국어] SASS 기본 명령어 니모닉들을 토큰으로 반환. */
 "BAR.ARV.WAIT b0, 0xfff"	yylval.string_value = strdup(yytext); return BAR;
 ADA	yylval.string_value = strdup(yytext); return ADA;
 BRA	yylval.string_value = strdup(yytext); return BRA;
@@ -178,6 +218,7 @@ BRK	yylval.string_value = strdup(yytext); return BRK;
 VOTE	yylval.string_value = strdup(yytext); return VOTE;
 
 	/*instruction modifiers*/
+/* [한국어] 명령어 수정자(비교 연산자, 반올림, 기타 플래그) 토큰. */
 EQ	yylval.string_value = strdup(yytext); return EQ;
 EQU	yylval.string_value = strdup(yytext); return EQU;
 GE	yylval.string_value = strdup(yytext); return GE;
@@ -250,6 +291,8 @@ NEU	yylval.string_value = strdup(yytext); return NEU;
 	/*geometries*/
 
 	/*register operands*/
+/* [한국어] SASS 레지스터 피연산자들. R#(일반), R#L/R#H(lo/hi), A#(offset),
+ * .C#(predicate), o[0x#](predicate2), C#(predicate3), SR_*(특수 레지스터). */
 [\-]?R{numeric}+	yylval.string_value = strdup(yytext); return REGISTER;
 [\-]?R{numeric}+L	yylval.string_value = strdup(yytext); return REGISTERLO;
 [\-]?R{numeric}+H    yylval.string_value = strdup(yytext); return REGISTERHI;
@@ -266,6 +309,7 @@ C{numeric}	 yylval.string_value = strdup(yytext); return PREDREGISTER3;
 	/*special registers*/
 
 	/* cuobjdump header */
+/* [한국어] cuobjdump 출력의 섹션 헤더들(무시 또는 토큰 반환). */
 "Fatbin ptx code:" yylval.string_value = strdup(yytext); return PTXHEADER;
 "Fatbin elf code:" yylval.string_value = strdup(yytext); return ELFHEADER;
 "================"
@@ -283,6 +327,13 @@ C{numeric}	 yylval.string_value = strdup(yytext); return PREDREGISTER3;
 "." yylval.string_value = strdup(yytext); return DOT;
 
 	/*memory location operands*/
+/* [한국어] 메모리 위치 피연산자들.
+ * ABSSMEMLOCATION: |g| [..] 형태(절대 공유 메모리)
+ * SMEMLOCATION:    g [..] 형태(공유 메모리)
+ * GMEMLOCATION:    global14 [..] 형태(전역 메모리)
+ * CMEMLOCATION:    c [..] [..] 형태(상수 메모리)
+ * LMEMLOCATION:    local [..] 형태(로컬 메모리)
+ */
 [\-]?"|g| ["{hexliteral}"]"".U16"?	yylval.string_value = strdup(yytext); return ABSSMEMLOCATION;
 [\-]?"|g| [R"{numeric}+\]".U16"?	yylval.string_value = strdup(yytext); return ABSSMEMLOCATION;
 [\-]?"|g| [A"{numeric}+\+{hexliteral}\]".U16"?	yylval.string_value = strdup(yytext); return ABSSMEMLOCATION;
@@ -309,7 +360,7 @@ C{numeric}	 yylval.string_value = strdup(yytext); return PREDREGISTER3;
 [\-]?"local [A"{numeric}+\+\+\+{hexliteral}\]".U16"?	yylval.string_value = strdup(yytext); return LMEMLOCATION;
 
 	/*identifier + literals*/
-	
+		
 {identifier}	yylval.string_value = strdup(yytext); return IDENTIFIER;
 [\-]?{hexliteral}	yylval.string_value = strdup(yytext); return HEXLITERAL; //change to int later?
 
@@ -358,6 +409,14 @@ C{numeric}	 yylval.string_value = strdup(yytext); return PREDREGISTER3;
 
 %%
 
+/*
+ * [한국어]
+ * sass_error - lexer가 인식할 수 없는 토큰을 만났을 때 호출
+ *
+ * @message: 오류 메시지
+ *
+ * 메시지, 현재 토큰, 줄 번호를 출력하고 exit(1)로 종료한다.
+ */
 void sass_error(const char* message)
 {
 	printf("   "); printf("%s",message); printf(" near \""); printf("%s",yytext); printf("\"");

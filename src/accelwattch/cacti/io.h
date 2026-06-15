@@ -55,6 +55,16 @@
  * output_data_csv() : uca_org_t 결과를 CSV 한 줄로 출력. 자동화 스크립트나 스프레드시트 파싱에 사용.
  * output_UCA()      : uca_org_t 결과를 사람이 읽기 좋은 형태(레이블+값)로 여러 줄 출력.
  *                     캐시 면적, 접근 시간, 사이클 타임, 읽기/쓰기 동적 전력, 누설 전력을 포함.
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * io.h의 함수는 AccelWattch가 XML/구성 파일의 캐시 파라미터(예:
+ * <param name="size">, <param name="line">, <param name="assoc">,
+ * <param name="nbanks">, <param name="technology_node">)를 CACTI 계산 결과로
+ * 변환한 뒤, stdout/CSV/로그에 기록할 때 호출된다. gpgpusim.config의
+ * --power_config_name <xml> 옵션이 AccelWattch 초기화를 트리거하며,
+ * XML 파라미터는 io.cc의 cacti_interface(InputParameter*)를 거쳐 계산 엔진에
+ * 전달된다. 최종 결과는 output_UCA() 또는 output_data_csv()로 출력되어
+ * GPU 캐시 전력/면적/지연 추정치를 외부로 노출한다.
  */
 
 #ifndef __IO_H__

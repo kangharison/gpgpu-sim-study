@@ -60,6 +60,41 @@
 # Ali Bakhoda, George L. Yuan, at the University of British Columbia, 
 # Vancouver, BC V6T 1Z4
 
+"""
+[한국어 설명] AerialVision GUI 및 matplotlib 플로팅 클래스 (guiclasses.py)
+
+=== 파일의 역할 ===
+AerialVision의 핵심 GUI 구성 요소와 matplotlib 기반 시각화 로직을 담는다.
+- formEntry: Time Lapse View의 그래프 설정 폼(파일/X축/Y축/그래프종류/서브플롯)
+- subplotInstance: 서브플롯 설정 폼 (formEntry 상속)
+- PlotFormatInfo: 플롯 제목/레이블/폰트/색상맵 포맷 정보
+- graphManager: matplotlib Figure 생성, 데이터 타입별 플로팅, 사용자 인터랙션
+- NaviPlotInfo: Source Code View 폰트 설정
+- newTextTab: Source Code View의 CUDA/PTX 소스코드 및 라인별 통계 표시
+
+=== 전체 아키텍처에서의 위치 ===
+  aerialvision/startup.py
+        ↓
+  aerialvision/guiclasses.py (이 파일)
+        ↓
+  matplotlib / Tk / Pmw
+
+=== 타 모듈과의 연결 ===
+- startup.py: formEntry, newTextTab 인스턴스 생성
+- lexyacc.py: parseMe()로부터 vars[파일명] 데이터 획득
+- organizedata.py: 데이터 재배열 후 형태(type 1~5)에 따라 시각화 분기
+- lexyaccbookmark.py: 즐겨찾기 파싱
+- lexyacctexteditor.py: Source Code View에서 .stats/.ptx 파싱
+- configs.py: PlotFormatInfo/NaviPlotInfo에서 avconfig.get_value()로 폰트/회전 옵션 조회
+
+=== 주요 함수/구조체 요약 ===
+- formEntry: 그래프 탭 폼, 파일/변수/그래프 선택, 서브플롯 관리
+- subplotInstance: formEntry 상속, 서브플롯별 설정
+- PlotFormatInfo: 플롯 레이블/폰트/색상맵 관리
+- graphManager: matplotlib Figure, type1~5Variable, dy/dx, 커널 경계 표시, 인터랙션
+- NaviPlotInfo: Source Code View 폰트 정보
+- newTextTab: 소스코드 뷰 텍스트/히스토그램 UI
+"""
 
 import time
 import os
@@ -83,11 +118,23 @@ import lexyacctexteditor
 import variableclasses
 from configs import avconfig
 
+# [한국어] Time Lapse View 그래프 설정 폼 클래스.
+# 하나의 탭 안에 배치되어 사용자가 파일/X축/Y축/그래프 종류/서브플롯을 선택할 수 있게 한다.
 class formEntry:
   
   #This class is essentially a form placed inside a tab. It collects all the data from the user required for graphing. It then instantiates a new object that takes care of all the graphing
+  # [한국어] 변수 타입 -> 가능한 그래프 인덱스 매핑.
+  # possGraphs 순서: ['Line','Histogram','Bar Chart','Parallel Intensity Plot',
+  #                    'Stacked Bar Chart','Parallel Intensity Plot (Sum)','Scatter Plot']
   graphForVarType = { 1:[0,3], 2:[0,3], 3:[4], 4:[0,3,5], 5:[6] }
   
+  # [한국어]
+  # 생성자: 탭 내 폼 UI를 구성한다.
+  # @graphTabs: 부모 Pmw.NoteBook
+  # @numb: 탭 번호 문자열
+  # @vars: {파일명: {변수명: variable}} 데이터 딕셔너리
+  # @res: 해상도 문자열 ('small', 'medium', 'big')
+  # @entry: 탭 제목 입력 Entry 위젯
   def __init__(self, graphTabs, numb, vars, res, entry):
     
     #Variable Initializations
@@ -104,6 +151,7 @@ class formEntry:
     self.num = 0
      
     #Setting a title to this tab
+    # [한국어] 탭 제목 설정. 기본값 "TabTitle?"이면 "Page N"으로 대체
     if entry.get() == "TabTitle?":
         self.tabnum = "Page " + numb
     else:
@@ -112,6 +160,7 @@ class formEntry:
     
     
     #Size of the self.background depending on how large the user screen is
+    # [한국어] 해상도에 따른 폼 배경 크기 선택
     if res == "small":
         self.background = Tk.Frame(self.page, bg = "white", borderwidth = 5, relief = Tk.GROOVE, height = 700, width = 1200);
         self.formArea = Tk.Frame(self.background, bg = "white")
@@ -138,6 +187,7 @@ class formEntry:
     self.cWhichFile.bind("<Double-Button-1>", self.chooseFile)
     
     #Placing the available filenames in the self.cWhichFileFrame Listbox
+    # [한국어] 사용 가능한 파일 이름을 정렬하여 Listbox에 삽입
     for files in sorted(self.data):
       self.cWhichFile.insert(Tk.END, files)
 
@@ -224,6 +274,7 @@ class formEntry:
     
     
     #Setting up subplot stuff
+    # [한국어] 서브플롯 영역 초기화. Pmw.NoteBook으로 서브플롯 탭 관리
     self.subplotWindow = Tk.Frame(self.formArea, bg='green', height = 300, width = 700)
     self.subplotWindow.pack(side = Tk.TOP, pady = 10)
     self.subplotWindow.pack_propagate(0)
@@ -240,6 +291,9 @@ class formEntry:
     self.updateChosen()
     
     
+  # [한국어]
+  # chooseFile: 파일 Listbox에서 더블클릭 시 호출.
+  # 선택한 파일의 X축(globalCycle)과 Y축 변수들을 Listbox에 채운다.
   def chooseFile(self, *event):
     try:
       self.bFavourites.config( state = Tk.NORMAL )
@@ -252,6 +306,7 @@ class formEntry:
     
       
     #filling in xAxis vars
+    # [한국어] X축으로는 globalCycle만 제공
     for keys in list(self.data[self.fileChosen].keys()):
         if keys == 'globalCycle':
             self.cXAxisData.insert(Tk.END, keys)
@@ -269,6 +324,8 @@ class formEntry:
     self.updateChosen()
     
   
+  # [한국어]
+  # chooseDataX: X축 변수 선택. 선택 후 Y축 변수 타입에 따라 가능한 그래프 종류 갱신.
   def chooseDataX(self, *event):
     self.dataChosenX = self.cXAxisData.get('active')
     self.cTypeGraph.delete(0,Tk.END)
@@ -286,6 +343,8 @@ class formEntry:
     
     self.updateChosen()
   
+  # [한국어]
+  # chooseDataY: Y축 변수 선택. 변수 타입에 따라 그래프 종류 Listbox 갱신.
   def chooseDataY(self, *event):
     self.dataChosenY = self.cYAxisData.get('active')
     self.cTypeGraph.delete(0,Tk.END)
@@ -295,31 +354,28 @@ class formEntry:
       varType = self.data[self.fileChosen][self.dataChosenY].type
       for g in formEntry.graphForVarType[varType]:
           self.cTypeGraph.insert(Tk.END, self.possGraphs[g])
-      #if self.data[self.fileChosen][self.dataChosenY].type == 1 or self.data[self.fileChosen][self.dataChosenY].type == 2:
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[0])
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[3])
-      #elif self.data[self.fileChosen][self.dataChosenY].type == 4:
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[0])
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[3])
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[5])
-      #else:
-      #    self.cTypeGraph.insert(Tk.END, self.possGraphs[4])
-          
           
     self.updateChosen()
                 
                 
   
+  # [한국어]
+  # checkDyDx: dy/dx 체크박스 상태를 self.dydx에 반영.
   def checkDyDx(self):
     self.dydx = self.var0.get()
 
         
     self.updateChosen()
 
+  # [한국어]
+  # chooseGraph: 그래프 종류 선택.
   def chooseGraph(self,num):
     self.graphChosen = self.cTypeGraph.get('active')
     self.updateChosen()
   
+  # [한국어]
+  # updateChosen: 우측 'Options Chosen' 텍스트 박스에 현재 선택 상태를 업데이트.
+  # 완료된 항목은 녹색, 미완료는 빨간색 배경으로 표시.
   def updateChosen(self):
     self.ChosenVarsTextbox.tag_config('title', font = ("Gills Sans MT", 12), justify = 'center', spacing1 = 0.5, underline = 1)
     self.ChosenVarsTextbox.tag_config('complete', background = 'green')
@@ -380,6 +436,8 @@ class formEntry:
 
     
   
+  # [한국어]
+  # addSubplot: 서브플롯 개수를 지정하여 새 서브플롯 폼을 생성.
   def addSubplot(self, subNum):
     self.removeSubplotWindow()
     self.subplots = []
@@ -393,6 +451,8 @@ class formEntry:
         self.subplots.append(subplotInstance(subplotFrames[-1], self.data, self, subplotForms + 1))
     self.updateChosen()
         
+  # [한국어]
+  # modSubplot: 기존 서브플롯 개수를 oldNum에서 subNum으로 조정(추가/삭제).
   def modSubplot(self, oldNum, subNum):
     if (oldNum > subNum): #trucate
       self.subplots = self.subplots[:subNum]
@@ -417,6 +477,8 @@ class formEntry:
     self.updateChosen()
 
 
+  # [한국어]
+  # removeSubplotWindow: 서브플롯 영역을 초기 상태로 복원.
   def removeSubplotWindow(self):
     self.subplotWindow.destroy()
     #Setting up subplot stuff
@@ -436,6 +498,8 @@ class formEntry:
     self.updateChosen()
     
     
+  # [한국어]
+  # setupPlotData: 모든 필드가 선택되었는지 확인하고, graphManager를 생성하여 플롯을 그린다.
   def setupPlotData(self):
     bool = 1
     error = 0
@@ -458,6 +522,8 @@ class formEntry:
       self.background.pack_propagate(0)
       THEGRAPH = graphManager(self.background, self.data, self.res, [self, self.subplots])
     
+  # [한국어]
+  # favouriteDescription: 즐겨찾기 항목 선택 시 설명 텍스트 표시.
   def favouriteDescription(self):
     self.tDescription.delete(1.0, Tk.END)
     favouriteChosen = self.cFavourites.get('active')
@@ -469,6 +535,8 @@ class formEntry:
     self.tDescription.insert(1.0, description )
     
     
+  # [한국어]
+  # chooseFavourite: 즐겨찾기 선택 팝업창을 띄우고 bookmarks.txt 파싱.
   def chooseFavourite(self):
     self.favouriteWindow = Tk.Toplevel(bg = 'white')
     self.favouriteWindow.title("Favourites")
@@ -495,18 +563,10 @@ class formEntry:
     self.bQuit.pack(side = Tk.TOP, padx = 10, pady = 10)
     self.bookmarks = lexyaccbookmark.parseMe()
     for iter in self.bookmarks:
-      #if len(iter.graphChosen) == len(self.subplots) + 1:
-      #  bool = 1
-      #  if len(self.subplots) > 0:
-      #    for iter1 in self.subplots:
-      #      if iter1.fileChosen == "":
-      #        iter1.fileCosen = self.fileChosen
-      #      else:
-      #        bool = 1
-      #  if bool == 1:
-      #    self.cFavourites.insert(Tk.END, iter.title)
       self.cFavourites.insert(Tk.END, iter.title)
      
+  # [한국어]
+  # chooseFavourites1: 즐겨찾기 항목을 더블클릭하면 해당 설정으로 바로 플롯 생성.
   def chooseFavourites1(self, *event):
     self.favouriteChosen = self.cFavourites.get('active')
     for count in range(0,len(self.bookmarks)):
@@ -538,6 +598,8 @@ class formEntry:
     self.background.pack_propagate(0)
     THEGRAPH = graphManager(self.background, self.data, self.res, [self, self.subplots])
     
+  # [한국어]
+  # errorMsg: 오류 메시지 팝업창 표시.
   def errorMsg(self, string):
     error = Tk.Toplevel(bg = 'white')
     error.title("Error Message")
@@ -549,6 +611,8 @@ class formEntry:
     bError.pack(pady = 10)
   
 
+  # [한국어]
+  # helpMsg: 도움말 팝업창 표시.
   def helpMsg(self, string):
     helpTip = Tk.Toplevel(bg = 'white')
     helpTip.title("Helping Tip")
@@ -558,8 +622,12 @@ class formEntry:
     bHelpTip.pack(pady = 10)
     
         
+# [한국어] 서브플롯 설정 폼 클래스. formEntry를 상속받는다.
 class subplotInstance(formEntry):
   
+  # [한국어]
+  # 생성자: 서브플롯 탭 내 폼 UI 구성. 부모 formEntry와 유사하지만
+  # ChosenVarsTextbox는 부모의 것을 공유한다.
   def __init__(self, master,data,plotInstance, subNum):
     frame = Tk.Frame(master, width = 700, height = 300, bg ='white')
     frame.pack()
@@ -640,6 +708,7 @@ class subplotInstance(formEntry):
     
     
 # Class holding all the format information of a plot
+# [한국어] 플롯 포맷 정보 클래스. 제목, 축 레이블, 폰트 크기, 색상맵 등을 관리.
 class PlotFormatInfo:
 
     # names of available colormaps
@@ -662,6 +731,8 @@ class PlotFormatInfo:
 
     optionSection = 'TimeLapseView'
 
+    # [한국어]
+    # 생성자: 플롯 포맷 초기값 설정. avconfig에서 폰트/눈금 회전 옵션을 읽어옴.
     def __init__(self, plotID,
                  title = strNoDisplay,
                  xlabel = strNoDisplay, 
@@ -690,6 +761,8 @@ class PlotFormatInfo:
 
         self.norm = mpl.colors.Normalize()
 
+    # [한국어]
+    # InitLabels: 값이 strNoDisplay인 레이블에만 실제 값을 채워넣는다.
     def InitLabels(self, xlabel, ylabel, cbarlabel, title = ''):
         
         if (self.xlabel == PlotFormatInfo.strNoDisplay):
@@ -705,6 +778,8 @@ class PlotFormatInfo:
             self.title = title
 
     # Obtain the matplotlib colormap that will be used for the parallel intensity plot
+    # [한국어]
+    # GetColorMap: 선택된 색상맵 이름에 해당하는 matplotlib colormap 객체 반환.
     def GetColorMap(self):
         cmapName = self.cmap.get()
         if (cmapName in PlotFormatInfo.custom_cmaps):
@@ -713,8 +788,15 @@ class PlotFormatInfo:
             cmap = mpl.cm.get_cmap(name=cmapName) 
         return cmap
         
+# [한국어] matplotlib Figure 관리 클래스. 실제 플롯 생성과 인터랙션 버튼을 담당.
 class graphManager:
   
+    # [한국어]
+    # 생성자: matplotlib Figure, Canvas, Toolbar, 인터랙션 버튼을 구성하고 plotData() 호출.
+    # @master: 부모 Tk Frame
+    # @data: {파일명: {변수명: variable}} 데이터
+    # @res: 해상도
+    # @dataChosen: [주 formEntry 객체, 서브플롯 리스트]
     def __init__(self, master, data, res, dataChosen):
     
         self.normalizePlotColors = ''
@@ -734,6 +816,7 @@ class graphManager:
         self.plotFormatInfo = {}
         self.displayData = {}
 
+        # [한국어] 해상도별 그래프 하단 컨트롤 프레임 크기 선택
         if self.res == "small":
             self.underneathGraph = Tk.Frame(master, borderwidth = 5, relief = Tk.GROOVE, height = 100, width = 1225);
         elif self.res == 'medium':
@@ -742,6 +825,7 @@ class graphManager:
             self.underneathGraph = Tk.Frame(master, borderwidth = 5, relief = Tk.GROOVE, height = 100, width = 1572);
         self.underneathGraph.pack(side = Tk.BOTTOM, fill = Tk.X )
         
+        # [한숙어] 해상도별 그래프 캔버스 크기 선택
         if self.res == "small":
             self.graphArea = Tk.Canvas(master, bg = "black", borderwidth = 5, relief = Tk.GROOVE, width = 1200);
         elif self.res == 'medium':
@@ -756,6 +840,7 @@ class graphManager:
         self.leftMostUnderneath.pack(side = Tk.LEFT, anchor = Tk.N)
         self.toolbarArea = Tk.Frame(self.leftMostUnderneath, borderwidth = 1, relief = Tk.GROOVE, bg = 'black')
         self.toolbarArea.pack(anchor = Tk.N)
+        # [한국어] 인터랙션 버튼들
         bDyDx = Tk.Button(self.underneathGraph, text = 'dy/dx', command = self.takeDerivativeButton)
         bDyDx.pack(side = Tk.RIGHT, anchor = Tk.N)
         bAddToFavourites = Tk.Button(self.underneathGraph, text = "Add to Favourites", command = self.addToFavourites)
@@ -771,7 +856,7 @@ class graphManager:
         bZoom = Tk.Button(self.underneathGraph, text = 'Zoom', command = self.zoomButton)
         bZoom.pack(side = Tk.RIGHT, anchor = Tk.N)
 
-        
+        # [한국어] 해상도별 Figure 크기
         if self.res == "small":
           self.figure = Figure(figsize=(17,9), dpi=96)
         elif self.res == 'medium':
@@ -786,6 +871,8 @@ class graphManager:
         self.toolbar.update()
         self.plotData()
         
+    # [한국어]
+    # addToFavourites: 현재 플롯 구성을 bookmarks.txt에 추가하기 위한 팝업창 생성.
     def addToFavourites(self):
       self.addFavourite = Tk.Toplevel(bg = 'white')
       self.addFavourite.title("Add Favourite")
@@ -807,6 +894,8 @@ class graphManager:
       bSubmit.pack(side = Tk.LEFT)
       bCancel = Tk.Button(fSubCanc, text = "Cancel", command = (lambda: self.addFavourite.destroy()))
         
+    # [한국어]
+    # addFavouriteTitDesc: 제목/설명을 입력받아 bookmarks.txt에 기록.
     def addFavouriteTitDesc(self):
       bool = 1
       self.favouriteTitle = self.eTitle.get()
@@ -826,6 +915,7 @@ class graphManager:
       self.dataPointer = self.dataChosen[0]
       
       if bool:
+        # [한국어] bookmarks.txt에 START 블록과 함께 현재 플롯 구성 기록
         file = open(os.environ['HOME'] + "/.gpgpu_sim/aerialvision/bookmarks.txt", 'a')
         file.write('START = "TRUE"\n')
         file.write('title = "' + self.favouriteTitle + '"\n')
@@ -842,6 +932,8 @@ class graphManager:
         file.close()
    
    
+    # [한국어]
+    # format_coordWilson: Parallel Intensity Plot 마우스 오버 시 좌표 문자열 생성.
     def format_coordWilson(self, x, y):
         col = int(x)*(self.simplerName[self.dataPointer.dataChosenX].data[1])
         row = int(y+0.5)
@@ -853,13 +945,14 @@ class graphManager:
           numcols = 1
 
         if x>=0 and x<numcols and y>=0 and y<numrows:
-            #z = self.simplerName[self.dataPointer.dataChosenY].data[int(y)][int(x)]
-            #return 'x=%d, y=%d, z=%1.3f'%(col, row, z)
             return 'x=%d, y=%d'%(col, row)
         else:
             return 'x=%d, y=%d'%(col, row)
 
 
+    # [한국어]
+    # plotData: 전체 플롯을 생성하는 메인 함수.
+    # 모든 서브플롯을 순회하며 xlim을 결정하고, 변수 타입(1~5)에 따라 플로팅 함수 분기.
     def plotData(self):
         
         #Variable initializations
@@ -872,6 +965,7 @@ class graphManager:
         self.simplerName = self.data[self.dataPointer.fileChosen]
         self.colorbars = {}
         
+        # [한국어] 1단계: 모든 플롯의 xlim과 cycleStep을 계산
         for self.currPlot in range(1,numPlots + 1):
           self.xAxisStepsWilStack.append(8)
           self.yAxisStepsWilStack.append('null')
@@ -895,6 +989,7 @@ class graphManager:
         self.dataPointer = self.dataChosen[0]
         self.simplerName = self.data[self.dataPointer.fileChosen]
         
+        # [한국어] 2단계: 각 플롯을 실제로 그림
         for self.currPlot in range(1,numPlots + 1):
           self.findKernalLocs()
           if (self.currPlot in self.plotRef):
@@ -904,6 +999,7 @@ class graphManager:
           self.plotFormatInfo[self.currPlot].graphType = self.dataPointer.graphChosen
           if self.dataPointer.graphChosen == 'Parallel Intensity Plot':
               self.plot.format_coord = self.format_coordWilson
+          # [한국어] 변수 타입에 따라 플로팅 함수 분기
           yDataType = self.simplerName[self.dataPointer.dataChosenY].type
           if yDataType == 1:
               self.type1Variable(self.simplerName[self.dataPointer.dataChosenX].data , self.dataPointer.dataChosenX, self.simplerName[self.dataPointer.dataChosenY].data, self.dataPointer.dataChosenY, self.simplerName[self.dataPointer.dataChosenY].bool, self.currPlot)
@@ -922,9 +1018,9 @@ class graphManager:
               self.dataPointer = self.dataChosen[1][self.currPlot - 1]
               self.simplerName = self.data[self.dataPointer.fileChosen]
     
-        #self.figure.subplots_adjust(top = 0.80)
-    
 
+    # [한국어]
+    # type1Variable: scalar(1차원 시계열) 데이터를 Line 또는 Parallel Intensity Plot으로 그림.
     def type1Variable(self, x, xAxis, y, yAxis, boolK, plotID):
     
         graphOption = 'NULL'
@@ -968,6 +1064,8 @@ class graphManager:
               
   
       
+    # [한국어]
+    # type2Variable: vector(2차원, SM/뱅크별) 데이터를 Line 또는 Parallel Intensity Plot으로 그림.
     def type2Variable(self, x, xAxis, y, yAxis, plotID):
 
         graphOption = "NULL"
@@ -1013,6 +1111,8 @@ class graphManager:
 
 
 
+    # [한국어]
+    # type3Variable: stackedbar(3차원) 데이터를 Stacked Bar Plot으로 그림.
     def type3Variable(self, x, xAxis, y, yAxis, plotID):
         #Type 3 variables are currently those that are used for STACKED BAR PLOTS
     
@@ -1036,10 +1136,11 @@ class graphManager:
         #Non-Scalar Vars
         ind = [tmp for tmp in range(0,numCols)] #the location of the bar and the x axis labels        
         yoff = numpy.array([0.0] * numCols) #variable use to remember the last top location of a bar so that we may stack the proceeding bar on top of it
-        #Legendname = ['UNUSED', 'UNUSED', 'FQPUSHED','ICNT_PUSHED','ICNT_INJECTED','ICNT_AT_DEST','DRAMQ','DRAM_PROCESSING_START','DRAM_PROCESSING_END','DRAM_OUTQ','2SH_ICNT_PUSHED','2SH_ICNT_INJECTED','2SH_ICNT_AT_DEST','2SH_FQ_POP','RETURN_Q']; 
+        # [한국어] 기본 범례 이름. 일부 하드코딩된 메모리 파이프라인 단계명.
         Legendname = ['N/A', 'N/A','N/A','IcntInpBuf','N/A','Icnt2DRAM','N/A','N/A','N/A','DRAM','2Sh_IcntInpBuf','N/A','Icnt2shd','N/A','N/A']; 
         BarSequence = list(range(numRows-1,-1,-1))
 
+        # [한국어] 변수별로 맞춤형 범례 이름과 쌓기 순서 설정
         if yAxis == 'WarpDivergenceBreakdown':
             Legendname = []
             Legendname.append('Idle')
@@ -1066,6 +1167,7 @@ class graphManager:
         for row in range(numRows-1,-1,-1):
             yoff_max += y[row]
     
+        # [한국어] 누적 막대 그래프 그리기
         for row in BarSequence:
             row1 = float(row) #Used to select a new color from the colormap.. need to be a float thats why a new variable was made
             yoff = yoff + y[row] #updating the yoff variable
@@ -1104,6 +1206,8 @@ class graphManager:
      
         self.canvas.draw()
         
+    # [한국어]
+    # type4Variable: vector2d(4차원, chip.bank별) 데이터를 Parallel Intensity Plot으로 그림.
     def type4Variable(self, x, xAxis, y, yAxis, plotID):
         keys = list(y.keys())
         keys.sort()
@@ -1148,6 +1252,8 @@ class graphManager:
         self.plotParallelIntensity(x, xAxis, image, yAxis, yAxis, keys, plotID)
       
 
+    # [한국어]
+    # type5Variable: sparse(5차원) 데이터를 Scatter Plot으로 그림.
     def type5Variable(self, x, xAxis, y, yAxis, plotID):
             
         assert (self.dataPointer.graphChosen == self.possGraphs[6])
@@ -1158,6 +1264,9 @@ class graphManager:
         del xScatter
       
 
+    # [한국어]
+    # updateVarKernal: 커널 경계에서 globalCycle이 리셋되는 경우,
+    # 누적값을 이전 커널의 마지막 값에 더해 연속적인 X축을 만든다.
     def updateVarKernal(self,var):
           var = [val for val in var]
           if self.disconnect == 0:
@@ -1172,6 +1281,8 @@ class graphManager:
               return var
           
 
+    # [한국어]
+    # xIsKernal: 주어진 사이클 번호가 커널 시작 위치인지 확인.
     def xIsKernal(self,x,kernalStarts):
         bool = 0
         for y in kernalStarts:
@@ -1179,6 +1290,8 @@ class graphManager:
                 bool = 1
         return bool
     
+    # [한국어]
+    # findKernalLocs: globalCycle 데이터에서 커널 경계(감소 지점)를 찾아 self.kernalLocs에 저장.
     def findKernalLocs(self):
         
         self.kernalLocs = []
@@ -1191,6 +1304,8 @@ class graphManager:
             countIter += 1
         self.kernalLocs.append(len(self.simplerName[self.dataPointer.dataChosenX].data))
     
+    # [한국어]
+    # labelKernalsMult: 다중 변수 라인 그래프에서 커널 경계에 수직 점선과 라벨 추가.
     def labelKernalsMult(self,x, y):
         countKernal = 0
         label = ""
@@ -1218,6 +1333,8 @@ class graphManager:
             self.plot.plot(tmpx, tmpy, 'k:' )
         
         
+    # [한국어]
+    # labelKernals: 단일 변수 라인 그래프에서 커널 경계에 수직 점선과 라벨 추가.
     def labelKernals(self,x, y):
         countKernal = 0
         label = ""
@@ -1244,6 +1361,8 @@ class graphManager:
         self.plot.plot(tmpx, tmpy, 'k:' )
     
     
+    # [한국어]
+    # plot2VarLine: 단일 변수 Line 그래프 그리기.
     def plot2VarLine(self, x, xAxis, y, yAxis):
       self.plot.plot(x, y)
       self.plot.set_xlim(0, self.xlim)
@@ -1254,6 +1373,8 @@ class graphManager:
       self.canvas.draw()
     
     
+    # [한국어]
+    # plotMultVarLine: 다중 변수 Line 그래프 그리기.
     def plotMultVarLine(self, x, xAxis, y, yAxis):
       for num in range(0,len(y)):
           self.plot.plot(x, y[num])
@@ -1264,6 +1385,8 @@ class graphManager:
       self.canvas.draw()
 
 
+    # [한국어]
+    # plotScatter: Scatter Plot 그리기.
     def plotScatter(self, x, xAxis, y, yAxis, plotID):
         plotFormat = self.plotFormatInfo[self.currPlot]
         self.plot.scatter(x, y, s=5, marker='s', edgecolors='none')
@@ -1278,6 +1401,8 @@ class graphManager:
         self.canvas.draw()
       
     
+    # [한국어]
+    # takeDerivativeMult: 2D 데이터의 각 행에 대해 dy/dx 계산.
     def takeDerivativeMult(self,x,y):
         multDerivative = []
 
@@ -1289,9 +1414,12 @@ class graphManager:
         return multDerivative                
     
     
+    # [한국어]
+    # takeDerivative: 1D 시계열 y에 대해 x 간격으로 차분(derivative) 계산.
+    # @x: X축 데이터 (globalCycle)
+    # @y: Y축 데이터
+    # @b_acc: 누적값이 감소하면 prevY 리셋 (커널 리셋 대응)
     def takeDerivative(self,x,y,b_acc=1): #both variables have to already be organized for this to work!!!
-        #x = [val for val in x]
-        #y = [val for val in y]
         derivative = array.array('f')
         prevY = 0
         
@@ -1314,6 +1442,8 @@ class graphManager:
         return derivative
     
     
+    # [한국어]
+    # plotParallelIntensity: Parallel Intensity Plot(heatmap) 그리기.
     def plotParallelIntensity(self, x, xAxis, y, yAxis, colorAxis, yTicks, plotID):
         # Obtain plot format info
         plotFormat = self.plotFormatInfo[plotID]
@@ -1332,11 +1462,13 @@ class graphManager:
         ylabelValues = []
         ylabelPos = []
         
+        # [한국어] X축 binning 개수 클리핑
         if self.xAxisStepsWilStack[self.currPlot] < 1:
             self.xAxisStepsWilStack[self.currPlot] = 1
         if self.xAxisStepsWilStack[self.currPlot] > len(x):
             self.xAxisStepsWilStack[self.currPlot] = len(x)
         
+        # [한국어] Y축 binning 개수 클리핑
         if self.yAxisStepsWilStack[self.currPlot] == 'null':
             self.yAxisStepsWilStack[self.currPlot] = 8
         if self.yAxisStepsWilStack[self.currPlot] < 1:
@@ -1368,6 +1500,7 @@ class graphManager:
         # tmp = im.get_axes().get_position().get_points()
         tmp = im.get_window_extent().get_points()
 
+        # [한국어] 기존 colorbar 축 제거 후 새로 추가
         if (plotID in self.cbarAxes):
             self.figure.delaxes(self.cbarAxes[plotID])
         cax = self.figure.add_axes([0.91, tmp[0][1], 0.01, tmp[1][1] - tmp[0][1]])
@@ -1389,6 +1522,8 @@ class graphManager:
 
         self.canvas.draw()
         
+    # [한국어]
+    # updateWilTicks: 데이터 길이에 따라 0..N-1 눈금 위치 생성.
     def updateWilTicks(self, z):
         x= []
         pos = []
@@ -1405,6 +1540,8 @@ class graphManager:
             pos.append(y)
         return x, pos   
     
+    # [한국어]
+    # refreshInputs: 입력 파일을 다시 파싱/재배열하고 graphManager를 재초기화.
     def refreshInputs(self):
         
         numPlots = len(self.dataChosen[1]) + 1
@@ -1432,6 +1569,8 @@ class graphManager:
         self.currPlot = 1
         self.__init__(self.master, self.data, self.res, self.dataChosen)
     
+    # [한국어]
+    # checkEmpty: 리스트에 0/NULL이 아닌 값이 있는지 확인.
     def checkEmpty(self,list):
       bool = 0
       for x in list:
@@ -1439,12 +1578,16 @@ class graphManager:
               bool = 1
       return bool
       
+    # [한국어]
+    # type3findxlim: stacked bar에서 x축 상한을 cycleStep으로 정규화.
     def type3findxlim(self, max, cycleStep):
       cycleStep = float(cycleStep)
       factor = 1.0/cycleStep
       newXlim = self.xlim*factor
       return newXlim
   
+    # [한국어]
+    # wilsonScaleX: Parallel Intensity Plot용 데이터를 xlim 길이에 맞춰 0 패딩.
     def wilsonScaleX(self, yshort):
       numPixels = self.xlim/self.cycleStep
       if len(yshort[0]) < numPixels:
@@ -1455,6 +1598,8 @@ class graphManager:
       return yshort
       
     
+    # [한국어]
+    # changeColorMapMaxMin: colorbar 최소/최대값 및 colormap 변경 팝업.
     def changeColorMapMaxMin(self):
         #Variable initializations
         NEWFRAME = Tk.Toplevel(self.master, bg = 'white') 
@@ -1542,6 +1687,8 @@ class graphManager:
         bCancel = Tk.Button(bottomFrame, text = 'Cancel', command = lambda: NEWFRAME.destroy())
         bCancel.pack(side = Tk.BOTTOM)
         
+    # [한국어]
+    # normalizeSubplots: 모든 서브플롯을 동일한 vmax(전역 최대값)로 정규화.
     def normalizeSubplots(self, absoluteMax, dict, master):
         listKeys = list(dict.keys())
         for plotID in listKeys:
@@ -1550,6 +1697,8 @@ class graphManager:
         master.destroy()
         self.plotData()
         
+    # [한국어]
+    # collectDataChangeColormaps: 사용자가 입력한 max/min 값을 norm에 반영하고 replot.
     def collectDataChangeColormaps(self, dict, master):
         listKeys = list(dict.keys())
         for plotID in listKeys:
@@ -1563,6 +1712,8 @@ class graphManager:
         master.destroy()
         self.plotData() # Now replot with changes.....
         
+    # [한국어]
+    # takeDerivativeButton: dy/dx 적용 여부를 선택하는 팝업.
     def takeDerivativeButton(self):
         #Variable initializations
         NEWFRAME = Tk.Toplevel(self.master, bg = 'white') 
@@ -1603,6 +1754,8 @@ class graphManager:
         bCancel.pack(side = Tk.BOTTOM)
         
         
+    # [한국어]
+    # collectDataChangeDiv: 체크된 플롯의 dydx를 1 증가시키고 replot.
     def collectDataChangeDiv(self, vars,master):
 
         self.dataPointer = self.dataChosen[0]
@@ -1624,6 +1777,8 @@ class graphManager:
         ## Now replot with changes.....
         self.plotData()
       
+    # [한국어]
+    # changeBinning: Parallel Intensity Plot의 X/Y축 binning 개수 조정 팝업.
     def changeBinning(self):
         #Variable initializations
         NEWFRAME = Tk.Toplevel(self.master, bg = 'white') 
@@ -1662,11 +1817,15 @@ class graphManager:
               self.dataPointer = self.dataChosen[1][self.currPlot - 1]
               self.simplerName = self.data[self.dataPointer.fileChosen]
 
+    # [한국어]
+    # collectDataIncreaseXBinning: X축 binning 개수 증가.
     def collectDataIncreaseXBinning(self, currPlot):
         plotToIncrease = int(currPlot[0])
         self.xAxisStepsWilStack[plotToIncrease] = self.xAxisStepsWilStack[plotToIncrease] + 20
         self.plotDataForNewBinning(plotToIncrease)
 
+    # [한국어]
+    # collectDataDecreaseXBinning: X축 binning 개수 감소 또는 제거.
     def collectDataDecreaseXBinning(self, currPlot, remove = False):
         plotToDecrease = int(currPlot[0])
         if (remove == True):
@@ -1676,6 +1835,8 @@ class graphManager:
         self.plotDataForNewBinning(plotToDecrease)
         
   
+    # [한국어]
+    # collectDataIncreaseYBinning: Y축 binning 개수 증가.
     def collectDataIncreaseYBinning(self, currPlot):
         plotToIncrease = int(currPlot[0])
         if (self.yAxisStepsWilStack[plotToIncrease] == 1):
@@ -1684,6 +1845,8 @@ class graphManager:
         print(self.yAxisStepsWilStack[plotToIncrease])
         self.plotDataForNewBinning(plotToIncrease)
 
+    # [한국어]
+    # collectDataDecreaseYBinning: Y축 binning 개수 감소 또는 제거.
     def collectDataDecreaseYBinning(self, currPlot, remove = False):
         plotToDecrease = int(currPlot[0])
         print(self.yAxisStepsWilStack[plotToDecrease])
@@ -1694,6 +1857,8 @@ class graphManager:
         self.plotDataForNewBinning(plotToDecrease)
         
 
+    # [한국어]
+    # plotDataForNewBinning: binning 변경 후 지정한 플롯만 다시 그림.
     def plotDataForNewBinning(self, plotToChange):
         self.currPlot = 1
         numPlots = len(self.dataChosen[1]) + 1
@@ -1718,6 +1883,8 @@ class graphManager:
               self.simplerName = self.data[self.dataPointer.fileChosen]
               
               
+    # [한국어]
+    # editLabelsButton: 축 레이블/제목/폰트 크기 수정 팝업.
     def editLabelsButton(self):
         #Variable initializations
         NEWFRAME = Tk.Toplevel(self.master, bg = 'white') 
@@ -1795,6 +1962,8 @@ class graphManager:
         bCancel = Tk.Button(bottomFrame, text = 'Cancel', command = lambda: NEWFRAME.destroy())
         bCancel.pack(side = Tk.BOTTOM)
         
+    # [한국어]
+    # collectDataEditLabels: 입력된 레이블/폰트를 plotFormat에 반영하고 다시 그림.
     def collectDataEditLabels(self, entries, master):
 
         self.dataPointer = self.dataChosen[0]
@@ -1853,6 +2022,8 @@ class graphManager:
         ## Now replot with changes.....
         self.canvas.draw()
 
+    # [한국어]
+    # zoomButton: X/Y축 범위 조정 팝업.
     def zoomButton(self):
         #Variable initializations
         NEWFRAME = Tk.Toplevel(self.master, bg = 'white') 
@@ -1925,6 +2096,8 @@ class graphManager:
         bCancel = Tk.Button(bottomFrame, text = 'Cancel', command = lambda: NEWFRAME.destroy())
         bCancel.pack(side = Tk.BOTTOM)
         
+    # [한국어]
+    # zoomCollect: 사용자가 입력한 범위를 각 플롯에 적용.
     def zoomCollect(self, entries, master):
  
         numPlots = len(self.dataChosen[1]) + 1
@@ -1983,10 +2156,13 @@ class graphManager:
         self.canvas.draw()
     
 
+# [한국어] Source Code View 폰트 정보 클래스.
 class NaviPlotInfo:
 
     srcViewSection = 'SourceCodeView'
 
+    # [한국어]
+    # 생성자: config.rc의 SourceCodeView 섹션에서 폰트 크기 읽기.
     def __init__(self):
         self.titleFontSize = avconfig.get_value(self.__class__.srcViewSection, 'titleFontSize', 12)
         self.ylabelFontSize = avconfig.get_value(self.__class__.srcViewSection, 'yLabelFontSize', 12)
@@ -1994,10 +2170,13 @@ class NaviPlotInfo:
         self.yticksFontSize = avconfig.get_value(self.__class__.srcViewSection, 'yTicksFontSize', 10)
         self.xticksFontSize = avconfig.get_value(self.__class__.srcViewSection, 'xTicksFontSize', 10)
 
+# [한국어] Source Code View 탭 클래스.
 class newTextTab:
     
     srcViewSection = 'SourceCodeView'
 
+    # [한국어]
+    # 생성자: CUDA/PTX 파일 선택 UI와 통계 선택 UI를 구성.
     def __init__(self, textTabs, numb, res, TEFILES):  
         
         tabnum = "self.page " + numb
@@ -2016,25 +2195,17 @@ class newTextTab:
         self.naviPlotInfo = NaviPlotInfo()
         
         
+        # [한국어] 해상도별 배경 프레임 크기
         if self.res == "small":
             self.background = Tk.Frame(self.page, bg = "white", borderwidth = 5, relief = Tk.GROOVE, height = 700, width = 1200);
-            #annotationFrame = Tk.Frame(self.background, bg= 'white', height = 550, width = 400)
-            #textFrame = Tk.Frame(self.background, bg= 'white', height = 550, width = 300)
         elif self.res == 'medium':
             self.background = Tk.Frame(self.page, bg = "white", borderwidth = 5, relief = Tk.GROOVE, height = 943, width = 1530);
-            #annotationFrame = Tk.Frame(self.background, bg = 'white', height = 700, width = 500)
-            #textFrame = Tk.Frame(self.background, bg= 'white', height = 700, width = 800)
         else:
             self.background = Tk.Frame(self.page, bg = "white", borderwidth = 5, relief = Tk.GROOVE, height = 943, width = 1530);
-            #annotationFrame = Tk.Frame(self.background, bg= 'green', height = 864, width = 400)
-            #textFrame = Tk.Frame(self.background, bg= 'brown', height = 864, width = 900)
         self.background.pack()
         self.background.pack_propagate(0)
-        #annotationFrame.pack(side = Tk.LEFT)
-        #annotationFrame.pack_propagate(0)
-        #textFrame.pack(side = Tk.RIGHT)
-        #textFrame.pack_propagate(0)
         
+        # [한국어] CUDA 소스 파일 선택 Listbox
         chooseFileFrame = Tk.Frame(self.background, bg = 'white')
         chooseFileFrame.pack(side = Tk.TOP, anchor = Tk.W, pady = 10, padx = 5)
         lChooseFile = Tk.Label(chooseFileFrame, text = 'Choose a Text File to Display:    ', font = ("Gills Sans MT", 12), bg = 'white' )
@@ -2057,7 +2228,7 @@ class newTextTab:
         lOr = Tk.Label(chooseFileFrame, text = 'OR', font = ("Gills Sans MT", 20), bg= 'white')
         lOr.pack(side = Tk.LEFT)
         
-        
+        # [한국어] PTX 파일 선택 Listbox
         cAvailablePTXFilesFrame = Tk.Frame(fileListboxOuterFrame, bg = 'white')
         cAvailablePTXFilesFrame.pack(side = Tk.BOTTOM)
         cAvailablePTXFilesTitle = Tk.Label(cAvailablePTXFilesFrame, text= 'PTX', bg= 'white')
@@ -2069,6 +2240,7 @@ class newTextTab:
             
         self.cAvailablePTXFiles.bind("<Double-Button-1>", self.chooseFilePTX)
             
+        # [한국어] 통계/함수 선택 영역
         chooseStatsFrame = Tk.Frame(self.background, bg = 'white')
         chooseStatsFrame.pack(side = Tk.TOP, anchor = Tk.W, pady = 5, padx =5)
         lChooseStats = Tk.Label(chooseStatsFrame, text = "Choose Data to be Shown:  ", font = ("Gills Sans MT", 12), bg= 'white')
@@ -2081,7 +2253,7 @@ class newTextTab:
         self.cAvailableMethodsOnStats.pack(side = Tk.BOTTOM, anchor = Tk.W)
         self.cAvailableMethodsOnStats.bind("<Double-Button-1>", self.chooseMethod)
         
-        
+        # [한국어] 사용 가능한 통계 변수 리스트박스 1, 2
         availStatsListboxFrame1 = Tk.Frame(chooseStatsFrame, bg = 'white')
         availStatsListboxFrame1.pack(side = Tk.LEFT)
         lavailStatsTitle1 = Tk.Label(availStatsListboxFrame1, text = 'Available Stats', bg= 'white')
@@ -2119,6 +2291,8 @@ class newTextTab:
         
 
         
+    # [한국어]
+    # statString: Source Code View 하단 통계 텍스트박스에 표시할 한 행 문자열 생성.
     def statString(self, lineNum, statData):
         if (self.showLineStatName == 1):
             statName = self.chosenStat1
@@ -2129,8 +2303,11 @@ class newTextTab:
             finalString = 'Line#: ' + str(lineNum) + ' : '  + str(statData) + '\n'
         return finalString
         
+    # [한국어]
+    # showData: 선택한 소스코드와 통계를 보여주는 메인 Source Code View UI 구성.
     def showData(self):
         self.background.destroy()
+        # [한국어] 해상도별 프레임 크기
         if self.res == "small":
             self.background = Tk.Frame(self.page, bg = "white", borderwidth = 5, relief = Tk.GROOVE, height = 725, width = 1225);
             topFrame = Tk.Frame(self.background, bg = 'white', height = 442, width = 1225)
@@ -2175,6 +2352,7 @@ class newTextTab:
         
         
         
+        # [한국어] 소스코드 텍스트박스와 통계 텍스트박스, 공통 스크롤바 연결
         scrollbar = Tk.Scrollbar(statsFrame, orient = Tk.VERTICAL )
         scrollbar.pack(side = Tk.RIGHT, fill = 'y')
         self.textbox = Tk.Text(textFrame, height = 36, width = 150,yscrollcommand = scrollbar.set, wrap = Tk.NONE)
@@ -2191,6 +2369,7 @@ class newTextTab:
         
     
 
+        # [한국어] 소스 파일과 대응 stat 파일 열기
         self.file = open(self.fileChosen, 'r')
         self.Lines = {}
         if self.typeFileChosen == 'cuda':
@@ -2202,6 +2381,7 @@ class newTextTab:
         self.stats = lexyacctexteditor.textEditorParseMe(self.statFile)
         
         
+        # [한국어] CUDA 파일이면 PTX->CUDA 매핑을 이용해 cudaLineNo 객체 생성
         if self.typeFileChosen == 'cuda':
             self.map = lexyacctexteditor.ptxToCudaMapping(self.TEFILES[1][self.TEFILES[2].index(self.statFile) ] )
             for keys in self.map:
@@ -2222,6 +2402,7 @@ class newTextTab:
         
         
         
+        # [한국어] 소스코드 텍스트박스에 라인 번호와 함께 내용 삽입
         countLines = 1
         for lines in self.file.readlines():
             lines = lines.decode()
@@ -2230,6 +2411,7 @@ class newTextTab:
         countLines -= 1
         self.countLines = countLines
         
+        # [한국어] 하단 히스토그램(라인별 통계 막대 그래프) 생성
         figure = Figure(figsize=(22,5), dpi = 70)
         self.histArea = FigureCanvasTkAgg(figure, master= bottomFrame)
         self.histArea.get_tk_widget().pack()
@@ -2238,6 +2420,7 @@ class newTextTab:
         self.histogram = figure.add_subplot(111)
         cid = figure.canvas.mpl_connect('button_press_event',self.onclick)
         
+        # [한국어] 라인별 통계값 계산
         self.lineCounts = [0.1]
         for count in range(1,countLines):
             if count in self.Lines:
@@ -2277,6 +2460,7 @@ class newTextTab:
             self.histogram.set_title(self.chosenStat1 + '/' + self.chosenStat2)
         self.histArea.show()
         
+        # [한국어] 통계 텍스트박스에 라인별 값 삽입
         count = 0
         for iter in (self.lineCounts + [0]):
             if count == 0:
@@ -2285,10 +2469,14 @@ class newTextTab:
               self.statstextbox.insert(Tk.END, self.statString(count, iter), ('normal'))
             count += 1
 
+    # [한국어]
+    # yview: 소스코드 텍스트박스와 통계 텍스트박스를 동시에 스크롤.
     def yview(self, *args):
         self.textbox.yview(*args)
         self.statstextbox.yview(*args)
         
+    # [한국어]
+    # onclick: 히스토그램에서 마우스 오른쪽 버튼 클릭 시 해당 라인을 소스/통계 텍스트박스에서 하이라이트.
     def onclick(self, event):
       if event.button == 3:
         
@@ -2322,6 +2510,8 @@ class newTextTab:
         self.textbox.yview(*args)
         self.statstextbox.yview(*args)
       
+    # [한국어]
+    # chooseFileCuda: CUDA 소스 파일 선택.
     def chooseFileCuda(self, *event):
       self.fileChosen = self.cAvailableCudaFiles.get('active')
       self.typeFileChosen = 'cuda'
@@ -2343,6 +2533,8 @@ class newTextTab:
       
       
       
+    # [한국어]
+    # chooseFilePTX: PTX 파일 선택.
     def chooseFilePTX(self, *event):
       self.fileChosen = self.cAvailablePTXFiles.get('active')
       self.typeFileChosen = 'ptx'
@@ -2363,15 +2555,21 @@ class newTextTab:
       
 
 
+    # [한국어]
+    # chooseStats1: 첫 번째 통계 변수 선택.
     def chooseStats1(self, *event):
         self.chosenStat1 = self.cAvailableStats1.get('active')
         self.updateChosen()
         
+    # [한국어]
+    # chooseStats2: 두 번째 통계 변수 선택(Ratio 메서드용).
     def chooseStats2(self, *event):
         self.chosenStat2 = self.cAvailableStats2.get('active')
         self.updateChosen()
       
 
+    # [한국어]
+    # chooseMethod: 통계 처리 메서드(Sum/Max/Ratio/Stat) 선택 후 통계 변수 리스트 채움.
     def chooseMethod(self, *event):
         self.chosenMethod = self.cAvailableMethodsOnStats.get('active')
             
@@ -2404,6 +2602,8 @@ class newTextTab:
           
     
     
+    # [한국어]
+    # updateChosen: Source Code View의 'Chosen Data' 텍스트 박스 업데이트.
     def updateChosen(self):
         self.cChosenData.delete(0.0, Tk.END)
         if self.fileChosen == '':
@@ -2429,6 +2629,8 @@ class newTextTab:
         else:
           self.cChosenData.insert(Tk.END, 'Method: ' + self.chosenMethod + '\n', ('complete'))
         
+    # [한국어]
+    # toolboxTopLevel: Source Code View 히스토그램용 도구상자 팝업.
     def toolboxTopLevel(self):
         NEWFRAME = Tk.Toplevel(self.background, bg = 'white')
         changefontsize = Tk.Button(NEWFRAME, text = 'Edit Font Size', command = lambda: ( self.editPlotFontSizes(NEWFRAME)))
@@ -2438,6 +2640,8 @@ class newTextTab:
         changeBinning = Tk.Button(NEWFRAME, text = 'Edit X-Axis Binning', command = lambda: (self.changePlotBinning(NEWFRAME)))
         changeBinning.pack(side = Tk.LEFT, padx = 5, pady = 5)
           
+    # [한국어]
+    # editPlotLabels: 히스토그램 제목/축 레이블 수정 팝업.
     def editPlotLabels(self, oldframe):
         oldframe.destroy()
         NEWFRAME = Tk.Toplevel(self.background, bg = 'white')
@@ -2465,6 +2669,8 @@ class newTextTab:
         bSubmit = Tk.Button(bottomFrame, text = 'Submit', bg = 'green', command = lambda: self.editPlotLabelsSubmit(NEWFRAME, {'title': eTitle.get(), 'xlabel': eXaxis.get(), 'ylabel': eYAxis.get()}))
         bSubmit.pack(side = Tk.TOP, pady = 5)
         
+    # [한국어]
+    # editPlotLabelsSubmit: 입력된 레이블을 히스토그램에 반영.
     def editPlotLabelsSubmit(self, oldFrame, entries):
         oldFrame.destroy()
         self.histogram.set_title(entries['title'], fontsize = self.naviPlotInfo.titleFontSize)
@@ -2473,6 +2679,8 @@ class newTextTab:
         self.histArea.show()
         
         
+    # [한국어]
+    # editPlotFontSizes: 히스토그램 폰트 크기 수정 팝업.
     def editPlotFontSizes(self, oldFrame):
         oldFrame.destroy()
         NEWFRAME = Tk.Toplevel(self.background, bg = 'white')
@@ -2508,6 +2716,8 @@ class newTextTab:
         bSubmit = Tk.Button(bottomFrame, text = 'Submit', bg = 'green', command = lambda: self.editPlotFontSizesSubmit(NEWFRAME, {'title': eTitle.get(), 'xlabel': eXaxis.get(), 'ylabel': eYAxis.get(), 'ybinning' : eYBinning.get(), 'xbinning': eXBinning.get()}))
         bSubmit.pack(side = Tk.TOP, pady = 5)
     
+    # [한국어]
+    # editPlotFontSizesSubmit: 입력된 폰트 크기를 히스토그램에 반영.
     def editPlotFontSizesSubmit(self, oldframe, entries):
         oldframe.destroy()
         if entries['title'] != '':
@@ -2530,6 +2740,8 @@ class newTextTab:
             
         self.histArea.show()
     
+    # [한국어]
+    # changePlotBinning: X축 눈금 빈도 조정 팝업.
     def changePlotBinning(self,oldframe):
         oldframe.destroy()
         master = Tk.Toplevel(self.background, bg = 'white')
@@ -2546,6 +2758,8 @@ class newTextTab:
         bSubmit = Tk.Button(bottomFrame, text = 'Submit', bg = 'green', command = lambda: master.destroy())
         bSubmit.pack(side = Tk.TOP, pady = 5)
 
+    # [한국어]
+    # generate_xticklabels: x축 눈금 라벨 생성.
     def generate_xticklabels(self, fontsize = -1):
         ind = [x * self.xlabelfreq for x in range(0, self.countLines / self.xlabelfreq)]
         self.histogram.set_xticks(ind)
@@ -2558,6 +2772,8 @@ class newTextTab:
         else:
             self.histogram.set_xticklabels(labels)
         
+    # [한국어]
+    # increaseBinning: x축 눈금 빈도 증가(간격 축소).
     def increaseBinning(self):
         self.xlabelfreq = int(self.xlabelfreq / 1.5)
         if self.xlabelfreq < 1:
@@ -2565,6 +2781,8 @@ class newTextTab:
         self.generate_xticklabels()
         self.histArea.show()        
 
+    # [한국어]
+    # decreaseBinning: x축 눈금 빈도 감소(간격 확대).
     def decreaseBinning(self):
         self.xlabelfreq = int(self.xlabelfreq * 1.5)
         self.generate_xticklabels()
@@ -2574,4 +2792,3 @@ class newTextTab:
             
             
         
-

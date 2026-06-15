@@ -41,6 +41,11 @@
  * === 타 모듈과의 연결 ===
  * - Arbiter (상속): _request, _size, _selected, _num_reqs
  * - Arbiter::NewArbiter(): 그룹/전역 중재자 동적 생성
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type = "tree(groups,sub_arb_type)" 형식일 때 NewArbiter()가 이 클래스를 생성.
+ *     * sub_arb_type은 그룹/전역 중재자로 사용될 "round_robin" 또는 "matrix"를 지정.
+ *     * vc_allocator/sw_allocator/spec_sw_allocator와 alloc_iters 옵션이
+ *       상위 할당기에서 TreeArbiter를 얼마나 자주/몇 단계로 사용할지 결정.
  *
  * === 주요 함수/구조체 요약 ===
  * - _group_size: size/groups — 각 그룹의 입력 수

@@ -38,6 +38,10 @@
  *
  * === 타 모듈과의 연결 ===
  * - roundrobin_arb.hpp, matrix_arb.hpp, tree_arb.hpp: NewArbiter() 팩토리에서 인스턴스화
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type            — "round_robin"/"matrix"/"tree(...)" 문자열로 NewArbiter() 경로 결정
+ *     * vc_allocator, sw_allocator, spec_sw_allocator — 할당기 종류에 따라 Arbiter 생성 빈도/종류 변경
+ *     * alloc_iters         — 1사이클당 Clear→AddRequest→Arbitrate→UpdateState 반복 횟수
  *
  * === 주요 함수/구조체 요약 ===
  * - Arbiter(): _size/selected/_highest_pri/_best_input/_num_reqs 초기화; _request 배열 할당
@@ -147,6 +151,7 @@ void Arbiter::Clear()
  *
  * "tree(N,type)" 형식은 파싱을 통해 N개 그룹과 서브 중재자 타입을 추출한다.
  * 예: "tree(4,round_robin)" → 4그룹, 각 그룹에 RoundRobinArbiter 사용하는 TreeArbiter.
+ * 이 문자열은 BookSimConfig / gpgpusim.config의 arb_type 옵션에서 직접 전달된다.
  * 호출 체인: SeparableAllocator() → NewArbiter(); TreeArbiter() → NewArbiter()
  */
 Arbiter *Arbiter::NewArbiter( Module *parent, const string& name,

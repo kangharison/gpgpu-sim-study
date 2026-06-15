@@ -40,6 +40,11 @@
  *
  * === 타 모듈과의 연결 ===
  * - Arbiter (상속): _request, _size, _selected, _num_reqs
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type = "matrix"일 때 NewArbiter()가 이 클래스를 인스턴스화한다.
+ *     * vc_allocator/sw_allocator/spec_sw_allocator가 "matrix" 기반 할당기를 선택하면
+ *       해당 할당기의 입력/출력 중재자로 MatrixArbiter가 사용된다.
+ *     * alloc_iters는 1사이클당 Clear→AddRequest→Arbitrate→UpdateState 반복 횟수를 결정.
  *
  * === 주요 함수/구조체 요약 ===
  * - _matrix[i][j]: 우선순위 행렬. 1이면 i보다 j가 우선. 생성자에서 하삼각을 1로 초기화.

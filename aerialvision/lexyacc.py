@@ -51,6 +51,37 @@
 # its contributors may be used to endorse or promote products derived from
 # this software without specific prior written permission.
 
+"""
+[한국어 설명] AerialVision GPGPU-Sim 로그 파서 (lexyacc.py)
+
+=== 파일의 역할 ===
+GPGPU-Sim이 출력하는 시뮬레이션 로그 파일(gzipped 또는 plain text)을 파싱하여
+AerialVision에서 그래프로 그릴 수 있는 통계 변수 딕셔너리를 생성한다.
+난 내장된 변수 목록(shaderInsn, globalCycle, L1/L2 미스, DRAM 통계 등)을 포함하고,
+사용자 정의 변수(variables.txt)를 추가로 로드할 수 있다.
+CFLOG(Control Flow LOG) 섹션도 선택적으로 파싱한다.
+
+=== 전체 아키텍처에서의 위치 ===
+  GPGPU-Sim 시뮬레이션 출력 (stats/log 파일)
+        ↓
+  aerialvision/lexyacc.py (이 파일) - 로그 파싱
+        ↓
+  aerialvision/organizedata.py - 데이터 재배열
+        ↓
+  aerialvision/guiclasses.py - 시각화
+
+=== 타 모듈과의 연결 ===
+- organizedata.py: organizedata()가 반환된 variables 딕셔너리를 후처리
+- guiclasses.py: formEntry/graphManager가 variables[파일명][변수명].data 접근
+- variableclasses.py: variable 클래스 정의
+- startup.py: skipCFLOGParsing 플래그 설정
+
+=== 주요 함수/구조체 요약 ===
+- import_user_defined_variables(variables): ~/.gpgpu_sim/aerialvision/variables.txt 로드
+- parseMe(filename): 로그 파일 파싱, {이름: variable} 딕셔너리 반환
+- Lex/Yacc 토큰: WORD, NUMBERSEQUENCE
+"""
+
 import os
 import os.path
 import sys
@@ -62,9 +93,11 @@ import gc
 
 import variableclasses as vc
 
+# [한국어] CFLOG 파싱 스킵 플래그. startup.py의 "Skip CFLog parsing" 체크박스로 제어.
 global skipCFLOGParsing
 skipCFLOGParsing = 0
 
+# [한국어] AerialVision 사용자 설정 디렉토리 경로.
 userSettingPath = os.path.join(os.environ['HOME'], '.gpgpu_sim', 'aerialvision')
 
 
@@ -77,6 +110,11 @@ userSettingPath = os.path.join(os.environ['HOME'], '.gpgpu_sim', 'aerialvision')
 #   implicit or index (for vector plot or stackedbar), 
 #   index2d (for vector2d plot)
 # <data type> can be: int or float
+
+# [한국어]
+# import_user_defined_variables: 사용자 설정 파일 variables.txt에서
+# 추가 통계 변수 정의를 읽어 기본 variables 딕셔너리에 병합한다.
+# @variables: parseMe() 내에서 생성될 variables 딕셔너리(참조)
 def import_user_defined_variables(variables):
     # attempt to open the user defined variables definition file
     try:
@@ -109,6 +147,10 @@ def import_user_defined_variables(variables):
             print("error:",e,", in variables.txt line:",line)
 
 # Parses through a given log file for data
+# [한국어]
+# parseMe: GPGPU-Sim 시뮬레이션 로그 파일을 파싱하여 통계 변수 딕셔너리를 반환.
+# @filename: 로그 파일 경로 (.gz 압축도 지원)
+# @return: {변수이름: variable 객체} 딕셔너리
 def parseMe(filename):
     
     #The lexer
@@ -119,6 +161,7 @@ def parseMe(filename):
     ]
     
     # Regular expression rules for tokens
+    # [한국어] Lex 토큰: WORD=메트릭 이름, NUMBERSEQUENCE=공백 구분 숫자열
     
     
     def t_WORD(t):
@@ -147,6 +190,8 @@ def parseMe(filename):
     
     # Declaring the properties of supported stats in a single dictionary
     # FORMAT: <stat name in GUI>:vc.variable(<Stat Name in Log>, <type>, <reset@kernelstart>, [datatype]) 
+    # [한국어] AerialVision 기본 지원 통계 변수 테이블.
+    # key: GUI 표시명, value: variable(로그태그, 타입, 리셋플래그, 조직방식, 데이터타입)
     variables = {
         'shaderInsn':vc.variable('shaderinsncount', 2, 0, 'impVec'), 
         'globalInsn':vc.variable('globalinsncount', 1, 1, 'scalar'), 
@@ -202,6 +247,7 @@ def parseMe(filename):
     import_user_defined_variables(variables)
 
     # generate a lookup table based on the specified name in log file for each stat
+    # [한국어] 로그 파일 내 실제 태그 이름으로 variable을 빠르게 찾기 위한 룩업 테이블 구성
     stat_lookuptable = {}
     for name, var in variables.items():
         if (name == 'CFLOG'):
@@ -231,9 +277,11 @@ def parseMe(filename):
         lookup_input = p[1].lower()
         if (lookup_input  in stat_lookuptable):
             if (lookup_input == "globalcyclecount") and (int(num[0]) % 10000 == 0):
+                # [한국어] 글로벌 사이클 10000단위마다 진행 상황 출력
                 print("Processing global cycle %s" % num[0])
                 
             stat = stat_lookuptable[lookup_input]
+            # [한국어] 변수 타입별로 데이터 append 방식 분기
             if (stat.type == 1):
                 for x in num:
                     stat.data.append(stat.datatype(x))
@@ -265,6 +313,7 @@ def parseMe(filename):
                 stat.sampleNum += 1
 
         elif (lookup_input[0:5] == 'cflog'):
+            # [한국어] CFLOG 섹션 파싱. skipCFLOGParsing==1이면 무시.
             if (skipCFLOGParsing == 1): 
                 return
             count = 0
@@ -302,6 +351,7 @@ def parseMe(filename):
     yacc.yacc()
 
     # detect for gzip'ed log file and gunzip on the fly
+    # [한국어] .gz 확장자면 gzip으로, 아니면 일반 파일로 읽기
     if (filename.endswith('.gz')):
         file = gzip.open(filename, 'r')
     else:
@@ -316,13 +366,13 @@ def parseMe(filename):
         namePart = nameNdata[0].strip()
         dataPart= nameNdata[1].strip()
         parts = [' ', namePart, dataPart]
+        # [한국어] yacc 대신 직접 p_sentence 호출: parts[1]=WORD, parts[2]=NUMBERSEQUENCE
         p_sentence(parts)
         # yacc.parse(line[0:-1])
     file.close()    
 
     return variables
   
-
 
 
 

@@ -38,6 +38,10 @@
  *
  * === 타 모듈과의 연결 ===
  * - Arbiter (상속): AddRequest(), Arbitrate(), Clear() super 호출
+ * - BookSimConfig / gpgpusim.config:
+ *     * arb_type = "matrix"일 때 NewArbiter()가 이 클래스를 생성한다.
+ *     * alloc_iters 횟수만큼 매 사이클 Arbitrate() 이후 UpdateState()가 반복 호출되어
+ *       우선순위 행렬이 갱신된다.
  *
  * === 주요 함수/구조체 요약 ===
  * - MatrixArbiter(): _matrix[i][j]=1 for i>j (초기 우선순위 설정)

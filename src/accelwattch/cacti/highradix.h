@@ -66,6 +66,13 @@
  * sub_switch_power()   : 서브스위치 1개의 전력 계산 (r_buff + c_buff + cb + out_cb + arb)
  * buffer_(block_sz, sz): Mat(SRAM) 기반 버퍼 생성 헬퍼
  * print_router()       : 상세 전력·면적 통계 출력
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * HighRadix는 NUCA NoC 모델의 대안으로, AccelWattch XML의 <param name="nuca">,
+ * <param name="cache_policy"> 등이 NUCA 활성화 여부를 제어한다.
+ * g_ip->F_sz_nm, g_tp.peri_global 등은 io.cc/parameter.cc에서 XML/구성 파일을
+ * 통해 초기화되며, gpgpusim.config의 --power_config_name <xml> 옵션이
+ * AccelWattch 전력 모델 초기화를 트리거하여 이 모델까지 호출될 수 있다.
  */
 
 #ifndef __HIGHRADIX__

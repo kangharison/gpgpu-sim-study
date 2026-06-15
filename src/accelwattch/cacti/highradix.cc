@@ -39,6 +39,38 @@
  * SOFTWARE.
  *------------------------------------------------------------*/
 
+/*
+ * [한국어 설명] 고기수(High-Radix) NoC 라우터 전력·면적 모델 구현 (highradix.cc)
+ *
+ * === 파일의 역할 ===
+ * highradix.h에 선언된 HighRadix 클래스의 실제 구현을 담는다.
+ * 서브스위치 기반 고기수 라우터의 생성자, compute_power(), sub_switch_power(),
+ * 그리고 버퍼/버스/중재기/크로스바 헬퍼 함수들을 정의한다.
+ * NUCA의 대안 NoC 모델로 사용되며, 전력은 Component::power에 누적된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * HighRadix 생성자 호출 → compute_power() → 서브컴포넌트별 power/area 계산
+ * 호스트 유저스페이스, 단일 스레드.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존: Crossbar, MCPAT_Arbiter, Wire, Mat, ROUTER.def, basic_circuit, parameter.h
+ * 공유: g_ip->F_sz_nm, g_tp.peri_global
+ *
+ * === 주요 함수/구조체 요약 ===
+ * HighRadix()          : 생성자 — 공정별 면적 스케일링, 서브스위치 수 계산
+ * compute_power()      : 전체 라우터 전력 합산
+ * sub_switch_power()   : 서브스위치 1개 전력
+ * buffer_(block_sz,sz) : Mat(SRAM) 버퍼 생성
+ * print_router()       : 결과 출력
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * HighRadix는 NUCA NoC 모델의 대안으로, AccelWattch XML의 <param name="nuca">,
+ * <param name="cache_policy"> 등이 NUCA 활성화 시 간접적으로 영향을 준다.
+ * 공정 노드(g_ip->F_sz_nm)와 온도(g_ip->temp)는 XML/구성 파일에서 읽어
+ * io.cc/parameter.cc를 통해 설정되며, gpgpusim.config의 --power_config_name
+ * 옵션이 AccelWattch 전력 모델 초기화를 트리거한다.
+ */
+
 #include "highradix.h"
 #include <iomanip>
 using namespace std;

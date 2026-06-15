@@ -25,20 +25,70 @@
   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <sstream>
-#include <cmath>
-#include <fstream>
-#include <limits>
-#include <cstdlib>
+/*
+ * [한국어 설명] BookSim2 트래픽 매니저 기반 클래스 구현 (trafficmanager.cpp)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 TrafficManager 클래스의 모든 구현을 담고 있다.
+ * NoC 시뮬레이션의 핵심 루프(_Step), 합성 트래픽 주입(_Inject/_IssuePacket),
+ * 패킷 생성(_GeneratePacket), Flit 은퇴(_RetireFlit), 통계 수집 및 출력,
+ * 그리고 수렴 판정을 위한 _SingleSim/Run 루프를 포함한다.
+ * GPGPU-Sim 통합 모드에서는 GPUTrafficManager가 이 클래스를 상속받아
+ * _Step, _GeneratePacket, _RetireFlit 등을 GPU 시뮬레이션에 맞게 오버라이드한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 호출 체인:
+ *   TrafficManager::New() → GPUTrafficManager 생성 (sim_type == "gpgpusim")
+ *   InterconnectInterface::Init() → GPUTrafficManager::Init()
+ *   InterconnectInterface::Advance() → GPUTrafficManager::_Step()
+ *   InterconnectInterface::Push() → GPUTrafficManager::_GeneratePacket()
+ *
+ * 합성 트래픽(standalone BookSim) 호출 체인:
+ *   main() → TrafficManager::Run() → _SingleSim() → _Step() 반복
+ *          → _Inject() → _IssuePacket() → _GeneratePacket()
+ *          → 네트워크 Evaluate/WriteOutputs
+ *
+ * 실행 컨텍스트: GPGPU-Sim 또는 BookSim 메인 시뮬레이션 루프 (단일 스레드).
+ *
+ * === 타 모듈과의 연결 ===
+ * - Network (network.hpp): _net[] 벡터로 실제 라우터 네트워크 참조 및 제어
+ * - Flit (flit.hpp): 패킷 구성 요소로 Flit::New()/Free() 사용
+ * - BufferState (buffer_state.hpp): _buf_states로 VC 크레딧 및 사용 가능 여부 추적
+ * - Stats (stats.hpp): _plat_stats, _nlat_stats, _flat_stats 등 통계 객체
+ * - routefunc.hpp: _rf 라우팅 함수 포인터 (gRoutingFunctionMap에서 조회)
+ * - InjectionProcess (injection.hpp): 합성 트래픽 주입 결정
+ * - TrafficPattern (traffic.hpp): 합성 트래픽 목적지 결정
+ * - vc.hpp: VC 상태 및 라우팅 함수 인터페이스
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - New(): 설정에 따라 TrafficManager/BatchTrafficManager/GPUTrafficManager 생성
+ * - TrafficManager(): 생성자 — 설정 파일에서 모든 파라미터 읽어 초기화
+ * - _Step(): 1 NoC 사이클 진행 (네트워크 입력/주입/라우팅/출력/시간 증가)
+ * - _Inject(): 합성 트래픽 주입 준비 (_IssuePacket 호출)
+ * - _IssuePacket(): 소스 노드에서 생성할 패킷 수 결정 (GPUTrafficManager는 0 반환)
+ * - _GeneratePacket(): Flit 리스트 생성 및 _partial_packets에 삽입
+ * - _RetireFlit(): 목적지 도달 Flit의 통계 기록 및 메모리 해제
+ * - _PacketsOutstanding(): 아직 네트워크에 남아 있는 패킷/Flit 확인
+ * - _SingleSim(): warming_up → running → draining → done 한 사이클 수행
+ * - Run(): _total_sims번 _SingleSim 반복 후 overall 통계 출력
+ * - WriteStats()/UpdateStats()/DisplayStats(): 통계 출력 및 갱신
+ * - _LoadWatchList(): 디버깅용 flit/packet watch 목록 로드
+ */
 
-#include "booksim.hpp"
-#include "booksim_config.hpp"
-#include "trafficmanager.hpp"
-#include "batchtrafficmanager.hpp"
-#include "gputrafficmanager.hpp"
-#include "random_utils.hpp" 
-#include "vc.hpp"
-#include "packet_reply_info.hpp"
+#include <sstream>   // [한국어] ostringstream (에러 메시지 포맷)
+#include <cmath>     // [한국어] fabs() (수렴 판정 시 변화율 계산)
+#include <fstream>   // [한국어] ifstream (_LoadWatchList 파일 읽기)
+#include <limits>    // [한국어] numeric_limits<int>::max() (우선순위 역전 기법)
+#include <cstdlib>   // [한국어] atoi() (_LoadWatchList 문자열 → 정수)
+
+#include "booksim.hpp"           // [한국어] BookSim 공통 정의 (gWatchOut, gTrace 등)
+#include "booksim_config.hpp"    // [한국어] BookSim 설정 클래스 (Configuration)
+#include "trafficmanager.hpp"    // [한국어] TrafficManager 클래스 선언
+#include "batchtrafficmanager.hpp" // [한국어] BatchTrafficManager (sim_type == "batch")
+#include "gputrafficmanager.hpp" // [한국어] GPUTrafficManager (sim_type == "gpgpusim")
+#include "random_utils.hpp"      // [한국어] RandomInt(), RandomFloat()
+#include "vc.hpp"                // [한국어] VC 클래스 및 eVCState
+#include "packet_reply_info.hpp" // [한국어] 패킷 응답 정보 (합성 트래픽 reply 매칭)
 
 TrafficManager * TrafficManager::New(Configuration const & config,
                                      vector<Network *> const & net)

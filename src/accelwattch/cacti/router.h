@@ -61,6 +61,16 @@
  * get_router_area()       : 버퍼 면적 + 크로스바 면적 합산
  * cb_stats()              : Crossbar 클래스를 이용해 크로스바 전력/면적 계산
  * buffer_stats()          : Mat 클래스를 이용해 VC 버퍼(SRAM) 전력/면적 계산
+ *
+ * === AccelWattch XML / gpgpusim.config 연동 ===
+ * MCPAT_Router는 AccelWattch의 NUCA 캐시 전력 모델 일부로 동작한다.
+ * AccelWattch XML(예: accelwattch_XXX.xml)에서 <param name="nuca">,
+ * <param name="cache_policy">, <param name="router"> 등이 NUCA의 사용 여부와
+ * 라우터 자체를 제어하며, io.cc/parameter.cc는 XML/구성 파일의 공정 정보
+ * (technology_node, temperature)를 g_tp.* 및 g_ip->F_sz_um로 반영한다.
+ * gpgpusim.config의 --power_config_name <xml> 옵션이 AccelWattch 초기화 경로를
+ * 트리거하여, 시뮬레이션 시작 단계에서 Nuca::sim_nuca()가 본 라우터 모델을
+ * 인스턴스화한다.
  */
 
 #ifndef __ROUTER_H__
